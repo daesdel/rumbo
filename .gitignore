@@ -11,4 +11,5 @@ __pycache__/
 
 # Cosas del entorno, no del proyecto
 .DS_Store
-.freebuff/
+.freebuff
+HANDOFF.md
