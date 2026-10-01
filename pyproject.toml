@@ -1,0 +1,21 @@
+[project]
+name = "rumbo"
+version = "1.1.1"
+description = "Panel local de tu patrimonio neto: fondos, ETFs, acciones, cripto y más"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+    "openpyxl>=3.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
