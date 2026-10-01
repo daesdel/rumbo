@@ -81,6 +81,31 @@ def test_referer_de_otra_web_rechazado(cliente):
     assert r.status_code == 403
 
 
+# ------------------------------------------------- proxy inverso (Pangolin)
+# En tests, conftest.py fija PATRIMONIO_ORIGENES=https://rumbo.daesdel.es
+
+def test_host_del_proxy_publico_lo_deja_pasar(cliente):
+    r = cliente.get("/api/ping", base_url="https://rumbo.daesdel.es/")
+    assert r.status_code == 200
+
+
+def test_origin_del_proxy_en_post_lo_deja_pasar(cliente):
+    r = cliente.post("/api/ping", headers={"Origin": "https://rumbo.daesdel.es"})
+    assert r.status_code != 403
+
+
+def test_referer_del_proxy_lo_deja_pasar(cliente):
+    r = cliente.post("/api/ping", headers={"Referer": "https://rumbo.daesdel.es/api/x"})
+    assert r.status_code != 403
+
+
+def test_el_proxy_no_abre_la_puerta_a_cualquier_dominio(cliente):
+    # la lista es cerrada: otro subdominio igual de "bonito" sigue fuera
+    assert cliente.get("/api/ping", base_url="https://otro.daesdel.es/").status_code == 403
+    assert cliente.post("/api/ping",
+                        headers={"Origin": "https://evil.daesdel.es"}).status_code == 403
+
+
 # ---------------------------------------------------------------- API
 
 def test_ping(cliente):

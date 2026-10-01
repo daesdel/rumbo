@@ -1,0 +1,20 @@
+# Despliegue en el servidor (LXC/VM):
+#     docker compose up -d --build
+# El puerto8765 solo hace falta que lo alcance Pangolin por la LAN/VPN
+# (origen http://<IP-del-contenedor>:8765); el router no lo publica a internet.
+services:
+  rumbo:
+    build: .
+    container_name: rumbo
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # Dominio público desde el que se entra (cámbialo si usas otro subdominio).
+      # Debe coincidir con el sitio que crees en Pangolin.
+      PATRIMONIO_ORIGENES: "https://rumbo.daesdel.es"
+    volumes:
+      - rumbo_datos:/app/mis_datos
+
+volumes:
+  rumbo_datos:

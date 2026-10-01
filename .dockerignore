@@ -1,0 +1,15 @@
+# El contexto de build nunca debe llevar datos ni entorno:
+# mis_datos (cartera real) no entra en la imagen.
+.git
+.freebuff
+.venv
+.venv-pip
+mis_datos
+docs
+tests
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.DS_Store
+*.tmp

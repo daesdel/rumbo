@@ -30,6 +30,10 @@ WEB = os.path.join(RAIZ, "app", "web")
 DATOS = os.environ.get("PATRIMONIO_DATOS") or os.path.join(RAIZ, "mis_datos")
 DEMO = os.path.join(RAIZ, "demo", "cartera.json")
 PUERTO = int(os.environ.get("PATRIMONIO_PUERTO") or 8765)
+# En qué interfaz escucha. Por defecto SOLO este ordenador; en un contenedor
+# se pone PATRIMONIO_HOST=0.0.0.0 (combinado con PATRIMONIO_ORIGENES y con el
+# cortafuegos o la red interna de Docker: nunca publicar el puerto a internet).
+HOST = os.environ.get("PATRIMONIO_HOST") or "127.0.0.1"
 HORAS_PRECIOS = 6          # al arrancar, se actualizan si tienen más de esto
 
 app = Flask(__name__, static_folder=None)
@@ -53,15 +57,28 @@ cerrojo = threading.RLock()  # el motor no admite dos cálculos (ni dos escritur
 HOSTES_OK = ("127.0.0.1", "localhost", "::1", "[::1]")
 PUERTO_ACTIVO = None   # lo fija main() con el puerto que queda escuchando
 
+# Excepción para proxy inverso (Pangolin, nginx…): los Host y Origin que
+# coincidan con estos orígenes también entran, p. ej.
+#     PATRIMONIO_ORIGENES=https://rumbo.daesdel.es        (coma si hay varios)
+# Sin esta variable el comportamiento es el de siempre: solo este ordenador.
+_ext = [urllib.parse.urlsplit(o.strip().rstrip("/"))
+        for o in os.environ.get("PATRIMONIO_ORIGENES", "").split(",") if o.strip()]
+ORIGENES = tuple(f"{p.scheme}://{p.netloc}".lower() for p in _ext)
+HOSTES_EXTRAS = frozenset(x for p in _ext
+                          for x in (p.netloc.lower(), (p.hostname or "").lower()) if x)
+
 
 def _host_valido(host):
-    """¿Ese Host (o el netloc de un Origin) es este ordenador y este puerto?"""
+    """¿Ese Host (o el netloc de un Origin) es este ordenador, este puerto
+    o un orígen de proxy inverso permitido?"""
     h = (host or "").strip().lower()
     if h.startswith("["):                      # IPv6: [::1]:8765
         nombre, _, resto = h.partition("]")
         nombre, puerto = nombre + "]", resto[1:] if resto.startswith(":") else ""
     else:
         nombre, _, puerto = h.partition(":")
+    if nombre in HOSTES_EXTRAS:                # p. ej. rumbo.daesdel.es vía Pangolin
+        return True
     if nombre not in HOSTES_OK:
         return False
     if puerto and (not puerto.isdigit()
@@ -71,7 +88,10 @@ def _host_valido(host):
 
 
 def _origen_local(url):
-    """¿La URL de Origin (o solo esquema://host de un Referer) es esta app?"""
+    """¿La URL de Origin (o solo esquema://host de un Referer) es esta app
+    o un proxy inverso permitido?"""
+    if (url or "").strip().rstrip("/").lower() in ORIGENES:
+        return True
     try:
         p = urllib.parse.urlsplit(url)
         if p.scheme != "http" or not _host_valido(p.netloc):
@@ -551,7 +571,7 @@ def main():
     srv = None
     for puerto in range(PUERTO, PUERTO + 10):
         try:
-            srv = make_server("127.0.0.1", puerto, app, threaded=True)
+            srv = make_server(HOST, puerto, app, threaded=True)
             break
         except OSError:
             continue
