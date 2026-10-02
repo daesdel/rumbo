@@ -268,11 +268,48 @@ class Resolutor:
     def __init__(self, cfg, plan, carpeta):
         self.cfg, self.plan, self.carpeta = cfg, plan, carpeta
         self.cache, self.series, self.frescas = {}, {}, set()
+        self.fallos = {}   # clave de producto -> mensaje, para avisar también en las filas siguientes
+
+    @staticmethod
+    def _datos_fila(nombre, identificador, r):
+        fi = r.get("ficha") or {}
+        return {"nombre": nombre or r.get("nombre") or r["codigo"], "tipo": r["tipo"],
+                "identificador": identificador.strip(), "fuente": r["fuente"], "codigo": r["codigo"],
+                "moneda": r.get("moneda") or "EUR", "vivo": r.get("vivo") or "",
+                "ter": fi.get("ter"), "riesgo": fi.get("riesgo"), "clase": fi.get("clase") or "",
+                "gestora": fi.get("gestora") or "", "largoPlazo": True}
+
+    @staticmethod
+    def _nombre_cercano(nombre):
+        """Si el identificador no está en los buscadores, el nombre de la fila puede
+        encontrar el producto (p. ej. «NVIDIA» -> NVDA). Solo se acepta un resultado
+        cuyo nombre coincida con el dado, y de esos se queda con la cotización
+        principal: valores, ETF o fondos antes que criptomonedas tokenizadas, el
+        nombre que empieza por lo que has escrito y la línea original (NVDA) antes
+        que una línea secundaria (NVD.DE en Xetra)."""
+        nom = sin_tildes(nombre or "").strip().lower()
+        if len(nom) < 3:
+            return None
+        try:
+            res = buscar.buscar(nombre)
+        except Exception:
+            return None
+        mejores = []
+        for i, r in enumerate(res or []):
+            otro = sin_tildes(r.get("nombre") or "").strip().lower()
+            if len(otro) >= 3 and (nom in otro or otro in nom):
+                clave = (r.get("tipo") not in ("accion", "etf", "fondo"),
+                         not otro.startswith(nom), "." in (r.get("codigo") or ""), i)
+                mejores.append((clave, r))
+        return min(mejores, key=lambda x: x[0])[1] if mejores else None
 
     def producto(self, fila, identificador, nombre, tipo_prod):
         clave = ((identificador or "").strip().upper(), sin_tildes(nombre) if not identificador else "")
         if clave in self.cache:
-            return self.cache[clave]
+            ref = self.cache[clave]
+            if not ref:   # ya falló antes: se avisa también en esta fila, no se descarta en silencio
+                self.plan.error(fila, self.fallos.get(clave, f"No encuentro «{identificador}»."))
+            return ref
         ref = None
         existente = _producto_existente(self.cfg, identificador, nombre)
         if existente:
@@ -281,30 +318,33 @@ class Resolutor:
             n_fallos = len(buscar.FALLOS)
             res = buscar.buscar(identificador)
             if not res and buscar.hubo_fallos_desde(n_fallos):
-                self.plan.error(fila, f"No he podido consultar «{identificador}» en internet ahora mismo "
+                self.fallos[clave] = (f"No he podido consultar «{identificador}» en internet ahora mismo "
                                       "(la conexión ha fallado o Yahoo/Morningstar no han respondido). "
                                       "Comprueba tu conexión y vuelve a pulsar «Previsualizar»: suele bastar "
                                       "con intentarlo otra vez.")
+                self.plan.error(fila, self.fallos[clave])
                 ref = None
             elif res:
-                r = res[0]
-                fi = r.get("ficha") or {}
-                datos = {"nombre": nombre or r.get("nombre") or r["codigo"], "tipo": r["tipo"],
-                         "identificador": identificador.strip(), "fuente": r["fuente"], "codigo": r["codigo"],
-                         "moneda": r.get("moneda") or "EUR", "vivo": r.get("vivo") or "",
-                         "ter": fi.get("ter"), "riesgo": fi.get("riesgo"), "clase": fi.get("clase") or "",
-                         "gestora": fi.get("gestora") or "", "largoPlazo": True}
-                ref = self._nuevo(datos, r)
+                ref = self._nuevo(self._datos_fila(nombre, identificador, res[0]), res[0])
             else:
-                self.plan.error(fila, f"No encuentro «{identificador}» con precio en internet. Si no cotiza, "
-                                      "créalo en Productos con «Valor anotado a mano» y ese mismo "
-                                      "identificador, y vuelve a importar.")
+                # Algunos ISIN no están indexados por los buscadores (p. ej. US6706661040,
+                # el de NVIDIA): se reintenta con el nombre de la fila.
+                otro = self._nombre_cercano(nombre)
+                if otro:
+                    ref = self._nuevo(self._datos_fila(nombre, identificador, otro), otro)
+                else:
+                    self.fallos[clave] = (f"No encuentro «{identificador}» con precio en internet. Si no cotiza, "
+                                          "créalo en Productos con «Valor anotado a mano» y ese mismo "
+                                          "identificador, y vuelve a importar.")
+                    self.plan.error(fila, self.fallos[clave])
+                    ref = None
         elif nombre:
             tipo = tipo_prod if tipo_prod in motor.TIPOS else "otro"
             ref = self._nuevo({"nombre": nombre, "tipo": tipo, "fuente": "manual",
                                "largoPlazo": tipo not in ("efectivo", "deuda")}, None)
         else:
-            self.plan.error(fila, "No tiene identificador ni nombre: no sé de qué producto es.")
+            self.fallos[clave] = "No tiene identificador ni nombre: no sé de qué producto es."
+            self.plan.error(fila, self.fallos[clave])
         self.cache[clave] = ref
         return ref
 

@@ -7,6 +7,7 @@ completo del panel sin salir a internet (descargar=False).
 """
 import copy
 import datetime as dt
+import json
 
 import pytest
 
@@ -109,6 +110,87 @@ def test_mover_fin_de_semana():
     salida = motor.mover_fin_de_semana(serie)
     assert "2025-01-11" not in salida
     assert salida["2025-01-10"] == 1.0
+
+
+# ------------------------------------------------- divisas (Yahoo a diario)
+def _payload(granularidad, fechas, cierres):
+    return {"chart": {"result": [{
+        "meta": {"dataGranularity": granularidad},
+        "timestamp": [int(dt.datetime.fromisoformat(f).timestamp()) for f in fechas],
+        "indicators": {"quote": [{"close": cierres}]}}]}}
+
+
+class _Respuesta:
+    def __init__(self, datos):
+        self._datos = json.dumps(datos).encode("utf-8")
+
+    def read(self):
+        return self._datos
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _fija_cache(monkeypatch, tmp_path, serie):
+    (tmp_path / "USDEUR_X.json").write_text(json.dumps(serie), encoding="utf-8")
+    monkeypatch.setattr(motor, "CACHE", str(tmp_path))
+    monkeypatch.setattr(motor, "SIN_RED", False)
+
+
+def test_yahoo_da_la_divisa_mensual_y_se_vuelve_a_pedir_a_diario(monkeypatch, tmp_path):
+    # range=max trae la divisa con un punto por mes: no sirve para convertir
+    # un importe del día 17. Tiene que repetir la petición acotando el periodo.
+    mensual = _payload("1mo", ["2025-01-01", "2025-02-01"], [0.9, 0.91])
+    diario = _payload("1d", ["2025-01-01", "2025-01-02", "2025-01-03"], [0.9, 0.92, 0.93])
+    llamadas = []
+
+    def fake(req, timeout=None):
+        llamadas.append(req.full_url)
+        return _Respuesta(diario if "period1" in req.full_url else mensual)
+
+    monkeypatch.setattr(motor.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(motor, "SOLO_FALTAN", False)
+    _fija_cache(monkeypatch, tmp_path, {})
+
+    serie = motor.descargar_serie("USDEUR=X")
+    assert len(llamadas) == 2
+    assert "period1" in llamadas[1]
+    assert serie["2025-01-02"] == 0.92            # cierres diarios, no uno por mes
+    assert motor.valor_en(serie, dt.date(2025, 1, 3), margen=6) == 0.93
+
+
+def test_cache_diaria_se_reutiliza_sin_volver_a_red(monkeypatch, tmp_path):
+    serie = {f"{a}-{m:02d}-{d:02d}": 0.9 for a in (2024, 2025) for m in range(1, 13)
+             for d in range(1, 26)}                   # ~250 puntos al año
+    _fija_cache(monkeypatch, tmp_path, serie)
+    monkeypatch.setattr(motor, "SOLO_FALTAN", True)
+
+    def no_debe_llamar(*args, **kwargs):
+        raise AssertionError("no debería ir a internet: la cache ya es diaria")
+
+    monkeypatch.setattr(motor.urllib.request, "urlopen", no_debe_llamar)
+    assert motor.descargar_serie("USDEUR=X") == serie
+
+
+def test_cache_mensual_guardada_de_antes_se_vuelve_a_descargar(monkeypatch, tmp_path):
+    # La cache que quedó de la versión anterior: un punto por mes durante años.
+    mensual = {f"{a}-{m:02d}-01": 0.9 for a in range(2020, 2026) for m in range(1, 13)}
+    _fija_cache(monkeypatch, tmp_path, mensual)
+    monkeypatch.setattr(motor, "SOLO_FALTAN", True)
+    diario = _payload("1d", ["2025-01-16", "2025-01-17"], [0.9, 0.97])
+    llamadas = []
+
+    def fake(req, timeout=None):
+        llamadas.append(req.full_url)
+        return _Respuesta(diario)
+
+    monkeypatch.setattr(motor.urllib.request, "urlopen", fake)
+    serie = motor.descargar_serie("USDEUR=X")
+    assert llamadas                         # la cache mensual no se da por buena
+    assert serie["2025-01-17"] == 0.97
 
 
 # ---------------------------------------------------------------- panel

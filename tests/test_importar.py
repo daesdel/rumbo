@@ -130,6 +130,55 @@ def test_producto_sin_identificador_ni_nombre_es_error(tmp_path):
     assert any("identificador" in e["mensaje"] for e in plan.errores)
 
 
+def _candidato_nvda():
+    return {"fuente": "yahoo", "codigo": "NVDA", "nombre": "NVIDIA Corporation",
+            "tipo": "accion", "identificador": "US6706661040", "vivo": None,
+            "moneda": "USD", "precio": 100.0, "fecha": "2026-10-02", "mercado": "NasdaqGS"}
+
+
+def _fila(fecha, ident, nombre="", unidades="4"):
+    return {"fecha": fecha, "identificador": ident, "nombre": nombre,
+            "tipo_producto": "accion", "tipo_movimiento": "compra",
+            "unidades": unidades, "importe": "500", "moneda": "EUR", "comision": "0"}
+
+
+def test_isin_no_indexado_se_resuelve_con_el_nombre_de_la_fila(monkeypatch, tmp_path):
+    # US6706661040 (NVIDIA) no está en los buscadores: el nombre «NVIDIA» sí
+    # lleva a NVDA, y el ISIN se conserva como identificador del producto.
+    consultas = []
+
+    def busca(q):
+        consultas.append(q)
+        return [_candidato_nvda()] if q == "NVIDIA" else []
+
+    monkeypatch.setattr(importar.buscar, "buscar", busca)
+    cfg = _cartera()
+    plan = importar.preparar_tabla(cfg, [(2, _fila("2025-01-28", "US6706661040", "NVIDIA"))], str(tmp_path))
+    assert not plan.errores
+    nuevo = plan.productos_nuevos[0]["datos"]
+    assert nuevo["codigo"] == "NVDA"
+    assert nuevo["identificador"] == "US6706661040"
+    assert "US6706661040" in consultas and "NVIDIA" in consultas
+
+
+def test_el_nombre_solo_se_acepta_si_coincide_con_el_resultado(monkeypatch, tmp_path):
+    # Un resultado que no lleva que ver con el nombre no se acepta.
+    ajeno = {**_candidato_nvda(), "codigo": "OTRA", "nombre": "Otra Cosas S.A."}
+    monkeypatch.setattr(importar.buscar, "buscar", lambda q: [] if q.startswith("US") else [ajeno])
+    plan = importar.preparar_tabla(_cartera(), [(2, _fila("2025-01-28", "US6706661040", "NVIDIA"))],
+                                   str(tmp_path))
+    assert any("US6706661040" in e["mensaje"] for e in plan.errores)
+
+
+def test_un_producto_no_encontrado_se_avisa_en_todas_sus_filas(monkeypatch, tmp_path):
+    # Antes solo la primera fila avisaba: las demás se descartaban en silencio.
+    monkeypatch.setattr(importar.buscar, "buscar", lambda q: [])
+    filas = [(2, _fila("2025-01-28", "ZZZZNOEXISTE")), (9, _fila("2025-03-03", "ZZZZNOEXISTE"))]
+    plan = importar.preparar_tabla(_cartera(), filas, str(tmp_path))
+    assert [e["fila"] for e in plan.errores] == [2, 9]
+    assert all("ZZZZNOEXISTE" in e["mensaje"] for e in plan.errores)
+
+
 def test_aplicar_no_duplica_la_misma_fila_dos_veces(tmp_path):
     cfg = _cartera()
     filas = [(2, {"fecha": "2025-03-10", "nombre": "Cuenta del banco",

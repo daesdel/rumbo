@@ -100,21 +100,46 @@ def r4(x):
 
 # ---------------------------------------------------------------- Yahoo
 
+def _cache_es_diaria(serie):
+    """False si la cache guardada esta demasiado dispersa (mensual o semanal).
+
+    Yahoo agrega a mensual los rangos largos de divisas: un punto por mes no
+    sirve para convertir un importe de mediados de mes, asi que en ese caso
+    merece la pena volver a descargar en vez de quedarse con la cache.
+    """
+    if not serie or len(serie) < 40:
+        return False
+    claves = sorted(serie)
+    anos = max(1.0, (dt.date.fromisoformat(claves[-1]) - dt.date.fromisoformat(claves[0])).days / 365.25)
+    return len(serie) / anos >= 60
+
+
 def descargar_serie(simbolo, anos=None):
     """Devuelve {fecha_iso: cierre} descargando de Yahoo, con cache en disco."""
     os.makedirs(CACHE, exist_ok=True)
     ruta = os.path.join(CACHE, re.sub(r"[^A-Za-z0-9._-]", "_", simbolo) + ".json")
     previo = lee_cache(ruta)
-    if SIN_RED or (SOLO_FALTAN and previo):
+    if SIN_RED or (SOLO_FALTAN and previo and _cache_es_diaria(previo)):
         return previo
 
-    url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
-           f"{urllib.parse.quote(simbolo)}?range={f'{anos}y' if anos else 'max'}&interval=1d")
-    try:
+    def pide(params):
+        url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+               f"{urllib.parse.quote(simbolo)}?" + urllib.parse.urlencode(params))
         req = urllib.request.Request(url, headers=UA)
         with urllib.request.urlopen(req, timeout=30) as resp:
-            bruto = json.loads(resp.read().decode("utf-8", "replace"))
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    try:
+        bruto = pide({"range": f"{anos}y" if anos else "max", "interval": "1d"})
         res = bruto["chart"]["result"][0]
+        if res["meta"].get("dataGranularity") != "1d":
+            # Con range=muchos anyos Yahoo devuelve la serie mensual (1mo) de las
+            # divisas: un punto por mes. Se vuelve a pedir acotando el periodo,
+            # que si trae sesiones diarias.
+            fin = int(dt.datetime.now().timestamp()) + 86400
+            bruto = pide({"period1": fin - int((anos or 30) * 366 * 86400),
+                          "period2": fin, "interval": "1d"})
+            res = bruto["chart"]["result"][0]
         cierres = res["indicators"]["quote"][0].get("close", [])
         nuevo = {}
         for ts, c in zip(res.get("timestamp", []), cierres):
