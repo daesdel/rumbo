@@ -24,6 +24,47 @@ def puerto_activo():
     s.PUERTO_ACTIVO = anterior
 
 
+# ---------------------------------------------------------------- /datos.js
+
+def test_datos_js_se_recalcula_si_el_calculo_guardado_es_null(cliente):
+    """Un 'null' guardado (cartera que no pudo calcularse) no debe dejar la app
+    pillada: la siguiente carga recalcula al vuelo."""
+    import json
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    try:
+        with open(ruta, "w", encoding="utf-8") as f:
+            json.dump({"productos": [
+                            {"id": "c1", "nombre": "Cuenta", "corto": "Cuenta",
+                             "tipo": "efectivo", "fuente": "manual"},
+                            {"id": "f1", "nombre": "Fondo", "corto": "Fondo",
+                             "tipo": "otro", "fuente": "manual", "slot": 1}],
+                        "movimientos": [],
+                        "valoraciones": [
+                            {"id": "v1", "producto": "f1", "fecha": "2025-06-01", "valor": 1000.0},
+                            {"id": "v2", "producto": "c1", "fecha": "2025-06-01", "valor": 500.0}]}, f)
+        with open(calc, "w", encoding="utf-8") as f:
+            f.write("null")
+
+        cuerpo = cliente.get("/datos.js").get_data(as_text=True)
+        assert cuerpo.startswith("window.DATOS = {")     # no "null"
+    finally:
+        if cartera_antes is None:
+            if os.path.exists(ruta):
+                os.remove(ruta)
+        else:
+            s.escribe_json(ruta, cartera_antes)
+        if calc_antes == "ausente":
+            if os.path.exists(calc):
+                os.remove(calc)
+        else:
+            s.escribe_json(calc, calc_antes)
+
+
 # ---------------------------------------------------------------- blindaje
 
 def test_lecturas_solo_desde_este_ordenador(cliente):

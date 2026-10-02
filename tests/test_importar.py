@@ -179,6 +179,72 @@ def test_un_producto_no_encontrado_se_avisa_en_todas_sus_filas(monkeypatch, tmp_
     assert all("ZZZZNOEXISTE" in e["mensaje"] for e in plan.errores)
 
 
+def test_fila_solo_con_nombre_se_busca_en_internet(monkeypatch, tmp_path):
+    # Extractos sin columna de identificador: «Tesla Inc.» debe encontrar TSLA
+    # en vez de crear un producto manual que luego no se valora en el panel.
+    cand = {"fuente": "yahoo", "codigo": "TSLA", "nombre": "Tesla, Inc.", "tipo": "accion",
+            "identificador": "TSLA", "vivo": None, "moneda": "USD",
+            "precio": 300.0, "fecha": "2026-10-02", "mercado": "NasdaqGS"}
+    consultas = []
+
+    def busca(q):
+        consultas.append(q)
+        return [cand] if q == "Tesla Inc." else []
+
+    monkeypatch.setattr(importar.buscar, "buscar", busca)
+    fila = {"fecha": "2025-01-17", "identificador": "", "nombre": "Tesla Inc.",
+            "tipo_producto": "accion", "tipo_movimiento": "compra",
+            "unidades": "1", "importe": "300", "moneda": "EUR", "comision": ""}
+    plan = importar.preparar_tabla(_cartera(), [(2, fila)], str(tmp_path))
+    assert not plan.errores
+    nuevo = plan.productos_nuevos[0]["datos"]
+    assert nuevo["fuente"] == "yahoo" and nuevo["codigo"] == "TSLA"
+    assert consultas == ["Tesla Inc."]          # se busca una sola vez
+
+
+def test_fila_solo_con_nombre_sin_coincidencia_se_crea_manual(monkeypatch, tmp_path):
+    # Nada que se le parezca: sigue siendo manual (un plan de pensiones, una cuenta...).
+    monkeypatch.setattr(importar.buscar, "buscar", lambda q: [_candidato_nvda()])
+    fila = {"fecha": "2025-01-17", "identificador": "", "nombre": "Plan 2040 del banco",
+            "tipo_producto": "pension", "tipo_movimiento": "compra",
+            "unidades": "100", "importe": "500", "moneda": "EUR", "comision": ""}
+    plan = importar.preparar_tabla(_cartera(), [(2, fila)], str(tmp_path))
+    assert not plan.errores
+    nuevo = plan.productos_nuevos[0]["datos"]
+    assert nuevo["fuente"] == "manual"
+
+
+def test_las_cuentas_no_se_bucan_en_internet(monkeypatch, tmp_path):
+    def no_llames(q):
+        raise AssertionError("una cuenta es un saldo, no se busca")
+
+    monkeypatch.setattr(importar.buscar, "buscar", no_llames)
+    fila = {"fecha": "2025-01-17", "identificador": "", "nombre": "Cuenta del banco",
+            "tipo_producto": "efectivo", "tipo_movimiento": "saldo",
+            "unidades": "", "importe": "2500", "moneda": "EUR", "comision": ""}
+    cfg = {"productos": [], "movimientos": [], "valoraciones": []}
+    plan = importar.preparar_tabla(cfg, [(2, fila)], str(tmp_path))
+    assert not plan.errores
+    assert plan.productos_nuevos[0]["datos"]["fuente"] == "manual"
+    assert plan.valoraciones
+
+
+def test_fila_solo_con_nombre_y_sin_conexion_avisa_en_veces_de_crearlo_a_ciegas(monkeypatch, tmp_path):
+    monkeypatch.setattr(importar.buscar, "FALLOS", [])
+
+    def rota(q):
+        importar.buscar.FALLOS.append("yahoo: timeout")
+        return []
+
+    monkeypatch.setattr(importar.buscar, "buscar", rota)
+    fila = {"fecha": "2025-01-17", "identificador": "", "nombre": "Tesla Inc.",
+            "tipo_producto": "accion", "tipo_movimiento": "compra",
+            "unidades": "1", "importe": "300", "moneda": "EUR", "comision": ""}
+    plan = importar.preparar_tabla(_cartera(), [(2, fila)], str(tmp_path))
+    assert any("conexión" in e["mensaje"] for e in plan.errores)
+    assert not plan.productos_nuevos            # no crea un producto manual a ciegas
+
+
 def test_aplicar_no_duplica_la_misma_fila_dos_veces(tmp_path):
     cfg = _cartera()
     filas = [(2, {"fecha": "2025-03-10", "nombre": "Cuenta del banco",

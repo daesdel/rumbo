@@ -191,7 +191,9 @@ def inicio():
 @app.get("/datos.js")
 def datos_js():
     datos = lee_json(ruta_calculado())
-    if datos is None and not os.path.exists(ruta_calculado()):
+    if datos is None:
+        # Nunca colgarse con un "null" guardado: si el cálculo no vale (cartera recién
+        # importada, cálculo interrumpido...), se recalcula al vuelo y sin ir a internet.
         datos = recalcula(descargar=False)
     cuerpo = "window.DATOS = " + json.dumps(datos, ensure_ascii=False, separators=(",", ":")) + ";\n"
     return Response(cuerpo, mimetype="application/javascript",

@@ -61,6 +61,11 @@ def sin_tildes(t):
     return re.sub(r"\s+", " ", t.replace("_", " ")).strip().lower()
 
 
+def _normaliza(t):
+    """Nombre para comparar: sin tildes ni signos («Tesla, Inc.» -> "tesla inc")."""
+    return re.sub(r"[^a-z0-9]+", " ", sin_tildes(t)).strip()
+
+
 def decodifica(crudo):
     """Bytes de un archivo de texto -> str, probando las codificaciones habituales."""
     if isinstance(crudo, str):
@@ -280,28 +285,32 @@ class Resolutor:
                 "gestora": fi.get("gestora") or "", "largoPlazo": True}
 
     @staticmethod
-    def _nombre_cercano(nombre):
-        """Si el identificador no está en los buscadores, el nombre de la fila puede
-        encontrar el producto (p. ej. «NVIDIA» -> NVDA). Solo se acepta un resultado
-        cuyo nombre coincida con el dado, y de esos se queda con la cotización
-        principal: valores, ETF o fondos antes que criptomonedas tokenizadas, el
-        nombre que empieza por lo que has escrito y la línea original (NVDA) antes
-        que una línea secundaria (NVD.DE en Xetra)."""
-        nom = sin_tildes(nombre or "").strip().lower()
+    def _mejor_si_coincide(nombre, res):
+        """Mejor candidato cuyo nombre coincida con el de la fila («NVIDIA» ->
+        NVDA, «Tesla Inc.» -> TSLA). Solo se aceptan coincidencias, y de esas se
+        queda con la cotización principal: valores, ETF o fondos antes que
+        tokenizadas, el nombre que empieza por lo que has escrito y la línea
+        original (NVDA) antes que una secundaria (NVD.DE en Xetra)."""
+        nom = _normaliza(nombre)
         if len(nom) < 3:
-            return None
-        try:
-            res = buscar.buscar(nombre)
-        except Exception:
             return None
         mejores = []
         for i, r in enumerate(res or []):
-            otro = sin_tildes(r.get("nombre") or "").strip().lower()
+            otro = _normaliza(r.get("nombre") or "")
             if len(otro) >= 3 and (nom in otro or otro in nom):
                 clave = (r.get("tipo") not in ("accion", "etf", "fondo"),
                          not otro.startswith(nom), "." in (r.get("codigo") or ""), i)
                 mejores.append((clave, r))
         return min(mejores, key=lambda x: x[0])[1] if mejores else None
+
+    @classmethod
+    def _nombre_cercano(cls, nombre):
+        """Busca por nombre y devuelve el mejor candidato que coincida, o None."""
+        try:
+            res = buscar.buscar(nombre)
+        except Exception:
+            return None
+        return cls._mejor_si_coincide(nombre, res)
 
     def producto(self, fila, identificador, nombre, tipo_prod):
         clave = ((identificador or "").strip().upper(), sin_tildes(nombre) if not identificador else "")
@@ -340,8 +349,31 @@ class Resolutor:
                     ref = None
         elif nombre:
             tipo = tipo_prod if tipo_prod in motor.TIPOS else "otro"
-            ref = self._nuevo({"nombre": nombre, "tipo": tipo, "fuente": "manual",
-                               "largoPlazo": tipo not in ("efectivo", "deuda")}, None)
+            # Solo el nombre (extractos sin ISIN): antes se creaba manual a ciegas y,
+            # sin valores anotados, ni siquiera salía en el panel. Ahora se busca en
+            # internet con el mismo criterio de coincidencia; si no, manual como antes.
+            r = None
+            fallo_red = False
+            if tipo not in almacen.SOLO_SALDO:   # una cuenta no se busca: es un saldo
+                n_fallos = len(buscar.FALLOS)
+                res = buscar.buscar(nombre)
+                if not res and buscar.hubo_fallos_desde(n_fallos):
+                    fallo_red = True
+                    self.fallos[clave] = (f"No he podido consultar «{nombre}» en internet ahora mismo "
+                                          "(la conexión ha fallado o Yahoo/Morningstar no han respondido). "
+                                          "Comprueba tu conexión y vuelve a pulsar «Previsualizar»: suele bastar "
+                                          "con intentarlo otra vez.")
+                    self.plan.error(fila, self.fallos[clave])
+                else:
+                    r = self._mejor_si_coincide(nombre, res)
+            if fallo_red:
+                ref = None
+            elif r:
+                ident = (identificador or "").strip() or (r.get("identificador") or "")
+                ref = self._nuevo(self._datos_fila(nombre, ident, r), r)
+            else:
+                ref = self._nuevo({"nombre": nombre, "tipo": tipo, "fuente": "manual",
+                                   "largoPlazo": tipo not in ("efectivo", "deuda")}, None)
         else:
             self.fallos[clave] = "No tiene identificador ni nombre: no sé de qué producto es."
             self.plan.error(fila, self.fallos[clave])
