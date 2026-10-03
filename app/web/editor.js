@@ -176,6 +176,7 @@
     $("#edCuerpo").innerHTML = ({ productos: vistaProductos, movimientos: vistaMovimientos, saldos: vistaSaldos,
       importar: vistaImportar, copias: vistaCopias }[E.vista] || vistaProductos)();
     if (E.vista === "importar" || E.vista === "copias") conectaImportar();
+    if (E.vista === "saldos") conectaSaldos();
     const filtro = $("#edFiltro");
     if (filtro) filtro.onchange = e => { E.filtro = e.target.value; pinta(); };
   }
@@ -480,8 +481,90 @@
     return `<section class="tarjeta"><header><h2>Saldos y valores</h2>
         <span class="subt">Lo que no tiene precio en internet. Cuanto más a menudo lo anotes (una vez al mes basta),
         mejor sale su curva.</span><span class="sp"></span>
-        <button class="btn prim" data-acc="todosValores">Anotar todos de una vez</button></header></section>
-      <div class="saldos">${tarjetas}</div>`;
+        <button class="btn prim" data-acc="todosValores">Anotar todos de una vez</button>
+        <a class="btn" href="api/valores/plantilla" download>Descargar plantilla CSV</a>
+        <button class="btn" data-acc="cargarPlantilla">Cargar plantilla</button></header>
+      <input type="file" id="plantArchivo" accept=".csv,text/csv" hidden>
+      <div class="imErr" id="plantErr" hidden></div></section>
+      <div class="saldos">${tarjetas}</div>
+      ${vistaSinCotizacion()}`;
+  }
+
+  /* --- valores que no se pueden bajar de internet: edición y URL de fuente --- */
+  function sinCotizacion() {
+    return E.cfg.productos.filter(p => p.fuente === "manual" && !soloSaldo(p));
+  }
+  const ultimoValor = id => E.cfg.valoraciones
+    .filter(v => v.producto === id).sort((a, b) => a.fecha < b.fecha ? 1 : -1)[0];
+
+  function vistaSinCotizacion() {
+    const lista = sinCotizacion();
+    if (!lista.length) return "";
+    const filas = lista.map(p => {
+      const u = ultimoValor(p.id);
+      return `<tr>
+        <td style="text-align:left"><i class="pt" style="background:var(--s${p.slot || 1})"></i> ${esc(nombre(p))}
+          <small class="subt">${esc(E.tipos[p.tipo] || "")}${p.moneda && p.moneda !== "EUR" ? " · " + esc(p.moneda) : ""}</small></td>
+        <td>${u ? fecha(u.fecha) : '<span class="neg">sin valores</span>'}</td>
+        <td>${u ? eur(u.valor) : "—"}</td>
+        <td style="text-align:left"><input type="url" data-url="${esc(p.id)}" value="${esc(p.urlFuente || "")}"
+          placeholder="https://…" style="width:100%" spellcheck="false"></td>
+        <td class="acc">
+          <button data-acc="guardarUrl" data-id="${esc(p.id)}">Guardar URL</button>
+          <a class="btn" href="api/valores/plantilla?producto=${encodeURIComponent(p.id)}" download>Plantilla</a>
+          <button data-acc="nuevoValor" data-id="${esc(p.id)}">Anotar fecha y valor</button>
+        </td></tr>`;
+    }).join("");
+    return `<section class="tarjeta" style="margin-top:16px">
+      <header><h2>Valores sin cotización automática</h2>
+        <span class="subt">Planes, oro, fondos sin precio en internet… Anota fecha y valor, o pon una URL
+        y la app leerá el precio de ahí cada vez que actualices.</span></header>
+      <div class="tablaEnv"><table class="dt"><thead><tr>
+        <th style="text-align:left">Producto</th><th>Última fecha</th><th>Último valor</th>
+        <th style="text-align:left">URL de la fuente (opcional)</th><th></th></tr></thead>
+        <tbody>${filas}</tbody></table></div>
+      <p class="ayuda" style="margin-top:12px">La plantilla <code>fecha;valor</code> de cada fila actualiza solo a ese producto;
+        la general trae <code>producto;fecha;valor</code> para actualizar varios de una vez.</p>
+    </section>`;
+  }
+
+  async function guardarUrl(id) {
+    const inp = document.querySelector(`input[data-url="${CSS.escape(id)}"]`);
+    if (!inp) return;
+    const url = inp.value.trim();
+    try {
+      const j = await api("POST", `api/productos/${encodeURIComponent(id)}/url`, { urlFuente: url });
+      E.cfg = j.cartera;
+      window.EDITOR_SUCIO = true;
+      avisa([url ? "URL guardada: el precio se leerá al pulsar «Actualizar precios» del panel."
+                : "URL quitada."]);
+      pinta();
+    } catch (x) { alert(x.message); }
+  }
+
+  function conectaSaldos() {
+    const inp = $("#plantArchivo");
+    if (inp) inp.onchange = async () => {
+      const fallo = $("#plantErr");
+      fallo.hidden = true;
+      if (!inp.files.length) return;
+      const fd = new FormData();
+      fd.append("archivos", inp.files[0]);
+      try {
+        const r = await fetch("api/valores/plantilla", { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error((j.errores || ["No he podido leer la plantilla."]).join("\n"));
+        E.cfg = j.cartera;
+        window.EDITOR_SUCIO = true;
+        avisa([`Guardados ${j.guardados} ${j.guardados === 1 ? "valor" : "valores"}.`]
+          .concat(j.avisos || []));
+        pinta();
+      } catch (x) {
+        fallo.textContent = x.message;
+        fallo.hidden = false;
+      }
+      inp.value = "";
+    };
   }
 
   function formValor(v, productoId) {
@@ -543,6 +626,7 @@
   /* ---------------------------------------------- importar */
   const IMP = { origen: "myinvestor", informe: null, token: null, hecho: null, prompt: null, archivos: [] };
   const ICONOS = {
+    portfolio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11M14 9v11"/></svg>',
     myinvestor: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-5 7 5v11M9 21v-6h6v6"/></svg>',
     plantilla: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>',
     ia: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 17l.8 2.2L22 20l-2.2.8L19 23l-.8-2.2L16 20l2.2-.8z"/></svg>',
@@ -561,7 +645,17 @@
     const op = (id, titulo, texto) => `<button class="imOp${IMP.origen === id ? " sel" : ""}" data-acc="imOrigen" data-id="${id}">
       <span class="ic">${ICONOS[id]}</span><b>${titulo}</b><small>${texto}</small></button>`;
     let paso;
-    if (IMP.origen === "myinvestor") {
+    if (IMP.origen === "portfolio") {
+      paso = `<ol class="pasos">
+          <li>Abre <b>Portfolio Performance</b> en el ordenador.</li>
+          <li>Ve a <b>Archivo → Exportar → Todas las transacciones…</b> (o «Export all transactions»)
+            y guarda el archivo <b>CSV</b>.</li>
+          <li>Arrástralo aquí. Trae cuentas, compras, ventas, dividendos, intereses, impuestos,
+            comisiones, depósitos, transferencias y el efectivo de cada cuenta.</li></ol>
+        ${zona(".csv", false, "Arrastra aquí el CSV de Portfolio Performance")}
+        <p class="ayuda">Sustituye lo que hubiera importado antes con esta misma opción, así que puedes repetirlo
+          cada mes sin duplicar nada. El separador es «;» y los números van con coma decimal.</p>`;
+    } else if (IMP.origen === "myinvestor") {
       paso = `<ol class="pasos">
           <li>Entra en MyInvestor desde el ordenador y abre <b>cada uno de tus fondos</b>.</li>
           <li>Pulsa <b>«Plusvalías y minusvalías»</b> y descarga el <b>CSV</b>. No le cambies el nombre: lleva el ISIN del fondo.</li>
@@ -590,6 +684,7 @@
     return `${exito}<section class="tarjeta"><header><h2>Importar datos</h2>
         <span class="subt">Trae tus movimientos de golpe. Antes de guardar nada verás una vista previa.</span></header>
       <div class="imOps">
+        ${op("portfolio", "Portfolio Performance", "El CSV «Todas las transacciones»")}
         ${op("myinvestor", "MyInvestor", "El CSV de cada fondo")}
         ${op("plantilla", "Plantilla", "Excel o CSV, para cualquier banco")}
         ${op("ia", "Con ayuda de una IA", "Convierte el extracto de tu banco")}
@@ -812,6 +907,8 @@
     editarValor: soloPropio(id => formValor(E.cfg.valoraciones.find(v => v.id === id))),
     borrarValor: soloPropio(borrarValor),
     todosValores: soloPropio(todosValores),
+    cargarPlantilla: soloPropio(() => { const i = $("#plantArchivo"); if (i) i.click(); }),
+    guardarUrl: soloPropio(guardarUrl),
     repartirColores: soloPropio(async () => {
       try {
         const j = await api("POST", "api/repartir-colores");

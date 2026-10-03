@@ -9,6 +9,9 @@ __pycache__/
 *.pyc
 *.tmp
 
+# Caché de precios descargada (dato de ejecución)
+cache/
+
 # Cosas del entorno, no del proyecto
 .DS_Store
 .freebuff

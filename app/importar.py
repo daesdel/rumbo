@@ -246,7 +246,9 @@ class Plan:
         self.productos_nuevos = []   # [{"ref": "nuevo:1", "datos": {...}, "precio": ..., "fecha": ...}]
         self.movimientos = []        # [{"fila", "producto" (id o ref), campos del movimiento, "marcas"}]
         self.valoraciones = []
+        self.cuentas = []            # [{"ref": "cuenta:1", "cuenta": id si ya existía, "datos": {...}}]
         self.reemplazar = []         # [(producto id o ref, origen)]: se borran sus importados previos
+        self.reemplazarTodo = None   # origen: se borran todos los movimientos con ese origen
         self.errores = []            # [{"fila", "mensaje"}]
         self.avisos = []
 
@@ -513,17 +515,559 @@ def preparar_myinvestor(cfg, archivos, carpeta):
     return plan
 
 
+# ---------------------------------------------------------------- Portfolio Performance
+
+# Export «Todas las transacciones» de Portfolio Performance:
+#   Fecha;Tipo;Activo;Títulos;Precio;Cantidad;Comisiones;Impuestos;
+#   Valor neto de transacción;Cuenta;Cuenta de contrapartida;Nota;Fuente
+# Números con coma decimal y punto de miles, a veces con la moneda delante («USD 2.565,00»).
+
+MONEDAS_PP = ("EUR", "USD", "GBP", "CHF", "JPY", "SEK", "NOK", "DKK", "PLN", "CZK",
+              "HUF", "CAD", "AUD", "MXN", "BRL", "TRY", "ZAR")
+
+# tipo_pp -> (tipo de la app, signo del efectivo en la cuenta «Cuenta»)
+PP_TIPOS = {
+    "compra": ("compra", -1), "venta": ("venta", 1),
+    "dividendo": ("dividendo", 1), "cupon": ("dividendo", 1),
+    "intereses": ("interes", 1), "interes": ("interes", 1),
+    "comisiones": ("comision", -1), "comision": ("comision", -1),
+    "impuestos": ("impuesto", -1), "impuesto": ("impuesto", -1),
+    "deposito": ("deposito", 1), "depositos": ("deposito", 1),
+    "retirada": ("retirada", -1), "retiradas": ("retirada", -1),
+    "transferencia": ("transferencia", -1),
+    "transferencia (salida)": ("transferencia", -1),
+    "transferencia (entrada)": ("transferencia", 1),
+    "traspaso": ("traspaso", -1),
+    "traspaso (salida)": ("traspaso", -1),
+    "traspaso (entrada)": ("traspaso", 1),
+    "apertura": ("apertura", 1), "cambio de divisa": ("cambio_divisa", -1),
+    "saldo": ("saldo", 1), "reparto": ("saldo", 1),
+}
+
+# Cómo se llama cada columna en el export (en minúsculas y sin tildes).
+PP_COLUMNAS = {"fecha": "fecha", "tipo": "tipo", "activo": "activo", "titulos": "titulos",
+               "precio": "precio", "cantidad": "cantidad", "comisiones": "comisiones",
+               "impuestos": "impuestos", "cuenta": "cuenta", "nota": "nota", "fuente": "fuente"}
+
+# Fichas de los productos que aparecen en el export. Así no se «adivina» nada:
+# ACCOR y AIRBUS se negocian en euros (no en los ADR en dólares) y «blackrock» es
+# el fondo de MyInvestor, no la acción BLK. Lo que no esté aquí se valora a mano.
+CATALOGO_PP = {
+    "tesla inc": ("accion", "yahoo", "TSLA", "USD"),
+    "nvidia corp": ("accion", "yahoo", "NVDA", "USD"),
+    "microsoft corp": ("accion", "yahoo", "MSFT", "USD"),
+    "amazon com inc": ("accion", "yahoo", "AMZN", "USD"),
+    "costco wholesale corp": ("accion", "yahoo", "COST", "USD"),
+    "unitedhealth group inc": ("accion", "yahoo", "UNH", "USD"),
+    "qualcomm inc": ("accion", "yahoo", "QCOM", "USD"),
+    "lululemon athletica inc": ("accion", "yahoo", "LULU", "USD"),
+    "corteva inc": ("accion", "yahoo", "CTVA", "USD"),
+    "american tower corp": ("accion", "yahoo", "AMT", "USD"),
+    "agnc investment corp": ("accion", "yahoo", "AGNC", "USD"),
+    "ses ai corp": ("accion", "yahoo", "SES", "USD"),
+    "sirius xm holdings inc": ("accion", "yahoo", "SIRI", "USD"),
+    "alphabet inc class c": ("accion", "yahoo", "GOOGL", "USD"),
+    "constellation brands inc class a": ("accion", "yahoo", "STZ", "USD"),
+    "accor sa": ("accion", "yahoo", "AC.PA", "EUR"),
+    "airbus se": ("accion", "yahoo", "AIR.PA", "EUR"),
+    "grifols sa": ("accion", "yahoo", "GRF.MC", "EUR"),
+    "acm research inc class a": ("accion", "yahoo", "1ACMR.MI", "EUR"),
+    "universal music group nv": ("accion", "yahoo", "0VD.HA", "EUR"),
+    "cellnex telecom sa": ("accion", "yahoo", "CLNX.MC", "EUR"),
+    "vinci s a": ("accion", "yahoo", "DG.PA", "EUR"),
+    "bitcoin": ("cripto", "yahoo", "BTC-EUR", "EUR"),
+    "xrp eur": ("cripto", "yahoo", "XRP-EUR", "EUR"),
+    "invesco s p 500 ucits etf": ("etf", "yahoo", "SPXD.MI", "EUR"),
+    "amundi s p 500 swap ucits etf eur acc": ("etf", "yahoo", "500.PA", "EUR"),
+    "amundi msci world ex emu ucits": ("etf", "yahoo", "CM9.PA", "EUR"),
+    "amundi ibex35 ucits etf acc": ("etf", "manual", "", "EUR"),
+    "bnp paribas easy ftse epra nareit eurozone capped ucits etf capitalisation": ("etf", "manual", "", "EUR"),
+    "vanguard s p 500 ucits etf accumulating": ("etf", "manual", "", "EUR"),
+    "ishares msci world sri eur a": ("etf", "manual", "", "EUR"),
+    "fidelity msci euro in pa eur": ("fondo", "manual", "", "EUR"),
+    "fidelity msci jp indx pa eur": ("fondo", "manual", "", "EUR"),
+    "fidelity msci pacf exjp pau": ("fondo", "manual", "", "EUR"),
+    "0p0001xf41 f": ("fondo", "manual", "", "EUR"),
+    "ishares emerging metal myinvestor": ("fondo", "manual", "", "EUR"),
+    "vanguard us equity metal myinvestor": ("fondo", "manual", "", "EUR"),
+    "ishares us equity index fund clase s": ("fondo", "manual", "", "EUR"),
+    "amundi index s p 500 myinvestor": ("fondo", "manual", "", "EUR"),
+    "gx spx quarter tail hedge uc": ("fondo", "manual", "", "EUR"),
+    "blackrock": ("fondo", "manual", "", "EUR"),
+    "plan2040 ing": ("pension", "manual", "", "EUR"),
+    "gold philharmoniker 1oz": ("commodity", "manual", "", "EUR"),
+}
+
+
+def es_portfolio_performance(cabecera):
+    """¿La primera fila es la de un export de Portfolio Performance?"""
+    t = sin_tildes(cabecera).lower()
+    return "fecha" in t and "valor neto" in t and "cuenta" in t
+
+
+def _columnas_pp(cab):
+    idx = {}
+    for i, c in enumerate(cab):
+        if c in PP_COLUMNAS and PP_COLUMNAS[c] not in idx:
+            idx[PP_COLUMNAS[c]] = i
+        elif c.startswith("valor neto") and "neto" not in idx:
+            idx["neto"] = i
+        elif c.startswith("cuenta de contrapartida") and "contrapartida" not in idx:
+            idx["contrapartida"] = i
+    return idx, [k for k in ("fecha", "tipo", "neto", "cuenta") if k not in idx]
+
+
+def _moneda_de(txt, por_defecto=None):
+    """«USD 2.565,00» -> (2565.0, 'USD'); «1.400,00» -> (1400.0, None)."""
+    t = (txt or "").strip()
+    if not t:
+        return None, None
+    m = re.match(r"^([A-Za-z]{3})\s+(.*)$", t)
+    if m and m.group(1).upper() in MONEDAS_PP:
+        return m.group(2), m.group(1).upper()
+    return t, por_defecto
+
+
+def _numero_pp(txt, es_coma):
+    t = (txt or "").replace("€", "").replace("$", "").replace("%", "")
+    t = t.replace("\u00a0", "").replace(" ", "").strip()
+    if not t:
+        return None
+    if not es_coma:
+        try:
+            return float(t.replace(",", ""))
+        except ValueError:
+            return None
+    if not re.fullmatch(r"[-+]?[\d.,]+", t):
+        return None
+    return num_es(t)
+
+
+def leer_portfolio(texto):
+    """Lee el CSV de «Todas las transacciones» de Portfolio Performance.
+
+    Devuelve (filas, error): cada fila es un dict con fecha, tipo, activo, unidades,
+    importes ya parseados y las dos cuentas. Las fechas salen ordenadas de menor a
+    mayor, como pide la regla de importación.
+    """
+    texto = decodifica(texto).replace("\r\n", "\n").replace("\r", "\n")
+    lineas = [l for l in texto.splitlines() if l.strip()]
+    if not lineas:
+        return [], "El archivo está vacío."
+    cab = [sin_tildes(c) for c in next(csv.reader([lineas[0]], delimiter=";"))]
+    if not es_portfolio_performance(";".join(cab)):
+        return [], ("No parece un CSV de Portfolio Performance: me faltan las columnas «Fecha», "
+                    "«Valor neto de transacción» y «Cuenta».")
+    idx, faltan = _columnas_pp(cab)
+    if faltan:
+        return [], "Faltan columnas en la cabecera: " + ", ".join(faltan) + "."
+
+    def celda(f, k, defecto=""):
+        i = idx.get(k)
+        return (f[i] if i is not None and i < len(f) else defecto) or defecto
+
+    brutas = [next(csv.reader([l], delimiter=";")) for l in lineas[1:]]
+    brutas = [f for f in brutas if any((x or "").strip() for x in f)]
+    # ¿Los números vienen con coma decimal (español) o con punto (inglés)?
+    nums = [celda(f, k) for f in brutas for k in ("cantidad", "comisiones", "impuestos", "neto", "precio")]
+    es_coma = any("," in (x or "") for x in nums)
+
+    filas = []
+    for n, f in enumerate(brutas, start=2):
+        fecha = lee_fecha(celda(f, "fecha"))
+        if not fecha:
+            return [], f"La fecha «{celda(f, 'fecha')}» de la fila {n} no se entiende."
+        bruto, mon_bruto = _moneda_de(celda(f, "cantidad"))
+        neto, mon_neto = _moneda_de(celda(f, "neto"))
+        comision, mon_com = _moneda_de(celda(f, "comisiones"))
+        impuestos, mon_imp = _moneda_de(celda(f, "impuestos"))
+        precio, mon_precio = _moneda_de(celda(f, "precio"))
+        valores = {"bruto": _numero_pp(bruto, es_coma), "neto": _numero_pp(neto, es_coma),
+                   "comision": _numero_pp(comision, es_coma), "impuestos": _numero_pp(impuestos, es_coma),
+                   "precio": _numero_pp(precio, es_coma)}
+        if valores["neto"] is None:
+            return [], f"El importe de la fila {n} («{celda(f, 'neto')}») no se entiende."
+        filas.append({
+            "fila": n, "fecha": fecha,
+            "tipo_pp": sin_tildes(celda(f, "tipo")).lower(),
+            "activo": celda(f, "activo").strip(),
+            "unidades": _numero_pp(celda(f, "titulos"), es_coma),
+            "precio": valores["precio"],
+            "bruto": valores["bruto"] or 0.0,
+            "neto": abs(valores["neto"]),
+            "comision": abs(valores["comision"] or 0.0),
+            "impuestos": abs(valores["impuestos"] or 0.0),
+            "moneda": mon_neto or mon_bruto or mon_com or mon_imp or mon_precio,
+            "cuenta": celda(f, "cuenta").strip(),
+            "contrapartida": celda(f, "contrapartida").strip(),
+            "nota": celda(f, "nota").strip(),
+            "fuente": celda(f, "fuente").strip(),
+        })
+    filas.sort(key=lambda x: (x["fecha"], x["fila"]))
+    return filas, None
+
+
+def _tipo_cuenta(nombre):
+    u = sin_tildes(nombre).upper()
+    if "PLAN" in u:
+        return "pension"
+    if "FONDOS" in u or "CARTERA" in u or "MONETARIO" in u:
+        return "fondo"
+    if any(k in u for k in ("TRADE REPUBLIC", "MY INVESTOR", "FREEDOM", "REVOLUT")):
+        return "broker"
+    return "efectivo"
+
+
+def _entidad_cuenta(nombre):
+    u = sin_tildes(nombre).upper()
+    for k, e in (("TRADE REPUBLIC", "Trade Republic"), ("MY INVESTOR", "MyInvestor"),
+                 ("FREEDOM", "Freedom"), ("REVOLUT", "Revolut"), ("ING", "ING")):
+        if k in u:
+            return e
+    return ""
+
+
+def _moneda_por_nombre(nombre):
+    u = sin_tildes(nombre).upper()
+    if "DOLAR" in u or "DOLARES" in u or "USD" in u:
+        return "USD"
+    if "EUR" in u:
+        return "EUR"
+    return "EUR"
+
+
+def _propietario_por_nombre(nombre):
+    return "gina" if "GINA" in sin_tildes(nombre).upper() else "david"
+
+
+def preparar_portfolio(cfg, contenido, carpeta):
+    """CSV de Portfolio Performance -> Plan completo: cuentas, productos, movimientos
+    y saldos de cada cuenta. No consulta internet: las fichas salen de CATALOGO_PP y,
+    si un producto no está, se valora a mano para que tú decidas (aparece en
+    «Valores sin cotización automática»)."""
+    plan = Plan()
+    plan.reemplazarTodo = "portfolio"
+    filas, error = leer_portfolio(contenido)
+    if error:
+        plan.error(1, error)
+        return plan
+    if not filas:
+        plan.error(1, "El archivo no tiene ninguna fila con datos.")
+        return plan
+
+    cambios = {}
+
+    def fx(moneda):
+        if moneda and moneda != "EUR" and moneda not in cambios:
+            cambios[moneda] = motor.serie_cambio(moneda, carpeta)
+        return cambios.get(moneda) or {}
+
+    def a_eur(importe, moneda, fecha):
+        """Importe en su moneda -> euros con el cambio de ese día."""
+        if not importe:
+            return 0.0, 1.0
+        if not moneda or moneda == "EUR":
+            return importe, 1.0
+        t = valor_en(fx(moneda), fecha, margen=6)
+        if not t:
+            return None, None
+        return importe * t, t
+
+    def a_moneda(importe, mon_desde, mon_hasta, fecha):
+        if not mon_desde or not mon_hasta or mon_desde == mon_hasta:
+            return importe
+        eur, _ = a_eur(importe, mon_desde, fecha)
+        if eur is None:
+            return None
+        if mon_hasta == "EUR":
+            return eur
+        t = valor_en(fx(mon_hasta), fecha, margen=6)
+        return eur / t if t else None
+
+    # ---------------------------------------------------------------- cuentas
+    nombres_cuentas = []
+    for f in filas:
+        for nombre in (f["cuenta"], f["contrapartida"]):
+            if nombre and nombre not in nombres_cuentas:
+                nombres_cuentas.append(nombre)
+    # La moneda de cada cuenta: lo que diga su nombre y, si aparece, la de sus importes.
+    monedas_vistas = {n: set() for n in nombres_cuentas}
+    for f in filas:
+        # La moneda del importe es la de la cuenta en la que se registra la operación,
+        # no la de la contrapartida (una transferencia en USD a una cuenta en euros
+        # no convierte la cuenta de euros en una cuenta en dólares).
+        if f["cuenta"] and f["moneda"]:
+            monedas_vistas[f["cuenta"]].add(f["moneda"])
+    ref_cuenta, cuentas_datos = {}, {}
+    for nombre in nombres_cuentas:
+        vistas = monedas_vistas.get(nombre) or set()
+        # Portfolio Performance solo escribe la moneda cuando NO es el euro: si en
+        # una cuenta ningún importe lleva prefijo, todos sus movimientos son en euros
+        # (pasa en las cuentas de Gina, que se llaman «… USD» pero llevan euros).
+        moneda = (sorted(vistas)[0] if len(vistas) == 1
+                  else _moneda_por_nombre(nombre) if vistas else "EUR")
+        ref = f"cuenta:{len(ref_cuenta) + 1}"
+        ref_cuenta[nombre] = ref
+        existente = next((c for c in cfg.get("cuentas", []) if c["nombre"] == nombre), None)
+        datos = {"nombre": nombre, "tipo": _tipo_cuenta(nombre), "moneda": moneda,
+                 "entidad": _entidad_cuenta(nombre), "propietario": _propietario_por_nombre(nombre)}
+        cuentas_datos[ref] = datos
+        plan.cuentas.append({"ref": ref, "cuenta": existente and existente["id"], "datos": datos})
+
+    def cuenta_moneda(nombre):
+        return (cuentas_datos.get(ref_cuenta.get(nombre, "")) or {}).get("moneda") or "EUR"
+
+    def cuenta_propietario(nombre):
+        return (cuentas_datos.get(ref_cuenta.get(nombre, "")) or {}).get("propietario") or "david"
+
+    # ---------------------------------------------------------------- saldos por cuenta
+    saldos = {n: {"serie": {}, "acum": 0.0} for n in nombres_cuentas}
+
+    def mueve(nombre, importe, moneda, fecha, signo):
+        if not nombre or not importe:
+            return
+        destino = cuenta_moneda(nombre)
+        v = a_moneda(importe, moneda, destino, fecha)
+        if v is None:
+            return
+        s = saldos[nombre]
+        s["acum"] = round(s["acum"] + signo * v, 2)
+        s["serie"][fecha] = s["acum"]
+
+    # ---------------------------------------------------------------- productos
+    prod_ref, prod_info = {}, {}
+
+    def producto_de(nombre, fila, moneda_fila):
+        if nombre in prod_ref:
+            return prod_ref[nombre]
+        clave = _normaliza(nombre)
+        ficha = CATALOGO_PP.get(clave)
+        moneda_cuenta = cuenta_moneda(fila["cuenta"]) if fila.get("cuenta") else "EUR"
+        if ficha:
+            tipo, fuente, codigo, moneda = ficha
+        else:
+            tipo, fuente, codigo = "otro", "manual", ""
+            moneda = moneda_fila or moneda_cuenta
+        propietario = cuenta_propietario(fila["cuenta"]) if fila.get("cuenta") else "david"
+        datos = {"nombre": nombre, "corto": " ".join(nombre.split())[:24], "tipo": tipo,
+                 "fuente": fuente, "codigo": codigo, "moneda": moneda, "largoPlazo": True,
+                 "propietario": propietario, "cuenta": ref_cuenta.get(fila.get("cuenta") or "", ""),
+                 "entidad": _entidad_cuenta(fila.get("cuenta") or "")}
+        if fuente == "manual":
+            # Sin precio en internet: se le pone su coste para que no falte nada en el
+            # panel y aparece en «Valores sin cotización automática» para que ajustes tú.
+            datos["revision"] = "valor a coste, pendiente de fijar"
+        existente = _producto_existente(cfg, "", nombre)
+        if existente:
+            datos["id"] = existente["id"]      # se reutiliza y se le actualiza la ficha
+            ref = existente["id"]
+        else:
+            ref = f"nuevo:{len(plan.productos_nuevos) + 1}"
+        plan.productos_nuevos.append({"ref": ref, "datos": datos, "precio": None,
+                                      "monedaPrecio": None, "fecha": None, "mercado": None})
+        prod_ref[nombre] = ref
+        prod_info[ref] = {"nombre": nombre, "manual": (fuente == "manual"), "movs": []}
+        return ref
+
+    # ---------------------------------------------------------------- filas
+    sin_cambio = 0
+    ceros = []
+    for f in filas:
+        tipo, signo = PP_TIPOS.get(f["tipo_pp"], (None, 0))
+        if tipo is None:
+            plan.error(f["fila"], f"El tipo «{celda_tipo(f)}» no lo sé interpretar.")
+            continue
+        if not f["neto"]:
+            ceros.append(f["fila"])       # una comisión de 0,00 no es ningún movimiento
+            continue
+        moneda = f["moneda"] or cuenta_moneda(f["cuenta"])
+        importe_eur, tasa = a_eur(f["neto"], moneda, f["fecha"])
+        if importe_eur is None:
+            plan.error(f["fila"], f"No encuentro el cambio de {moneda} a euros del "
+                                  f"{almacen.fmt_fecha(f['fecha'])}.")
+            sin_cambio += 1
+            continue
+        com_eur, _ = a_eur(f["comision"], moneda, f["fecha"])
+        imp_eur, _ = a_eur(f["impuestos"], moneda, f["fecha"])
+        # Portfolio Performance anota la retención de unos dividendos en «Impuestos»
+        # y la de otros en «Comisiones». Un dividendo no tiene comisión: se unifica
+        # en impuestos para que los totales coincidan con los de PP.
+        if tipo == "dividendo" and com_eur and not imp_eur:
+            imp_eur, com_eur = com_eur, 0.0
+        ref_c = ref_cuenta.get(f["cuenta"])
+        ref_cp = ref_cuenta.get(f["contrapartida"])
+        hay_cp = bool(f["contrapartida"]) and f["contrapartida"] != f["cuenta"]
+        nota = f["nota"]
+
+        # --- efectivo en las cuentas: se recalcula siempre, igual que en Portfolio Performance
+        if tipo == "compra":
+            mueve(f["contrapartida"] if hay_cp else f["cuenta"], f["neto"], moneda, f["fecha"], -1)
+        elif tipo == "venta":
+            mueve(f["contrapartida"] if hay_cp else f["cuenta"], f["neto"], moneda, f["fecha"], 1)
+        elif tipo == "transferencia":
+            mueve(f["cuenta"], f["neto"], moneda, f["fecha"], signo)
+            if hay_cp:
+                v = a_moneda(f["neto"], moneda, cuenta_moneda(f["contrapartida"]), f["fecha"])
+                if v is not None:
+                    s = saldos[f["contrapartida"]]
+                    s["acum"] = round(s["acum"] - signo * v, 2)
+                    s["serie"][f["fecha"]] = s["acum"]
+        elif tipo != "traspaso":
+            mueve(f["cuenta"], f["neto"], moneda, f["fecha"], signo)
+
+        # --- el movimiento en sí
+        es_fx = tipo == "comision" and sin_tildes(f["activo"]).lower() in ("eur usd", "usd eur")
+        ref_p = producto_de(f["activo"], f, moneda) if f["activo"] and not es_fx else None
+        if not ref_p and not ref_c:
+            plan.error(f["fila"], "No tiene ni producto ni cuenta: no sé dónde apuntarlo.")
+            continue
+        marcas = []
+        if moneda != "EUR":
+            marcas.append(f"convertido de {moneda}")
+        if es_fx:
+            marca_nota = "Cambio de divisa " + f["activo"]
+            nota = (nota + " · " + marca_nota).strip(" ·")
+        mv = {"fila": f["fila"], "fecha": f["fecha"], "tipo": tipo, "producto": ref_p,
+              "unidades": f["unidades"], "importe": round(importe_eur, 2),
+              "importeOriginal": round(f["neto"], 6), "monedaOriginal": moneda,
+              "tipoCambio": round(tasa, 8) if tasa else 1.0,
+              "comision": round(com_eur, 2) if com_eur else None,
+              "impuestos": round(imp_eur, 2) if imp_eur else None,
+              "cuenta": ref_c, "contrapartida": ref_cp if hay_cp else None,
+              "propietario": cuenta_propietario(f["cuenta"]) if f["cuenta"] else None,
+              "nota": nota, "marcas": marcas, "origen": "portfolio", "fuente": f["fuente"]}
+        if hay_cp and moneda != cuenta_moneda(f["contrapartida"]):
+            v = a_moneda(f["neto"], moneda, cuenta_moneda(f["contrapartida"]), f["fecha"])
+            if v is not None:
+                mv["contrapartidaImporte"] = round(v, 6)
+                mv["contrapartidaMoneda"] = cuenta_moneda(f["contrapartida"])
+        plan.movimientos.append(mv)
+        if ref_p:
+            prod_info[ref_p]["movs"].append(mv)
+
+    # ---------------------------------------------------------------- saldos -> valoraciones
+    efectivos = []
+    for nombre in nombres_cuentas:
+        serie = saldos[nombre].get("serie") or {}
+        if not serie:
+            continue
+        ultimo = sorted(serie)[-1]
+        if abs(serie[ultimo]) < 0.005:
+            continue          # una cuenta de valores sin efectivo: no es un saldo que mostrar
+        ref = ref_cuenta[nombre]
+        existente = _producto_existente(cfg, "", nombre)
+        p_ref = (existente or {}).get("id") or f"nuevo:{len(plan.productos_nuevos) + 1}"
+        plan.productos_nuevos.append({
+            "ref": p_ref,
+            "datos": {"id": (existente or {}).get("id"), "nombre": nombre,
+                      "corto": " ".join(nombre.split())[:24], "tipo": "efectivo",
+                      "fuente": "manual", "moneda": cuenta_moneda(nombre), "largoPlazo": True,
+                      "propietario": cuenta_propietario(nombre), "cuenta": ref,
+                      "entidad": _entidad_cuenta(nombre)},
+            "precio": None, "monedaPrecio": None, "fecha": None, "mercado": None})
+        efectivos.append((p_ref, serie))
+    for p_ref, serie in efectivos:
+        for fecha in sorted(serie):
+            plan.valoraciones.append({"fila": f"cuenta {p_ref}", "producto": p_ref,
+                                      "fecha": fecha, "valor": round(serie[fecha], 2)})
+
+    # ---------------------------------------------------------------- valor a coste de los manuales
+    for info in prod_info.values():
+        if not info["manual"]:
+            continue
+        movs = sorted(info["movs"], key=lambda m: (m["fecha"], ORDEN_PP.get(m["tipo"], 9)))
+        if not movs:
+            continue
+        lotes, coste, por_fecha = [], 0.0, {}
+        for m in movs:
+            t, u, imp = m["tipo"], float(m.get("unidades") or 0), float(m.get("importe") or 0)
+            if t == "compra":
+                lotes.append([u, imp])
+                coste += imp
+            elif t == "venta":
+                q = u
+                while q > 1e-9 and lotes:
+                    lu, lc = lotes[0]
+                    toma = min(lu, q)
+                    parte = lc * toma / lu if lu else 0.0
+                    q -= toma
+                    coste -= parte
+                    lotes[0] = [lu - toma, lc - parte]
+                    if lotes[0][0] <= 1e-9:
+                        lotes.pop(0)
+            por_fecha[m["fecha"]] = round(max(coste, 0.0), 2)
+        ref = info["movs"][0]["producto"]
+        for fecha in sorted(por_fecha):
+            plan.valoraciones.append({"fila": f"coste {info['nombre']}", "producto": ref,
+                                      "fecha": fecha, "valor": por_fecha[fecha]})
+
+    if sin_cambio:
+        plan.avisos.append(f"{sin_cambio} filas en {', '.join(cambios)} se han dejado fuera por no "
+                           "encontrar el cambio de esa divisa a euros.")
+    if ceros:
+        plan.avisos.append(f"{len(ceros)} filas con importe 0,00 (p. ej. la {ceros[0]}) se han omitido: "
+                           "no cambian ni el saldo ni el patrimonio.")
+    if any(p["datos"].get("revision") for p in plan.productos_nuevos):
+        n = sum(1 for p in plan.productos_nuevos if p["datos"].get("revision"))
+        plan.avisos.append(f"{n} productos no cotizan en internet: les he puesto su coste como valor "
+                           "para que no falte nada. Ajústalos en «Valores sin cotización automática».")
+    return plan
+
+
+def celda_tipo(f):
+    return f.get("tipo_pp") or ""
+
+
+ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
+            "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
+            "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
+
+
 # ---------------------------------------------------------------- aplicar
 
 def aplicar(cfg, plan):
     """Ejecuta el plan sobre cfg (la real o una copia) y devuelve el informe."""
     ids, errores = {}, list(plan.errores)
+
+    # 1) las cuentas, primero: los productos y movimientos apuntan a sus ids
+    ids_cuentas = {}
+    for c in getattr(plan, "cuentas", None) or []:
+        datos = dict(c["datos"])
+        if c.get("cuenta"):
+            datos["id"] = c["cuenta"]
+        try:
+            guardada = almacen.guarda_cuenta(cfg, datos)
+        except almacen.ErrorValidacion as e:
+            errores.append({"fila": c["ref"], "mensaje": " ".join(e.errores)})
+            continue
+        ids_cuentas[c["ref"]] = guardada["id"]
+        # Los saldos anotados antes para esa cuenta ya no valen.
+        viejos = [p["id"] for p in cfg.get("productos", [])
+                  if p.get("cuenta") == guardada["id"] and p.get("tipo") in almacen.SOLO_SALDO]
+        if viejos:
+            cfg["valoraciones"] = [v for v in cfg.get("valoraciones", [])
+                                   if v.get("producto") not in viejos]
+    c_real = lambda ref: ids_cuentas.get(ref, ref)
+
+    # 2) los productos
     for n in plan.productos_nuevos:
-        prod, _ = almacen.guarda_producto(cfg, dict(n["datos"]))
+        datos = dict(n["datos"])
+        if datos.get("cuenta"):
+            datos["cuenta"] = c_real(datos["cuenta"])
+        try:
+            prod, _ = almacen.guarda_producto(cfg, datos)
+        except almacen.ErrorValidacion as e:
+            errores.append({"fila": n["ref"], "mensaje": " ".join(e.errores)})
+            continue
         ids[n["ref"]] = prod["id"]
     real = lambda ref: ids.get(ref, ref)
 
     sustituidos = 0
+    if getattr(plan, "reemplazarTodo", None):
+        antes = len(cfg["movimientos"])
+        cfg["movimientos"] = [m for m in cfg["movimientos"]
+                              if m.get("origen") != plan.reemplazarTodo]
+        sustituidos += antes - len(cfg["movimientos"])
     for ref, origen in plan.reemplazar:
         antes = len(cfg["movimientos"])
         cfg["movimientos"] = [m for m in cfg["movimientos"]
@@ -531,17 +1075,27 @@ def aplicar(cfg, plan):
         sustituidos += antes - len(cfg["movimientos"])
 
     def firma(m):
-        return (m["producto"], m["fecha"], m["tipo"], round(float(m.get("unidades") or 0), 4),
-                round(float(m.get("importe") or 0), 2))
+        return (m.get("producto"), m.get("cuenta"), m["fecha"], m["tipo"],
+                round(float(m.get("unidades") or 0), 4), round(float(m.get("importe") or 0), 2))
     existentes = {firma(m) for m in cfg["movimientos"]}
 
     añadidos, duplicados, filas = 0, 0, []
-    orden = {"compra": 0, "comision": 1, "dividendo": 2, "venta": 3}
-    for mv in sorted(plan.movimientos, key=lambda m: (m["fecha"], orden.get(m["tipo"], 9))):
-        datos = {k: mv[k] for k in ("fecha", "tipo", "unidades", "importe", "comision", "nota") if mv.get(k) is not None}
-        datos["producto"] = real(mv["producto"])
+    orden = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
+             "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
+             "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
+    for mv in sorted(plan.movimientos, key=lambda m: (m["fecha"], orden.get(m["tipo"], 9), m["fila"])):
+        claves = ("fecha", "tipo", "unidades", "importe", "comision", "impuestos", "nota",
+                  "importeOriginal", "monedaOriginal", "tipoCambio", "propietario",
+                  "contrapartidaImporte", "contrapartidaMoneda", "fuente")
+        datos = {k: mv[k] for k in claves if mv.get(k) is not None}
+        if mv.get("producto"):
+            datos["producto"] = real(mv["producto"])
+        if mv.get("cuenta"):
+            datos["cuenta"] = c_real(mv["cuenta"])
+        if mv.get("contrapartida"):
+            datos["contrapartida"] = c_real(mv["contrapartida"])
         estado = "nuevo"
-        if firma({**datos, "unidades": datos.get("unidades", 0)}) in existentes:
+        if firma(datos) in existentes:
             duplicados += 1
             estado = "repetido"
         else:
@@ -552,7 +1106,9 @@ def aplicar(cfg, plan):
             except almacen.ErrorValidacion as e:
                 errores.append({"fila": mv["fila"], "mensaje": " ".join(e.errores)})
                 estado = "error"
-        filas.append({"fila": mv["fila"], "fecha": mv["fecha"], "producto": datos["producto"], "tipo": mv["tipo"],
+        filas.append({"fila": mv["fila"], "fecha": mv["fecha"],
+                      "producto": datos.get("producto"), "cuenta": datos.get("cuenta"),
+                      "tipo": mv["tipo"],
                       "unidades": mv.get("unidades"), "importe": mv["importe"], "marcas": mv["marcas"],
                       "estado": estado})
 
@@ -569,14 +1125,19 @@ def aplicar(cfg, plan):
     def total(t):
         return round(sum(f["importe"] for f in filas if f["tipo"] == t and f["estado"] == "nuevo"), 2)
     nombres = {p["id"]: p.get("corto") or p["nombre"] for p in cfg["productos"]}
+    nombres_c = {c["id"]: c["nombre"] for c in cfg.get("cuentas", [])}
     for f in filas:
-        f["productoNombre"] = nombres.get(f["producto"], f["producto"])
+        f["productoNombre"] = (nombres.get(f["producto"]) or nombres_c.get(f.get("cuenta"))
+                               or f["producto"] or f.get("cuenta") or "")
     return {
         "añadidos": añadidos, "repetidos": duplicados, "saldos": saldos, "sustituidos": sustituidos,
         "errores": sorted(errores, key=lambda e: (str(type(e["fila"])), str(e["fila"]).zfill(6))),
         "avisos": plan.avisos,
         "totales": {"compras": total("compra"), "ventas": total("venta"),
                     "dividendos": total("dividendo"), "comisiones": total("comision"),
+                    "intereses": total("interes"), "impuestos": total("impuesto"),
+                    "depositos": total("deposito"), "retiradas": total("retirada"),
+                    "transferencias": total("transferencia"),
                     "numCompras": sum(1 for f in filas if f["tipo"] == "compra" and f["estado"] == "nuevo")},
         "productosNuevos": [{**n["datos"], "id": ids.get(n["ref"]), "precio": n["precio"],
                              "monedaPrecio": n["monedaPrecio"], "fechaPrecio": n["fecha"],

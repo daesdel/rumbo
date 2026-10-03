@@ -22,6 +22,9 @@ import webbrowser
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
+import math
+import copy
+
 from . import almacen, buscar, exportar, importar, motor, plantilla
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -202,12 +205,173 @@ def datos_js():
 
 @app.post("/api/actualizar")
 def api_actualizar():
+    if modo() == "demo":
+        return jsonify(ok=False, errores=[AVISO_DEMO]), 403
+    hilo = _ACTUALIZA.get("hilo")
+    if motor.PROGRESO.get("activo") or (hilo and hilo.is_alive()):
+        return jsonify(ok=True, yaEnMarcha=True, progreso=_progreso())
+    motor.PROGRESO.update(activo=True, total=0, hecho=0, pct=0, texto="", errores=[], error=None)
+    hilo = threading.Thread(target=_actualiza_en_hilo, daemon=True, name="actualizar")
+    _ACTUALIZA["hilo"] = hilo
+    hilo.start()
+    return jsonify(ok=True, progreso=_progreso())
+
+
+_ACTUALIZA = {}
+
+
+def _progreso():
+    p = dict(motor.PROGRESO)
+    hilo = _ACTUALIZA.get("hilo")
+    activo = bool(motor.PROGRESO.get("activo")) and bool(hilo and hilo.is_alive())
+    p["activo"] = activo
+    p["activa"] = activo
+    return p
+
+
+def _tramos(n):
+    """Cuántos productos se descargan de una vez (5 tramos: se ve avanzar el panel)."""
+    return max(1, (n + 4) // 5)
+
+
+def _pon_cache_en_marcha():
+    """La cache de precios vive en mis_datos y sí se puede salir a internet."""
+    motor.CACHE = os.path.join(DATOS, "cache")
+    motor.SIN_RED = False
+    motor.SOLO_FALTAN = False
+
+
+def _actualiza_en_hilo():
     try:
-        datos = recalcula(descargar=True)
-    except Exception as e:  # que la app no se caiga nunca por un precio
+        cfg = cartera()
+        productos = [dict(p) for p in cfg.get("productos", [])]
+        n = len(productos)
+        total = max(motor._prev_descargas(productos), 1)
+        motor.PROGRESO.update(activo=True, total=total, hecho=0, pct=0, texto="", errores=[])
+        tam = _tramos(n)
+        for i in range(0, max(n, 1), tam):
+            lote = productos[i:i + tam]
+            if not lote:
+                break
+            with cerrojo:
+                motor.PROGRESO["activo"] = True
+                motor.AVISOS.clear()
+                _pon_cache_en_marcha()
+                # El contador sigue de donde iba: el panel se ve llenar de verde.
+                motor.descarga_series(lote, avance=motor._prev_descargas(productos[:i]),
+                                      total=total)
+                motor.PROGRESO["errores"] = sorted(set(motor.PROGRESO.get("errores", []) + list(motor.AVISOS)))
+            # El panel se recalcula con lo que ya hay en la cache: sale vivo.
+            with cerrojo:
+                parcial = motor.construir(cartera(), DATOS, descargar=False)
+                if parcial is not None:
+                    parcial["modo"] = modo()
+                    parcial["preciosActualizados"] = estado().get("preciosActualizados")
+                    escribe_json(ruta_calculado(), parcial)
+        with cerrojo:
+            motor.PROGRESO["activo"] = True
+            motor.PROGRESO["texto"] = "Referencias y cambio de divisa"
+            motor.AVISOS.clear()
+            _pon_cache_en_marcha()
+            for sim in sorted({s for r in motor.REFERENCIAS.values() for s, _ in r["piezas"]} | {"EURUSD=X"}):
+                motor.descargar_serie(sim)
+            # Productos sin cotización con una URL de fuente: se lee el precio de ahí.
+            hechos, fallidos = _actualiza_urls(cartera())
+            if hechos:
+                motor.PROGRESO["texto"] = f"{len(hechos)} valores leídos de su web"
+            motor.PROGRESO["errores"] = sorted(set(motor.PROGRESO.get("errores", [])
+                                                    + list(motor.AVISOS) + list(fallidos)))
+        with cerrojo:
+            datos = motor.construir(cartera(), DATOS, descargar=False)
+            est = estado()
+            est["preciosActualizados"] = dt.datetime.now().replace(microsecond=0).isoformat()
+            escribe_json(os.path.join(DATOS, "estado.json"), est)
+            if datos is not None:
+                datos["modo"] = modo()
+                datos["preciosActualizados"] = est["preciosActualizados"]
+                escribe_json(ruta_calculado(), datos)
+        motor.PROGRESO.update(activo=False, pct=100, texto="Listo")
+    except Exception as e:
         logging.exception("Fallo al actualizar")
-        return jsonify(ok=False, error=f"No he podido actualizar: {e}"), 500
-    return jsonify(ok=True, avisos=(datos or {}).get("avisos", []))
+        motor.PROGRESO.update(activo=False, error=str(e))
+
+
+@app.get("/api/actualizar/progreso")
+def api_actualizar_progreso():
+    """Para que el panel pinte la barra verde y se vaya actualizando en vivo."""
+    datos = lee_json(ruta_calculado()) or {}
+    return jsonify(progreso=_progreso(),
+                   generado=datos.get("generado"),
+                   avisos=(datos.get("avisos") or [])[:6])
+
+
+def _valor_de_url(url):
+    """Mejor esfuerzo: lee un precio de la página (JSON-LD, meta o el primer número)."""
+    req = urllib.request.Request(url, headers=motor.UA)
+    with urllib.request.urlopen(req, timeout=12) as r:
+        html = r.read().decode("utf-8", "replace")
+    patrones = [r'"price"\s*:\s*"?([0-9][0-9.,]*)',
+                r'property="product:price:amount"\s+content="([0-9][0-9.,]*)"',
+                r'itemprop="price"\s+content="([0-9][0-9.,]*)"']
+    for p in patrones:
+        m = re.search(p, html, re.I)
+        if m:
+            return _numero_web(m.group(1))
+    m = re.search(r"\b(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,4})?|\d+[.,]\d{1,4})\b", html)
+    return _numero_web(m.group(1)) if m else None
+
+
+def _numero_web(t):
+    t = t.strip().replace(" ", "")
+    if "," in t and "." in t:
+        return motor.num_es(t) if t.rfind(",") > t.rfind(".") else float(t.replace(",", ""))
+    if "," in t:
+        return float(t.replace(".", "").replace(",", "."))
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _actualiza_urls(cfg):
+    """Productos con una URL de fuente: intenta leer su precio de ahí. Nunca corta."""
+    hechos, fallidos = [], []
+    for p in cfg.get("productos", []):
+        url = (p.get("urlFuente") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        try:
+            v = _valor_de_url(url)
+            if not v or v <= 0:
+                raise ValueError("no he encontrado ningún precio en la página")
+            almacen.guarda_valoracion(cfg, {"producto": p["id"],
+                                             "fecha": dt.date.today().isoformat(), "valor": round(v, 2)})
+            hechos.append(p.get("corto") or p["nombre"])
+        except Exception as e:
+            fallidos.append(f"{p.get('corto') or p['nombre']}: {e}")
+    if hechos and modo() == "propio":
+        almacen.guarda(os.path.join(DATOS, "cartera.json"), cfg)
+    return hechos, fallidos
+
+
+@app.post("/api/productos/<pid>/url")
+def api_producto_url(pid):
+    """Guarda la URL de fuente de un producto que no cotiza solo (se leera al actualizar)."""
+    datos = request.get_json(silent=True) or {}
+
+    def fn(cfg):
+        p = almacen.producto(cfg, pid)
+        if not p:
+            raise almacen.ErrorValidacion(["Ese producto ya no existe."])
+        url = (datos.get("urlFuente") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            raise almacen.ErrorValidacion(["La URL tiene que empezar por http:// o https://."])
+        if url:
+            p["urlFuente"] = url[:200]
+        else:
+            p.pop("urlFuente", None)
+        return p
+    return cambia(fn)
 
 
 @app.get("/api/cartera")
@@ -315,6 +479,11 @@ def api_importar_previsualizar():
             if not archivos:
                 return jsonify(ok=False, errores=["Elige los archivos CSV que has descargado de MyInvestor."]), 400
             plan = importar.preparar_myinvestor(cfg, archivos, DATOS)
+        elif origen == "portfolio":
+            if not archivos and not texto:
+                return jsonify(ok=False, errores=["Elige el CSV «Todas las transacciones» de Portfolio Performance."]), 400
+            contenido = archivos[0][1] if archivos else texto
+            plan = importar.preparar_portfolio(cfg, contenido, DATOS)
         else:
             if not archivos and not texto:
                 return jsonify(ok=False, errores=["Elige un archivo o pega el texto que te ha dado la IA."]), 400
@@ -360,6 +529,134 @@ def api_plantilla_xlsx():
 def api_plantilla_csv():
     return Response(plantilla.csv_vacio(), mimetype="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="plantilla_patrimonio.csv"'})
+
+
+# ------------------------------------------- valores sin cotización automática
+
+def sin_cotizacion(cfg):
+    """Productos cuyo precio no se puede bajar de internet (plan, oro, depósito...)."""
+    return [p for p in cfg.get("productos", [])
+            if p.get("fuente") == "manual" and p.get("tipo") not in almacen.SOLO_SALDO]
+
+
+def ultimo_valor(cfg, pid):
+    vals = [v for v in cfg.get("valoraciones", []) if v.get("producto") == pid]
+    return max(vals, key=lambda v: v["fecha"]) if vals else None
+
+
+def _csv(cuerpo, nombre):
+    return Response(cuerpo, mimetype="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
+
+
+@app.get("/api/valores/plantilla")
+def api_plantilla_valores():
+    """Plantilla de valores manuales: fecha;valor (con ?producto=id) o
+    producto;fecha;valor con todos los que no cotizan solos."""
+    cfg = cartera()
+    pid = (request.args.get("producto") or "").strip()
+    if pid:
+        p = next((x for x in sin_cotizacion(cfg) if x["id"] == pid), None)
+        if p is None:
+            return jsonify(ok=False, errores=["Ese producto no está en la lista de valores manuales."]), 404
+        ult = ultimo_valor(cfg, pid)
+        filas = ["fecha;valor"]
+        if ult:
+            filas.append(f"{ult['fecha']};{almacen.fmt_num(ult['valor'])}")
+        return _csv("\n".join(filas) + "\n", f"valores_{pid}.csv")
+    filas = ["producto;fecha;valor"]
+    for p in sin_cotizacion(cfg):
+        ult = ultimo_valor(cfg, p["id"])
+        filas.append(f"{p['id']};{ult['fecha'] if ult else ''};"
+                     f"{almacen.fmt_num(ult['valor']) if ult else ''}")
+    return _csv("\n".join(filas) + "\n", "valores.csv")
+
+
+def _lee_plantilla_valores(texto, pid):
+    """Devuelve ([(producto, fecha, valor)], errores de filas). Acepta las dos formas."""
+    lineas = [l.strip() for l in (texto or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+    if not lineas:
+        return [], ["El archivo está vacío."]
+    primera = [x.strip().lower() for x in lineas[0].split(";")]
+    if primera[0] in ("producto", "id", "producto_id"):
+        col_prod, desde = 0, 1
+    elif primera[0] == "fecha":
+        col_prod, desde = -1, 1
+    else:                                    # sin cabecera: lo dice el número de columnas
+        col_prod, desde = (0 if len(primera) >= 3 else -1), 0
+    if col_prod == -1 and not pid:
+        return [], ["Esa plantilla es de un solo producto: sube producto;fecha;valor "
+                    "(o descárgala desde la fila del producto)."]
+    errores, filas = [], []
+    for n, linea in enumerate(lineas[desde:], desde + 1):
+        partes = [x.strip() for x in linea.split(";")]
+        if col_prod == -1:
+            if len(partes) < 2 or not partes[1]:
+                errores.append(f"Fila {n}: falta el valor.")
+                continue
+            quien, f_txt, v_txt = pid, partes[0], partes[1]
+        else:
+            if len(partes) < 3 or not partes[1] or not partes[2]:
+                errores.append(f"Fila {n}: usa producto;fecha;valor.")
+                continue
+            quien, f_txt, v_txt = partes[0], partes[1], partes[2]
+        err = []
+        if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", f_txt):
+            d, m, a = f_txt.split("/")
+            f_txt = f"{a}-{m.zfill(2)}-{d.zfill(2)}"
+        f = almacen.fecha(f_txt, err)
+        v = almacen.numero(v_txt, "el valor", err, minimo=0)
+        if err:
+            errores.append(f"Fila {n}: " + " ".join(err))
+        else:
+            filas.append((quien, f, v))
+    return filas, errores
+
+
+@app.post("/api/valores/plantilla")
+def api_aplica_plantilla_valores():
+    """Carga un CSV de valores manuales y los aplica todos de una vez."""
+    if modo() == "demo":
+        return jsonify(ok=False, errores=[AVISO_DEMO]), 403
+    arch = request.files.get("archivos")
+    if arch and arch.filename:
+        texto = arch.read().decode("utf-8-sig", "replace")
+    else:
+        texto = (request.form.get("texto") or "").strip()
+    pid = (request.form.get("producto") or "").strip()
+    filas, errores = _lee_plantilla_valores(texto, pid)
+    if not filas:
+        return jsonify(ok=False, errores=(errores or ["No he leído ninguna fila."])[:12]), 400
+    # Un producto por id, por nombre o por como se le llama en la interfaz.
+    cfg0 = cartera()
+    def _buscar(quien):
+        q = (quien or "").strip().lower()
+        for p in cfg0.get("productos", []):
+            if p["id"] == quien or q in (str(p.get("nombre", "")).lower(),
+                                          str(p.get("corto", "")).lower()):
+                return p["id"]
+        return None
+    aplicados, saltados = [], []
+    for quien, f, v in filas:
+        real = _buscar(quien)
+        if real is None:
+            saltados.append(f"No encuentro el producto «{quien}».")
+            continue
+        aplicados.append((real, f, v))
+    if not aplicados:
+        return jsonify(ok=False, errores=(errores + saltados)[:12]), 400
+
+    def fn(cfg):
+        for real, f, v in aplicados:
+            almacen.guarda_valoracion(cfg, {"producto": real, "fecha": f, "valor": v})
+        return None
+    respuesta = cambia(fn)
+    if isinstance(respuesta, tuple):
+        return respuesta
+    out = respuesta.get_json()
+    out["guardados"] = len(aplicados)
+    out["avisos"] = (errores + saltados)[:12]
+    return jsonify(out)
 
 
 @app.get("/api/prompt")

@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  const D = window.DATOS;
+  let D = window.DATOS;
   const $ = s => document.querySelector(s);
   const raiz = document.documentElement;
   const esc = window.escapar;   // escapado unificado (está en graficos.js)
@@ -58,6 +58,9 @@
     btcVivo: null,
     compRef: recuerda.lee("patrimonio.compRef") || "mundo",
     ocultos: new Set(),
+    // Filtros globales del panel: [Total · David · Gina · Compartido] × [Global · EUR · USD]
+    prop: recuerda.lee("patrimonio.prop") || "total",
+    mon: recuerda.lee("patrimonio.mon") || "global",
   };
 
   /* ---------------------------------------------- ¿y si lo hubieras metido en un indexado? */
@@ -140,10 +143,62 @@
       : [mezcla(base, "#fcfcfb", 0.58), base, mezcla(base, "#000000", 0.32)];
   }
 
-  const TODOS = () => D.productos.concat(D.otrosActivos || [], D.pasivos || []);
+  const TODOS_CRUDOS = () => D.productos.concat(D.otrosActivos || [], D.pasivos || []);
+
+  /* ----------------------------------------------------------------
+     Filtros globales: propietario (Total/David/Gina/Compartido) y
+     divisa (Global/EUR/USD). TODOS() es la única puerta de entrada a los
+     datos del panel: lo que salga de aquí es lo que ve cada widget, así que
+     al pulsar un botón cambian KPIs, gráficos y tablas de golpe.
+     Si un producto es de dos personas, se muestra la parte que toca.
+     ---------------------------------------------------------------- */
+  const filtrosActivos = () => estado.prop !== "total" || estado.mon !== "global";
+  function factorDe(p) {
+    if (estado.prop === "total") return 1;
+    const d = p.duenos || {};
+    if (d[estado.prop]) return d[estado.prop];
+    return p.propietario === estado.prop ? 1 : 0;
+  }
+  function pasaMoneda(p) {
+    if (estado.mon === "global") return true;
+    return (p.moneda || "EUR").toUpperCase() === estado.mon;
+  }
+  function escala(p, f) {
+    const c = Object.assign({}, p, { _f: f });
+    const m = v => (v == null ? null : v * f);
+    c.valor = m(p.valor || 0);
+    ["aportado", "realizado", "dividendos", "intereses", "impuestosPagados",
+      "participaciones", "titulos"].forEach(k => { if (p[k] != null) c[k] = m(p[k]); });
+    if (p.serie) c.serie = p.serie.map(m);
+    if (p.serieAportado) c.serieAportado = p.serieAportado.map(m);
+    if (p.flujos) c.flujos = p.flujos.map(([f1, v]) => [f1, m(v)]);
+    if (p.aportaciones) c.aportaciones = p.aportaciones.map(a =>
+      Object.assign({}, a, { importe: m(a.importe), valor: m(a.valor) }));
+    if (p.tramos) {
+      const t = Object.assign({}, p.tramos);
+      ["p33", "p67", "min", "max", "mediana"].forEach(k => { if (t[k] != null) t[k] = m(t[k]); });
+      c.tramos = t;
+    }
+    return c;
+  }
+  const TODOS = () => {
+    const out = [];
+    TODOS_CRUDOS().forEach(p => {
+      if (!pasaMoneda(p)) return;
+      const f = factorDe(p);
+      if (f <= 1e-9) return;
+      out.push(f === 1 ? Object.assign({}, p, { _f: 1 }) : escala(p, f));
+    });
+    const peso = out.reduce((a, p) => a + (p.valor || 0), 0);
+    out.forEach(p => { p.peso = peso ? (p.valor || 0) / peso : 0; });   // reparto dentro del filtro
+    return out;
+  };
   const visibles = () => TODOS().filter(p => !estado.ocultos.has(p.id));
-  const filtrando = () => estado.ocultos.size > 0;
+  const filtrando = () => estado.ocultos.size > 0 || filtrosActivos();
   const buscaProd = id => TODOS().find(p => p.id === id);
+  const cuentasFiltradas = () => (D.cuentas || []).filter(c =>
+    (estado.mon === "global" || String(c.moneda || "EUR").toUpperCase() === estado.mon) &&
+    (estado.prop === "total" || c.propietario === estado.prop));
 
   /* ---------------------------------------------- precio en vivo */
   function precioVivo() {
@@ -302,6 +357,32 @@
     });
   }
 
+  /* ---------------------------------------------- filtros globales del panel */
+  const MONEDAS = [{ id: "global", et: "Global" }, { id: "EUR", et: "EUR" }, { id: "USD", et: "USD" }];
+  function cambiaFiltro(campo, valor) {
+    estado[campo] = valor;
+    recuerda.guarda("patrimonio." + (campo === "prop" ? "prop" : "mon"), valor);
+    estado.ocultos = new Set();       // un filtro nuevo empieza con todo incluido
+    estado.tablaFiltro = "todos";
+    pintar();
+  }
+  function pintaFiltrosGlobal() {
+    const cont = $("#filtrosGlobal");
+    if (!cont) return;
+    cont.hidden = !D || estado.tab === "datos" || estado.tab === "ayuda";
+    if (cont.hidden) return;
+    const props = [{ id: "total", et: "Total" }]
+      .concat((D.propietarios || []).map(p => ({ id: p.id, et: p.nombre })));
+    if (!props.some(p => p.id === estado.prop)) estado.prop = "total";
+    pintaSegm($("#segProp"), props, estado.prop, id => cambiaFiltro("prop", id));
+    pintaSegm($("#segMon"), MONEDAS, estado.mon, id => cambiaFiltro("mon", id));
+    const n = TODOS().length;
+    const et = (props.find(p => p.id === estado.prop) || {}).et || "Total";
+    const mo = (MONEDAS.find(m => m.id === estado.mon) || {}).et || "Global";
+    $("#filtrosGlobalNota").textContent = filtrosActivos()
+      ? `${et} · ${mo}: ${n} ${n === 1 ? "componente" : "componentes"}` : "";
+  }
+
   /* ================================================================
      PESTAÑA 1 · PATRIMONIO
      ================================================================ */
@@ -333,7 +414,7 @@
     const esLargo = cortos.length > 0 && cortos.length === estado.ocultos.size &&
       cortos.every(id => estado.ocultos.has(id));
     [
-      { id: "todo", et: "Ver todo", act: !filtrando(), fn: () => estado.ocultos.clear() },
+      { id: "todo", et: "Ver todo", act: estado.ocultos.size === 0, fn: () => estado.ocultos.clear() },
       { id: "largo", et: "Solo largo plazo", act: esLargo, fn: () => { estado.ocultos = new Set(cortos); } },
     ].forEach(pr => {
       if (pr.id === "largo" && !cortos.length) return;
@@ -489,6 +570,33 @@
     });
   }
 
+  function pintaCuentas() {
+    const sec = $("#seccionCuentas");
+    if (!sec) return;
+    const cuentas = cuentasFiltradas();
+    sec.hidden = !cuentas.length;
+    if (!cuentas.length) return;
+    const filas = cuentas.slice().sort((a, b) => (b.saldoEur || 0) - (a.saldoEur || 0));
+    const props = {};
+    (D.propietarios || []).forEach(p => { props[p.id] = p.nombre; });
+    const nom = c => props[c.propietario] || c.propietario || "Compartido";
+    const suma = filas.reduce((a, c) => a + (c.saldoEur || 0), 0);
+    const nat = estado.mon !== "global";
+    $("#tablaCuentas").innerHTML =
+      `<thead><tr><th>Cuenta</th><th>Entidad</th><th>Propietario</th><th>Moneda</th>
+        <th>Saldo</th>${nat ? "" : "<th>En euros</th>"}</tr></thead>
+       <tbody>${filas.map(c => `<tr>
+        <td>${esc(c.nombre)}</td>
+        <td class="subt">${esc(c.entidad || "")}</td>
+        <td>${esc(nom(c))}</td>
+        <td class="subt">${esc(c.moneda)}</td>
+        <td>${G.fmtEur(c.saldo, 2).replace("€", c.moneda === "EUR" ? "€" : c.moneda)}</td>
+        ${nat ? "" : `<td>${c.saldoEur == null ? "—" : G.fmtEur(c.saldoEur, 2)}</td>`}
+      </tr>`).join("")}</tbody>
+       <tfoot><tr><td colspan="4">${filas.length} ${filas.length === 1 ? "cuenta" : "cuentas"}</td>
+        <td></td>${nat ? "" : `<td>${G.fmtEur(suma, 2)}</td>`}</tr></tfoot>`;
+  }
+
   function pintaDistribucion() {
     const lista = visibles();
     const datos = estado.dist === "producto"
@@ -515,21 +623,25 @@
     const meses = am.meses.slice(i0);
     const series = visibles()
       .filter(p => (am.porProducto[p.id] || []).some(v => v))
-      .map(p => ({ nombre: p.corto || p.nombre, color: color(p), valores: am.porProducto[p.id].slice(i0) }));
+      .map(p => ({ nombre: p.corto || p.nombre, color: color(p),
+                   valores: am.porProducto[p.id].slice(i0).map(v => v * (p._f || 1)) }));
     G.barrasApiladas($("#grafBarras"), { categorias: meses, alto: 236, series });
     const suma = meses.reduce((a, _, i) => a + series.reduce((b, s) => b + (s.valores[i] || 0), 0), 0);
     $("#notaAport").textContent = meses.length
       ? `${G.fmtEur(suma, 0)} en ${meses.length} ${meses.length === 1 ? "mes" : "meses"}` : "";
   }
 
-  function pintaHitos(mTodo) {
+  function pintaHitos(mVista) {
     // En la web con importes ocultos no hay hitos (delatarían cifras).
     $("#hitos").closest("section").hidden = !D.total.hitos.length;
+    const serie = mVista.serie || [];
     $("#hitos").innerHTML = D.total.hitos.map(h => {
-      const hecho = !!h.fecha;
+      const i = serie.findIndex(v => v >= h.importe);
+      const fecha = i >= 0 ? D.fechas[i] : null;
+      const hecho = !!fecha;
       return `<div class="hito ${hecho ? "hecho" : ""}">
         <div class="im">${G.fmtEurCorto(h.importe)}</div>
-        <div class="fe">${hecho ? "✓ " + G.fmtFecha(h.fecha) : "faltan " + G.fmtEurCorto(h.importe - mTodo.valor)}</div>
+        <div class="fe">${hecho ? "✓ " + G.fmtFecha(fecha) : "faltan " + G.fmtEurCorto(h.importe - mVista.valor)}</div>
       </div>`;
     }).join("");
   }
@@ -568,7 +680,7 @@
 
   function pintaTabla() {
     const filas = [];
-    D.productos.forEach(p => (p.aportaciones || []).forEach(a => {
+    TODOS().forEach(p => (p.aportaciones || []).forEach(a => {
       if (!a.importe) return;
       filas.push({
         fecha: a.fecha, producto: p.corto || p.nombre, color: color(p), id: p.id,
@@ -608,16 +720,17 @@
   }
 
   function pintaPatrimonio() {
-    const mTodo = metricas(TODOS());
-    const mVis = filtrando() ? metricas(visibles()) : mTodo;
+    const mTodo = metricas(TODOS_CRUDOS());          // todo, sin ningún filtro
+    const mVis = filtrando() ? metricas(visibles()) : metricas(TODOS());
     pintaFiltros();
     pintaHero(mVis, mTodo);
     pintaKPIs(mVis);
     pintaPrincipal(mVis);
     pintaChips();
+    pintaCuentas();
     pintaDistribucion();
     pintaBarras();
-    pintaHitos(mTodo);
+    pintaHitos(mVis);
     pintaProyeccion();
     pintaTabla();
     pintaSegm($("#segRango"), RANGOS, estado.rango, id => { estado.rango = id; pintaPatrimonio(); });
@@ -630,7 +743,7 @@
       { id: "entidad", et: "Entidad" }, { id: "tipo", et: "Tipo" }
     ], estado.dist, id => { estado.dist = id; pintaDistribucion(); });
     pintaSegm($("#segTabla"), [{ id: "todos", et: "Todos" }].concat(
-      D.productos.filter(p => (p.aportaciones || []).some(a => a.importe))
+      TODOS().filter(p => (p.aportaciones || []).some(a => a.importe))
         .map(p => ({ id: p.id, et: p.corto || p.nombre }))),
       estado.tablaFiltro, id => { estado.tablaFiltro = id; pintaTabla(); });
   }
@@ -644,6 +757,23 @@
     if (estado.mes == null || estado.mes < 0 || estado.mes >= rm.length) estado.mes = rm.length - 1;
     const r = rm[estado.mes];
 
+    // Con los filtros globales encima, las cifras de este mes se vuelven a sumar.
+    const filas = TODOS().map(p => {
+      const d = r.porProducto[p.id];
+      if (!d) return null;
+      const f = p._f || 1;
+      const esc = v => (v == null ? v : v * f);
+      return { p, d: { inicio: esc(d.inicio), aportado: esc(d.aportado),
+                       mercado: esc(d.mercado), fin: esc(d.fin), nuevo: esc(d.nuevo) } };
+    }).filter(Boolean);
+    const T = filtrosActivos()
+      ? filas.reduce((a, x) => ({ inicio: a.inicio + x.d.inicio, aportado: a.aportado + x.d.aportado,
+          mercado: a.mercado + x.d.mercado, fin: a.fin + x.d.fin, nuevo: a.nuevo + (x.d.nuevo || 0) }),
+          { inicio: 0, aportado: 0, mercado: 0, fin: 0, nuevo: 0 })
+      : r;
+    const rentMes = T === r ? r.rentabilidad
+      : (T.inicio > 0 ? T.mercado / T.inicio : null);
+
     const sel = $("#mesSel");
     if (sel.options.length !== rm.length) {
       sel.innerHTML = rm.map((x, i) => `<option value="${i}">${G.fmtMes(x.mes)}</option>`).join("");
@@ -652,44 +782,43 @@
     $("#mesPrev").disabled = estado.mes === 0;
     $("#mesNext").disabled = estado.mes === rm.length - 1;
 
-    const cambio = r.fin - r.inicio;
+    const cambio = T.fin - T.inicio;
     // El titular es el cambio REAL: lo que aportaste mas lo que hizo el mercado.
     // Incorporar una cuenta al panel mueve el saldo pero no es dinero ganado,
     // asi que va aparte y no infla la cifra grande.
-    const real = r.aportado + r.mercado;
+    const real = T.aportado + T.mercado;
     const ultimo = estado.mes === rm.length - 1;
     $("#mesEtq").textContent = ultimo ? "Cambio en lo que va de mes" : "Cambio del mes";
     $("#mesCifra").textContent = G.fmtEurSigno(real);
     $("#mesCifra").className = "hCifra " + (real >= 0 ? "pos" : "neg");
     $("#mesNota").textContent = ultimo
       ? "Mes en curso, con datos hasta el " + G.fmtFecha(D.fechaExtracto) : "";
-    const trozos = [`De <span class="fuerte">${G.fmtEur(r.inicio)}</span> a <span class="fuerte">${G.fmtEur(r.fin)}</span>`];
-    if (r.rentabilidad != null) {
+    const trozos = [`De <span class="fuerte">${G.fmtEur(T.inicio)}</span> a <span class="fuerte">${G.fmtEur(T.fin)}</span>`];
+    if (rentMes != null) {
       trozos.push(`rentabilidad de la cartera
-        <span class="${r.rentabilidad >= 0 ? "pos" : "neg"} fuerte">${G.fmtPctSigno(r.rentabilidad)}</span>`);
+        <span class="${rentMes >= 0 ? "pos" : "neg"} fuerte">${G.fmtPctSigno(rentMes)}</span>`);
     }
-    if (r.nuevo) {
-      trozos.push(`<span class="pill">de la diferencia, ${G.fmtEur(r.nuevo, 0)} son cuentas que entran al panel</span>`);
+    if (T.nuevo) {
+      trozos.push(`<span class="pill">de la diferencia, ${G.fmtEur(T.nuevo, 0)} son cuentas que entran al panel</span>`);
     }
     $("#mesSub").innerHTML = trozos.join('<span style="color:var(--tinta3)">·</span>');
 
     const tarjetas = [
-      { e: "Lo pusiste tú", v: G.fmtEur(r.aportado, 0), n: "aportaciones del mes", c: G.css("--s1") },
+      { e: "Lo pusiste tú", v: G.fmtEur(T.aportado, 0), n: "aportaciones del mes", c: G.css("--s1") },
       {
-        e: "Lo puso el mercado", v: G.fmtEurSigno(r.mercado), n: "revalorización, sin tocar nada",
-        c: G.css("--s3"), cl: r.mercado >= 0 ? "pos" : "neg"
+        e: "Lo puso el mercado", v: G.fmtEurSigno(T.mercado), n: "revalorización, sin tocar nada",
+        c: G.css("--s3"), cl: T.mercado >= 0 ? "pos" : "neg"
       },
     ];
-    if (r.nuevo) tarjetas.push({
-      e: "Nuevo en el panel", v: G.fmtEur(r.nuevo, 0),
+    if (T.nuevo) tarjetas.push({
+      e: "Nuevo en el panel", v: G.fmtEur(T.nuevo, 0),
       n: "no es dinero nuevo: es que empiezas a seguirlo", c: G.css("--s7")
     });
     $("#mesTarjetas").innerHTML = tarjetas.map(t =>
       `<div class="mesT" style="--c:${t.c}"><span class="barra"></span>
         <div class="e">${t.e}</div><div class="v ${t.cl || ""}">${t.v}</div><div class="n">${t.n}</div></div>`).join("");
 
-    // tabla por componente
-    const filas = TODOS().map(p => ({ p, d: r.porProducto[p.id] })).filter(x => x.d);
+    // tabla por componente (filas ya calculadas arriba, con los filtros aplicados)
     const hayNuevo = filas.some(x => x.d.nuevo);
     const colNuevo = hayNuevo ? "<th>Entra al panel</th>" : "";
     $("#mesTabla").innerHTML =
@@ -706,16 +835,25 @@
           <td>${G.fmtEur(d.fin)}</td>
           <td class="${var_ >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(var_)}</td></tr>`;
       }).join("")}</tbody>
-       <tfoot><tr><td>Total</td><td>${G.fmtEur(r.inicio)}</td><td>${G.fmtEur(r.aportado)}</td>
-        <td class="${r.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(r.mercado)}</td>
-        ${hayNuevo ? `<td>${G.fmtEur(r.nuevo)}</td>` : ""}
-        <td>${G.fmtEur(r.fin)}</td>
+       <tfoot><tr><td>Total</td><td>${G.fmtEur(T.inicio)}</td><td>${G.fmtEur(T.aportado)}</td>
+        <td class="${T.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(T.mercado)}</td>
+        ${hayNuevo ? `<td>${G.fmtEur(T.nuevo)}</td>` : ""}
+        <td>${G.fmtEur(T.fin)}</td>
         <td class="${cambio >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(cambio)}</td></tr></tfoot>`;
-    $("#mesTablaNota").textContent = r.nuevo
-      ? `Incluye ${G.fmtEur(r.nuevo, 0)} que entran al seguimiento este mes.` : "";
+    $("#mesTablaNota").textContent = T.nuevo
+      ? `Incluye ${G.fmtEur(T.nuevo, 0)} que entran al seguimiento este mes.` : "";
 
-    // histórico de esfuerzo vs mercado
-    const ult = rm.slice(-18);
+    // histórico de esfuerzo vs mercado (con los filtros, mes a mes)
+    const mesDe = x => {
+      if (!filtrosActivos()) return x;
+      let a = 0, m = 0;
+      TODOS().forEach(p => {
+        const d = (x.porProducto || {})[p.id];
+        if (d) { const f = p._f || 1; a += d.aportado * f; m += d.mercado * f; }
+      });
+      return { mes: x.mes, aportado: a, mercado: m };
+    };
+    const ult = rm.slice(-18).map(mesDe);
     G.barrasAgrupadas($("#grafMesHist"), {
       categorias: ult.map(x => x.mes), alto: 250,
       formatoCat: G.fmtMes,
@@ -731,6 +869,15 @@
      ================================================================ */
   function pintaFondos() {
     const lista = TODOS();
+    if (!lista.length) {
+      $("#selFondo").innerHTML = "";
+      $("#fondoFicha").innerHTML = `<header><h2>Nada bajo estos filtros</h2></header>
+        <p class="vacio">Ningún componente coincide con el propietario o la divisa elegidos.
+        Cambia el filtro de arriba para verlos.</p>`;
+      $("#fondoExpo").hidden = true;
+      $("#fondoTabla").innerHTML = "";
+      return;
+    }
     if (!estado.fondo || !buscaProd(estado.fondo)) estado.fondo = lista[0].id;
     const p = buscaProd(estado.fondo);
 
@@ -952,7 +1099,7 @@
         ? `<td class="subt">${verProducto ? "—" : "aún no lo tenías"}</td>`
         : `<td class="${v >= 0 ? "pos" : "neg"}">${G.fmtPctSigno(v, 1)}` +
           `${d ? `<span class="subt" style="font-weight:400"> · desde ${corto(d)}</span>` : ""}</td>`;
-      const prods = D.productos.filter(p => tabla[p.id]);
+      const prods = TODOS().filter(p => tabla[p.id]);
       $("#tablaAnual").innerHTML =
         `<thead><tr><th>Producto</th>${ra.anos.map((a, i) =>
           `<th>${a}${ra.parcial[i] ? " *" : ""}</th>`).join("")}</tr></thead>
@@ -1095,6 +1242,7 @@
   function pintarTab() {
     // Cada pestaña se dibuja al mostrarse: un SVG dentro de un panel oculto
     // no tiene ancho, y saldria del tamano equivocado.
+    pintaFiltrosGlobal();
     if (estado.tab === "patrimonio") pintaPatrimonio();
     else if (estado.tab === "mes") pintaMes();
     else if (estado.tab === "fondos") pintaFondos();
@@ -1102,6 +1250,25 @@
     else if (estado.tab === "datos" && window.Editor) window.Editor.mostrar();
   }
   function pintar() { pintaComun(); pintarTab(); }
+
+  /** Vuelve a leer datos.js y repinta el panel sin recargar la página: así el
+      panel va saliendo mientras aún se están descargando los precios. */
+  window.__refrescaDatos = async () => {
+    try {
+      const txt = await (await fetch("datos.js?_=" + Date.now())).text();
+      const i = txt.indexOf("{"), j = txt.lastIndexOf("}");
+      if (i < 0 || j < i) return null;
+      const nuevo = JSON.parse(txt.slice(i, j + 1));
+      if (!nuevo || !nuevo.fechas || !nuevo.fechas.length) return null;
+      D = nuevo;
+      window.DATOS = nuevo;
+      pintar();
+      return nuevo.generado || null;
+    } catch (e) {
+      console.warn("No he podido refrescar el panel en vivo:", e);
+      return null;
+    }
+  };
 
   /* ---------------------------------------------- arranque */
   document.title = "Rumbo · " + (D.titular || "Mi patrimonio");
@@ -1112,17 +1279,56 @@
   if ($("#btnPrecios")) $("#btnPrecios").onclick = async () => {
     const b = $("#btnPrecios");
     b.disabled = true;
-    b.textContent = "↻ Actualizando…";
-    try {
-      const r = await fetch("api/actualizar", { method: "POST" });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error);
-      location.reload();
-    } catch (e) {
-      alert(e.message || "No he podido actualizar los precios. ¿Tienes conexión a internet?");
+    const pinta = pct => {
+      const p = Math.max(0, Math.min(100, Math.round(pct)));
+      b.classList.add("actualizando");
+      b.style.setProperty("--pct", p + "%");
+      b.textContent = `↻ Actualizando… ${p} %`;
+    };
+    const vuelve = () => {
+      b.classList.remove("actualizando");
+      b.style.removeProperty("--pct");
       b.disabled = false;
       b.textContent = "↻ Actualizar precios";
+    };
+    pinta(0);
+    try {
+      const j = await (await fetch("api/actualizar", { method: "POST" })).json();
+      if (!j.ok) throw new Error((j.errores || []).join(" ") || j.error || "No he podido empezar.");
+    } catch (e) {
+      vuelve();
+      alert(e.message || "No he podido actualizar los precios. ¿Tienes conexión a internet?");
+      return;
     }
+    // Barra verde de 0 a 100 % y panel que se va actualizando al llegar los datos.
+    let visto = null, parado = 0, reiniciado = false;
+    const tic = setInterval(async () => {
+      let j = null;
+      try {
+        j = await (await fetch("api/actualizar/progreso?_=" + Date.now())).json();
+      } catch (e) { return; }
+      const pr = j.progreso || {};
+      pinta(pr.pct || 0);
+      if (pr.error) {
+        clearInterval(tic); vuelve();
+        alert("No he podido actualizar los precios: " + pr.error);
+        return;
+      }
+      if (pr.errores && pr.errores.length) b.title = pr.errores.join("\n");
+      if (j.generado && j.generado !== visto) {
+        visto = j.generado;
+        await window.__refrescaDatos();       // el panel sale en vivo, sin esperar
+      }
+      parado = pr.activa ? 0 : parado + 1;
+      if (parado >= 2 && !reiniciado) {
+        reiniciado = true;
+        clearInterval(tic);
+        pinta(100);
+        b.textContent = "✓ Precios actualizados";
+        // Última recarga: así las secciones pesadas (histórico, comparador) quedan al día.
+        setTimeout(() => location.reload(), 700);
+      }
+    }, 1000);
   };
   if (location.protocol === "file:" && $("#btnPrecios")) $("#btnPrecios").hidden = true;
   $("#btnVideo").onclick = () => {
@@ -1143,10 +1349,14 @@
     // cualquier boton, que es justo cuando los quieres.
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
-    if (e.key === "Escape" && filtrando()) { estado.ocultos.clear(); pintaPatrimonio(); }
+    if (e.key === "Escape" && filtrando()) {
+      estado.ocultos.clear(); estado.prop = "total"; estado.mon = "global";
+      recuerda.guarda("patrimonio.prop", "total"); recuerda.guarda("patrimonio.mon", "global");
+      pintar();
+    }
     if (e.key === "v" && !e.metaKey && !e.ctrlKey) $("#btnVideo").click();
     if (e.key === "l" && !e.metaKey && !e.ctrlKey && estado.tab === "patrimonio") {
-      estado.ocultos = filtrando() ? new Set() : new Set(idsCorto());
+      estado.ocultos = estado.ocultos.size ? new Set() : new Set(idsCorto());
       pintaPatrimonio();
     }
     const n = "123456".indexOf(e.key);

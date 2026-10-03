@@ -48,6 +48,8 @@ PALETA = {
 }
 
 AVISOS = []
+# Progreso de «Actualizar precios»: lo lee el servidor y lo pinta el panel (0-100 %).
+PROGRESO = {"activo": False, "total": 0, "hecho": 0, "pct": 0, "texto": "", "errores": []}
 
 
 def aviso(txt):
@@ -458,7 +460,9 @@ CLASE_DEFECTO = {
 }
 FUENTES = {"morningstar": "Morningstar", "yahoo": "Yahoo Finance",
            "coingecko": "CoinGecko", "manual": "Valor anotado a mano"}
-ORDEN_TIPO = {"compra": 0, "comision": 1, "dividendo": 2, "venta": 3}
+ORDEN_TIPO = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
+              "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
+              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
 
 # Carteras de referencia para «¿y si lo hubieras metido en un indexado?». Son ETF
 # reales que cotizan en euros; las piezas son (ticker de Yahoo, peso).
@@ -503,15 +507,17 @@ def aplicar_movimientos(p, movs):
     (fecha, importe) para la TIR, en negativo lo que sale de tu cuenta.
     """
     lotes, eventos, flujos, vendidas = [], [], [], set()
-    realizado = comisiones = 0.0
+    realizado = comisiones = impuestos_tot = dividendos = intereses = 0.0
     for m in sorted(movs, key=lambda x: (x["fecha"], ORDEN_TIPO.get(x.get("tipo"), 9))):
         f, t = m["fecha"], m.get("tipo")
         u, imp = float(m.get("unidades") or 0), float(m.get("importe") or 0)
+        ret = float(m.get("impuestos") or 0)
         if t == "compra":
             lotes.append([u, imp, id(m)])
             eventos.append((f, u, imp))
             flujos.append((f, -imp))
             comisiones += float(m.get("comision") or 0)
+            impuestos_tot += ret
         elif t == "venta":
             quedan, coste = u, 0.0
             while quedan > 1e-9 and lotes:
@@ -529,24 +535,54 @@ def aplicar_movimientos(p, movs):
             realizado += imp - coste
             eventos.append((f, -(u - quedan), -coste))
             flujos.append((f, imp))
+            comisiones += float(m.get("comision") or 0)
+            impuestos_tot += ret
         elif t == "dividendo":
-            realizado += imp
+            # El neto cobrado más la retención = dividendo bruto; el dinero que
+            # entra en la cuenta es solo el neto.
+            bruto = imp + ret + float(m.get("comision") or 0)
+            realizado += bruto
+            dividendos += bruto
             flujos.append((f, imp))
+            comisiones += float(m.get("comision") or 0)
+            impuestos_tot += ret
+        elif t == "interes":
+            realizado += imp + ret
+            intereses += imp + ret
+            flujos.append((f, imp))
+            impuestos_tot += ret
+        elif t == "impuesto":
+            realizado -= imp
+            flujos.append((f, -imp))
+            impuestos_tot += imp
         elif t == "comision":
             realizado -= imp
             comisiones += imp
             flujos.append((f, -imp))
-    return {"eventos": eventos, "flujos": flujos, "realizado": realizado, "comisiones": comisiones,
-            "vendidas": vendidas}
+        # deposito, retirada, transferencia, traspaso... son movimientos de una
+        # cuenta: su saldo se calcula aparte (motor.saldos_cuentas).
+    return {"eventos": eventos, "flujos": flujos, "realizado": realizado,
+            "comisiones": comisiones, "impuestos": impuestos_tot,
+            "dividendos": dividendos, "intereses": intereses, "vendidas": vendidas}
 
 
-def descarga_series(productos_cfg, series=None):
+def descarga_series(productos_cfg, series=None, avance=0, total=None):
     """Descarga (o lee de la cache) las series que necesitan esos productos.
-    Devuelve el diccionario de series que usa precio_eur()."""
+    Devuelve el diccionario de series que usa precio_eur().
+    avance/total: descargas ya hechas y descargas globales, para que el contador
+    de PROGRESO siga contando cuando se baja en tramos (desde el servidor)."""
     series = {} if series is None else series
+    if PROGRESO.get("activo"):
+        PROGRESO["total"] = max(total or (avance + _prev_descargas(productos_cfg)), 1)
+        PROGRESO["hecho"] = min(avance, PROGRESO["total"])
+        PROGRESO["pct"] = int(100 * PROGRESO["hecho"] / PROGRESO["total"])
 
     def pide(clave, fn, *args):
         if clave and clave not in series:
+            if PROGRESO.get("activo"):
+                PROGRESO["hecho"] += 1
+                PROGRESO["texto"] = clave
+                PROGRESO["pct"] = min(99, int(100 * PROGRESO["hecho"] / PROGRESO["total"]))
             series[clave] = fn(*args)
 
     def pide_fx(moneda):
@@ -559,6 +595,10 @@ def descarga_series(productos_cfg, series=None):
             pide(cod, descargar_serie, cod)
             pide_fx(p.get("moneda"))
         elif cod and f == "morningstar" and "MS:" + cod not in series:
+            if PROGRESO.get("activo"):
+                PROGRESO["hecho"] += 1
+                PROGRESO["texto"] = cod
+                PROGRESO["pct"] = min(99, int(100 * PROGRESO["hecho"] / PROGRESO["total"]))
             ms = descargar_morningstar(cod)
             # Los codigos 0P... de Morningstar existen tambien en Yahoo con ".F": sirven
             # para cubrir huecos y, donde coinciden, dan un decimal mas.
@@ -572,6 +612,24 @@ def descarga_series(productos_cfg, series=None):
         if p.get("vivo"):
             pide("CG:" + p["vivo"], descargar_coingecko, p["vivo"])
     return series
+
+
+def _prev_descargas(productos_cfg):
+    """Cuántas consultas hará descarga_series(), para el contador de progreso."""
+    n = 0
+    for p in productos_cfg:
+        f, cod = p.get("fuente"), p.get("codigo")
+        if cod and f == "yahoo":
+            n += 1 + (1 if simbolo_fx(p.get("moneda"))[0] else 0)
+        elif cod and f == "morningstar":
+            n += 1 + (1 if cod.startswith("0P") else 0)
+        elif cod and f == "coingecko":
+            n += 1
+        if p.get("respaldo"):
+            n += 1 + (1 if simbolo_fx(p.get("respaldoMoneda"))[0] else 0)
+        if p.get("vivo"):
+            n += 1
+    return n
 
 
 def serie_producto(p, carpeta, fresca=False):
@@ -618,7 +676,8 @@ def construir(cfg, carpeta, descargar=True):
     print("\n=== 1. Precios ===" if descargar is True else "\n=== 1. Precios guardados ===")
     series = descarga_series(productos_cfg)
     if cfg.get("movimientos"):
-        for sim in {s for r in REFERENCIAS.values() for s, _ in r["piezas"]}:
+        sims = {s for r in REFERENCIAS.values() for s, _ in r["piezas"]} | {"EURUSD=X"}
+        for sim in sims:
             if sim not in series:
                 series[sim] = descargar_serie(sim)
 
@@ -671,6 +730,9 @@ def construir(cfg, carpeta, descargar=True):
 
         mv = aplicar_movimientos(p, movs)
         p["realizado"] = round(mv["realizado"], 2)
+        p["dividendos"] = round(mv["dividendos"], 2)
+        p["intereses"] = round(mv["intereses"], 2)
+        p["impuestosPagados"] = round(mv["impuestos"], 2)
         p["_mv"] = mv
         cotiza = p["fuente"] != "manual"
         serie = precio_eur(p, series) if cotiza else {}
@@ -720,6 +782,41 @@ def construir(cfg, carpeta, descargar=True):
         pf = d(min(fechas_p))
         primera = pf if primera is None else min(primera, pf)
         productos.append(p)
+
+    # ---- propietario y moneda de cada componente (los filtros del panel) ----
+    props_cfg = cfg.get("propietarios") or []
+    defecto_prop = "compartido"   # lo que no tenga propietario asignado es de la familia
+    prop_de_cuenta = {c["id"]: (c.get("propietario") or "") for c in cfg.get("cuentas", [])}
+
+    def _dueño_de(m):
+        return (m.get("propietario") or prop_de_cuenta.get(m.get("cuenta") or "", "") or "")
+
+    for p in productos + otros + pasivos:
+        p.setdefault("propietario", "")
+        p.setdefault("cuenta", "")
+        if not p.get("propietario"):
+            p["propietario"] = defecto_prop
+        p["duenos"] = {p["propietario"]: 1.0}
+    for p in productos:
+        # Quién es dueño de cada producto: las unidades compradas por propietario
+        # (Tesla, por ejemplo, se compra desde cuentas de David y de Gina).
+        acc = defaultdict(float)
+        for m in movs_por.get(p["id"], []):
+            if m.get("tipo") in ("compra", "venta"):
+                acc[_dueño_de(m) or defecto_prop] += (1 if m.get("tipo") == "compra" else -1) * \
+                    float(m.get("unidades") or 0)
+        acc = {k: v for k, v in acc.items() if v > 1e-9}
+        if not acc:
+            acc = {p["propietario"]: 1.0}
+        total_u = sum(acc.values())
+        p["duenos"] = {k: v / total_u for k, v in acc.items()}
+        p["propietario"] = max(p["duenos"], key=p["duenos"].get)
+        cta = next((c for c in cfg.get("cuentas", []) if c["id"] == p.get("cuenta")), None)
+        p["cuentaNombre"] = cta["nombre"] if cta else ""
+    for p in otros + pasivos:
+        p["duenos"] = {p["propietario"]: 1.0}
+        cta = next((c for c in cfg.get("cuentas", []) if c["id"] == p.get("cuenta")), None)
+        p["cuentaNombre"] = cta["nombre"] if cta else ""
 
     if not (productos or otros or pasivos):
         print("\nLa cartera está vacía: todavía no hay nada que calcular.")
@@ -877,12 +974,11 @@ def construir(cfg, carpeta, descargar=True):
             if not snaps:
                 continue
             total += signo * float(snaps[-1][1])
-            serie = []
+            serie, j = [], -1
             for f in eje:
-                v = None
-                for j in range(len(snaps)):
-                    if f >= d(snaps[j][0]):
-                        v = float(snaps[j][1])
+                while j + 1 < len(snaps) and d(snaps[j + 1][0]) <= f:
+                    j += 1
+                v = float(snaps[j][1]) if j >= 0 else None
                 serie.append(r2(signo * v) if v is not None else None)
             series_extra.append({**it, "serie": serie,
                                  "serieAportado": [None] * len(eje),
@@ -911,6 +1007,25 @@ def construir(cfg, carpeta, descargar=True):
     flujos_globales.append((fecha_extracto, valor_tir))
     tir_total = r4(xirr(flujos_globales))
     realizado_total = round(sum(p.get("realizado") or 0 for p in productos), 2)
+    dividendos_total = round(sum(p.get("dividendos") or 0 for p in productos), 2)
+    # Intereses, impuestos y comisiones anotados en una CUENTA y no en un producto
+    # (así los apunta Portfolio Performance: los de Trade Republic, MyInvestor, el
+    # monetario de Revolut…). Sin esto los KPI no cuadran con los de PP.
+    intereses_cuenta = impuestos_cuenta = comisiones_cuenta = 0.0
+    for m in cfg.get("movimientos", []):
+        if m.get("producto"):
+            continue                  # esos ya están contados en su producto
+        t, imp = m.get("tipo"), float(m.get("importe") or 0)
+        ret = float(m.get("impuestos") or 0)
+        if t == "interes":
+            intereses_cuenta += imp + ret
+            impuestos_cuenta += ret
+        elif t == "impuesto":
+            impuestos_cuenta += imp
+        elif t == "comision":
+            comisiones_cuenta += imp
+    intereses_total = round(sum(p.get("intereses") or 0 for p in productos) + intereses_cuenta, 2)
+    impuestos_total = round(sum(p.get("impuestosPagados") or 0 for p in productos) + impuestos_cuenta, 2)
 
     for p in productos + ser_otros + ser_pasivos:
         p["peso"] = r4(p["valor"] / patrimonio) if patrimonio else 0
@@ -1016,7 +1131,7 @@ def construir(cfg, carpeta, descargar=True):
                                "color": p["slotColor"]})
             base_com += p["valor"]
     total_com = round(sum(c["anual"] for c in lineas_com), 2)
-    pagadas = round(sum(p["_mv"]["comisiones"] for p in productos), 2)
+    pagadas = round(sum(p["_mv"]["comisiones"] for p in productos) + comisiones_cuenta, 2)
     comisiones = {"lineas": lineas_com, "anual": total_com,
                   "base": round(base_com, 2),
                   "terPonderado": r4(total_com / base_com) if base_com else None,
@@ -1266,10 +1381,35 @@ def construir(cfg, carpeta, descargar=True):
                     "precioRef": r4(prod_v["nav"]), "btcRef": r2(ref),
                     "fechaRef": prod_v.get("navFecha") or fecha_extracto.isoformat()}
 
+    # ---- cuentas, propietarios y cambio actual (para los filtros del panel) ----
+    saldos_por_cuenta = {e.get("cuenta"): e for e in ser_otros}
+    cuentas_out = []
+    for c in cfg.get("cuentas", []):
+        e = saldos_por_cuenta.get(c["id"])
+        saldo = float(e.get("valor") or 0) if e else 0.0
+        mon = (c.get("moneda") or "EUR").upper()
+        if mon == "EUR":
+            eur = saldo
+        else:
+            t = valor_en(series.get(f"{mon}EUR=X") or {}, fecha_extracto, 7)
+            eur = saldo * t if t else None
+        cuentas_out.append({**c, "moneda": mon,
+                            "propietario": c.get("propietario") or defecto_prop,
+                            "saldo": round(saldo, 2),
+                            "saldoEur": round(eur, 2) if eur is not None else None})
+    eurus = valor_en(series.get("EURUSD=X") or {}, fecha_extracto, 7)
+    fx_actual = {"EURUSD": round(1 / eurus, 6) if eurus else None,
+                 "USDEUR": round(eurus, 6) if eurus else None}
+
     datos = {
         "generado": dt.datetime.now().replace(microsecond=0).isoformat(),
         "titular": cfg.get("titular", "Mi patrimonio"),
         "moneda": cfg.get("moneda", "EUR"),
+        "propietarios": props_cfg or [{"id": "david", "nombre": "David"},
+                                      {"id": "gina", "nombre": "Gina"},
+                                      {"id": "compartido", "nombre": "Compartido"}],
+        "cuentas": cuentas_out,
+        "fx": fx_actual,
         "fechaExtracto": fecha_extracto.isoformat(),
         "fechas": eje_iso,
         "productos": productos,
@@ -1283,6 +1423,9 @@ def construir(cfg, carpeta, descargar=True):
             "rentabilidad": r4(plusvalia_total / aportado_total) if aportado_total else None,
             "tir": tir_total,
             "realizado": realizado_total,
+            "dividendos": dividendos_total,
+            "intereses": intereses_total,
+            "impuestos": impuestos_total,
             "serie": serie_total,
             "serieAportado": serie_ap_total,
             "porClase": agrupar("clase"),

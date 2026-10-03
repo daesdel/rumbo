@@ -124,6 +124,16 @@ code{background:var(--sup2);padding:1px 6px;border-radius:5px;font-size:.9em}
 
 /* ============================ filtros del grafico ============================ */
 .filtros{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:0 0 15px}
+/* Filtros globales del panel: propietario x divisa */
+.filtrosGlobales{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px}
+.filtrosGlobales .subt{font-size:12.5px}
+body.sinDatos .filtrosGlobales{display:none}
+/* El boton de actualizar se va pintando de verde del 0 al 100 % */
+#btnPrecios.actualizando{
+  background:linear-gradient(90deg,var(--bien) var(--pct,0%),var(--sup) var(--pct,0%));
+  color:var(--tinta);border-color:var(--borde)
+}
+#btnPrecios.actualizando:disabled{opacity:1;cursor:progress}
 .filtro{
   display:inline-flex;align-items:center;gap:8px;border:1px solid var(--borde);
   background:var(--sup2);border-radius:999px;padding:5px 12px;font:inherit;font-size:12.5px;
@@ -646,6 +656,12 @@ body.video .tarjetaCanal{display:none}
 </div>
 <p class="aviso-legal">Herramienta informativa. No es asesoramiento financiero. No se garantiza la exactitud de los datos ni de los precios.</p>
 
+<div class="filtrosGlobales" id="filtrosGlobal" hidden>
+  <div class="segm" id="segProp"></div>
+  <div class="segm" id="segMon"></div>
+  <span class="subt" id="filtrosGlobalNota"></span>
+</div>
+
 <!-- ==================================================== PATRIMONIO -->
 <div class="panel" id="tab-patrimonio" role="tabpanel">
 
@@ -680,6 +696,12 @@ body.video .tarjetaCanal{display:none}
       <span class="subt">Pulsa uno para abrir su ficha completa</span>
     </header>
     <div class="chips" id="chips"></div>
+  </section>
+
+  <section class="tarjeta" id="seccionCuentas" style="margin-top:26px" hidden>
+    <header><h2>Cuentas</h2>
+      <span class="subt">Efectivo de cada cuenta, en su moneda y en euros</span></header>
+    <div class="tablaEnv"><table class="dt" id="tablaCuentas"></table></div>
   </section>
 
   <div class="rejilla2">

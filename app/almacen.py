@@ -16,11 +16,23 @@ from .motor import TIPOS, FUENTES, num_es
 
 COPIAS_MAX = 20
 TIPOS_MOV = {"compra": "Compra", "venta": "Venta", "dividendo": "Dividendo o cupón",
-             "comision": "Comisión"}
+             "comision": "Comisión", "interes": "Intereses", "impuesto": "Impuesto",
+             "deposito": "Depósito", "retirada": "Retirada", "transferencia": "Transferencia",
+             "traspaso": "Traspaso", "saldo": "Saldo", "cambio_divisa": "Cambio de divisa",
+             "apertura": "Apertura"}
+# Tipos que pueden anotarse sin producto (movimientos de una cuenta de efectivo).
+MOV_SIN_PRODUCTO = ("deposito", "retirada", "transferencia", "traspaso", "saldo",
+                    "cambio_divisa", "apertura", "interes", "impuesto", "comision")
 SOLO_SALDO = ("efectivo", "deuda")   # tipos que se siguen solo con saldos anotados
+TIPOS_CUENTA = ("efectivo", "banco", "broker", "fondo", "pension", "cripto", "otro")
+PROPIETARIOS_BASE = [{"id": "david", "nombre": "David"},
+                     {"id": "gina", "nombre": "Gina"},
+                     {"id": "compartido", "nombre": "Compartido"}]
 
 CARTERA_VACIA = {
-    "version": 1, "titular": "Mi patrimonio",
+    "version": 2, "titular": "Mi patrimonio",
+    "propietarios": [dict(p) for p in PROPIETARIOS_BASE],
+    "cuentas": [],
     "productos": [], "movimientos": [], "valoraciones": [],
     "comparador": [{"id": "real", "nombre": "Mi cartera real", "real": True}],
     "hitos": [10000, 25000, 50000, 100000, 250000, 500000, 1000000],
@@ -123,6 +135,26 @@ def producto(cfg, pid):
     return next((p for p in cfg.get("productos", []) if p["id"] == pid), None)
 
 
+def cuenta(cfg, cid):
+    return next((c for c in cfg.get("cuentas", []) if c["id"] == cid), None)
+
+
+def propietarios(cfg):
+    lista = cfg.get("propietarios")
+    if not lista:
+        cfg["propietarios"] = [dict(p) for p in PROPIETARIOS_BASE]
+        lista = cfg["propietarios"]
+    return lista
+
+
+def propietario_de(cfg, pid):
+    """Id del propietario de un producto; por defecto, el primero."""
+    p = producto(cfg, pid)
+    if p and p.get("propietario"):
+        return p["propietario"]
+    return propietarios(cfg)[0]["id"]
+
+
 def texto(v, maximo=200):
     return str(v).strip()[:maximo] if v is not None else ""
 
@@ -130,7 +162,8 @@ def texto(v, maximo=200):
 # ---------------------------------------------------------------- productos
 
 CAMPOS_TEXTO = ("nombre", "corto", "identificador", "codigo", "entidad", "clase", "gestora",
-                "tipoDetalle", "respaldo", "respaldoMoneda", "vivo", "papel")
+                "tipoDetalle", "respaldo", "respaldoMoneda", "vivo", "papel",
+                "propietario", "cuenta", "urlFuente")
 
 
 def guarda_producto(cfg, datos):
@@ -200,6 +233,37 @@ def reparte_colores(cfg, orden=None):
         producto(cfg, pid)["slot"] = n % 12 + 1
 
 
+def guarda_cuenta(cfg, datos):
+    """Crea o actualiza una cuenta (efectivo, banco, bróker...)."""
+    errores = []
+    nombre = texto(datos.get("nombre"))
+    if not nombre:
+        errores.append("Ponle un nombre a la cuenta.")
+    moneda = (texto(datos.get("moneda")) or "EUR").upper()
+    if not re.fullmatch(r"[A-Z]{3}", moneda):
+        errores.append(f"La moneda «{moneda}» no es válida: usa un código de tres letras, como EUR o USD.")
+    tipo = texto(datos.get("tipo")) or "efectivo"
+    if tipo not in TIPOS_CUENTA:
+        errores.append("Elige de qué tipo es la cuenta.")
+    prop = texto(datos.get("propietario"))
+    if prop and prop not in {p["id"] for p in propietarios(cfg)}:
+        errores.append("Ese propietario no existe.")
+    if errores:
+        raise ErrorValidacion(errores)
+    existente = cuenta(cfg, datos.get("id")) if datos.get("id") else None
+    nuevo = {"nombre": nombre, "tipo": tipo, "moneda": moneda,
+             "entidad": texto(datos.get("entidad"))}
+    if prop:
+        nuevo["propietario"] = prop
+    if existente:
+        existente.update(nuevo)
+        return existente
+    destino = {"id": slug(nombre, {c["id"] for c in cfg.get("cuentas", [])})}
+    destino.update(nuevo)
+    cfg.setdefault("cuentas", []).append(destino)
+    return destino
+
+
 def borra_producto(cfg, pid):
     """Borra el producto con sus movimientos y valores anotados."""
     if not producto(cfg, pid):
@@ -228,15 +292,19 @@ def unidades_a(cfg, pid, fecha_iso, excluir=None):
 
 def guarda_movimiento(cfg, datos):
     errores = []
-    p = producto(cfg, datos.get("producto"))
-    if not p:
-        errores.append("Elige el producto.")
-    elif p.get("tipo") in SOLO_SALDO:
-        errores.append(f"«{p.get('corto') or p['nombre']}» se sigue con saldos, no con movimientos: "
-                       "anótalo en «Saldos y valores».")
     tipo = datos.get("tipo")
     if tipo not in TIPOS_MOV:
-        errores.append("Elige el tipo de movimiento: compra, venta, dividendo o comisión.")
+        errores.append("Elige el tipo de movimiento: " + ", ".join(TIPOS_MOV) + ".")
+    p = producto(cfg, datos.get("producto")) if datos.get("producto") else None
+    cid = texto(datos.get("cuenta"))
+    if cid and not cuenta(cfg, cid):
+        cid = ""
+    if not p:
+        if not cid:
+            errores.append("Elige el producto (o la cuenta, si es un movimiento de efectivo).")
+    elif p.get("tipo") in SOLO_SALDO and not cid:
+        errores.append(f"«{p.get('corto') or p['nombre']}» se sigue con saldos, no con movimientos: "
+                       "anótalo en «Saldos y valores».")
     f = fecha(datos.get("fecha"), errores)
     importe = numero(datos.get("importe"), "el importe", errores, mayor_que=0)
     cotiza = bool(p and p.get("fuente") != "manual")
@@ -247,6 +315,9 @@ def guarda_movimiento(cfg, datos):
     elif tipo == "venta":
         unidades = numero(datos.get("unidades"), "cuántas unidades vendiste", errores,
                           obligatorio=cotiza, minimo=0) or 0.0
+    elif datos.get("unidades") not in (None, ""):
+        unidades = numero(datos.get("unidades"), "las unidades", errores,
+                          obligatorio=False) or 0.0
     comision = numero(datos.get("comision"), "la comisión", errores, obligatorio=False, minimo=0)
     if comision and importe and comision >= importe:
         errores.append("La comisión no puede ser mayor que el importe total.")
@@ -258,8 +329,18 @@ def guarda_movimiento(cfg, datos):
     if errores:
         raise ErrorValidacion(errores)
 
-    mov = {"fecha": f, "producto": p["id"], "tipo": tipo, "unidades": round(unidades, 8),
+    mov = {"fecha": f, "tipo": tipo, "unidades": round(unidades, 8),
            "importe": round(importe, 2)}
+    if p and not (p.get("tipo") in SOLO_SALDO and cid):
+        mov["producto"] = p["id"]
+    if cid:
+        mov["cuenta"] = cid
+    for k in CAMPOS_MOV_EXTRA:
+        if k in ("cuenta", "producto"):
+            continue
+        v = datos.get(k)
+        if v not in (None, ""):
+            mov[k] = round(v, 4) if isinstance(v, float) else v
     if comision:
         mov["comision"] = round(comision, 2)
     if texto(datos.get("nota")):
@@ -274,6 +355,10 @@ def guarda_movimiento(cfg, datos):
     lista.append(mov)
     lista.sort(key=lambda m: m["fecha"])
     return mov
+
+
+CAMPOS_MOV_EXTRA = ("cuenta", "contrapartida", "propietario", "importeOriginal",
+                    "monedaOriginal", "tipoCambio", "impuestos", "origen", "fuente", "urlFuente")
 
 
 def borra_movimiento(cfg, mid):
@@ -291,7 +376,10 @@ def guarda_valoracion(cfg, datos):
     if not p:
         errores.append("Elige el producto.")
     f = fecha(datos.get("fecha"), errores)
-    valor = numero(datos.get("valor"), "el valor", errores, minimo=0)
+    # Una cuenta puede quedar en negativo (un pago antes de que entre el dinero):
+    # es un dato real y no un error de introducción.
+    minimo = None if (p and p.get("tipo") in SOLO_SALDO) else 0
+    valor = numero(datos.get("valor"), "el valor", errores, minimo=minimo)
     aportado = numero(datos.get("aportado"), "lo aportado", errores, obligatorio=False, minimo=0)
     if errores:
         raise ErrorValidacion(errores)
