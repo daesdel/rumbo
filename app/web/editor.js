@@ -24,6 +24,8 @@
   };
   const nombre = p => p ? (p.corto || p.nombre) : "¿?";
   const prod = id => E.cfg.productos.find(p => p.id === id);
+  const cuentaDe = id => (E.cfg.cuentas || []).find(c => c.id === id);
+  const propDe = id => (E.cfg.propietarios || []).find(p => p.id === id);
   const soloSaldo = p => SOLO_SALDO.includes(p.tipo);
   const manual = p => p.fuente === "manual" || soloSaldo(p);
   const opciones = (obj, sel) => Object.entries(obj)
@@ -373,11 +375,18 @@
       .sort((a, b) => a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0);
     const filas = movs.map(m => {
       const p = prod(m.producto);
+      const c = cuentaDe(m.cuenta);
+      const pr = propDe(m.propietario);
       const precio = m.unidades ? (m.importe - (m.comision || 0)) / m.unidades : null;
+      const original = m.monedaOriginal && m.monedaOriginal !== "EUR" && m.importeOriginal != null
+        ? `${num(m.importeOriginal, 2)} ${esc(m.monedaOriginal)}` : "—";
       return `<tr><td>${fecha(m.fecha)}</td><td style="text-align:left">${p ? `<i class="pt" style="background:var(--s${p.slot || 1})"></i>` : ""}${esc(nombre(p))}</td>
         <td style="text-align:left">${esc(E.tiposMov[m.tipo] || m.tipo)}</td>
+        <td style="text-align:left" class="subt" title="${esc(c ? c.nombre : "")}">${esc(c ? c.nombre : "—")}</td>
+        <td style="text-align:left">${esc(pr ? pr.nombre : (m.propietario || "—"))}</td>
         <td>${m.unidades ? num(m.unidades) : "—"}</td>
         <td class="${m.tipo === "compra" || m.tipo === "comision" ? "" : "pos"}">${eur(m.importe)}</td>
+        <td class="subt">${original}</td>
         <td>${precio ? num(precio) + " €" : "—"}</td>
         <td class="nota" title="${esc(m.nota)}">${esc(m.nota || "")}</td>
         <td class="acc"><button data-acc="editarMov" data-id="${esc(m.id)}">Editar</button>
@@ -389,9 +398,10 @@
           ${cotizables.map(p => `<option value="${esc(p.id)}"${p.id === E.filtro ? " selected" : ""}>${esc(nombre(p))}</option>`).join("")}</select>
         <button class="btn prim" data-acc="nuevoMov">+ Añadir movimiento</button></header>
       ${filas ? `<div class="tablaEnv alto"><table class="dt"><thead><tr><th>Fecha</th><th style="text-align:left">Producto</th>
-        <th style="text-align:left">Tipo</th><th>Unidades</th><th>Importe</th><th>Precio por unidad</th>
+        <th style="text-align:left">Tipo</th><th style="text-align:left">Cuenta</th><th style="text-align:left">Propietario</th>
+        <th>Unidades</th><th>Importe (EUR)</th><th>Importe original</th><th>Precio por unidad</th>
         <th style="text-align:left">Nota</th><th></th></tr></thead><tbody>${filas}</tbody></table></div>
-        <p class="subt" style="margin-top:10px">${movs.length} movimientos.</p>`
+        <p class="subt" style="margin-top:10px">${movs.length} movimientos · el importe original es el de la moneda en la que se hizo la operación (si fue en dólares, verás los dólares); el resto está convertido a euros con el cambio de ese día.</p>`
         : '<p class="subt">No hay movimientos todavía.</p>'}</section>`;
   }
 
@@ -407,16 +417,26 @@
     if (!cotizables.length) { alert("Primero añade un producto en «Productos»."); return; }
     const nuevo = !m;
     m = m || { fecha: hoy(), tipo: "compra", producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) };
+    const cuentas = E.cfg.cuentas || [];
+    const props = E.cfg.propietarios || [];
+    // Cuenta y propietario por defecto: los del producto, y si no, los de la cuenta.
+    const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
+    const propPorDef = m.propietario || (cuentaDe(cuentaPorDef) || {}).propietario
+      || (props[0] || {}).id || "";
     const pildoras = Object.entries(E.tiposMov).map(([k, v]) =>
       `<label><input type="radio" name="tipo" value="${esc(k)}"><span>${esc(k === "dividendo" ? "Dividendo" : v)}</span></label>`).join("");
     const f = abreModal(nuevo ? "Añadir movimiento" : "Editar movimiento", `
       <div class="pildoras">${pildoras}</div>
       <div class="rejilla" style="margin-top:18px">
-        ${campo("Producto", `<select name="producto">${cotizables.map(p =>
+        ${campo("Producto", `<select name="producto"><option value="">— Ninguno: es un movimiento de cuenta —</option>${cotizables.map(p =>
           `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`, "", "ancho")}
+        ${campo("Cuenta", `<select name="cuenta"><option value="">— sin cuenta —</option>${cuentas.map(c =>
+          `<option value="${esc(c.id)}">${esc(c.nombre)}${c.moneda && c.moneda !== "EUR" ? " · " + esc(c.moneda) : ""}</option>`).join("")}</select>`, "de qué cuenta sale o entra", "ancho")}
+        ${campo("Propietario", `<select name="propietario">${props.map(p =>
+          `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select>`, "de quién es")}
         ${campo("Fecha", `<input type="date" name="fecha" max="${hoy()}">`)}
         ${campo("Unidades", '<input name="unidades" inputmode="decimal" placeholder="0">', "participaciones, acciones…", "siUnid")}
-        ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>')}
+        ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "en euros")}
         ${campo("Comisión", '<div class="conSufijo"><input name="comision" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "ya incluida en el importe", "siCom")}
         ${campo("Nota", '<input name="nota" maxlength="200" placeholder="Por ejemplo: aportación mensual">', "opcional", "ancho")}
       </div>
@@ -429,7 +449,8 @@
       recuerda.guarda("patrimonio.editor", "movimientos");
       return null;
     }, nuevo ? "Guardar movimiento" : "Guardar cambios");
-    rellena(f, { ...m, unidades: decimal(m.unidades || ""), importe: decimal(m.importe), comision: decimal(m.comision) });
+    rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
+      unidades: decimal(m.unidades || ""), importe: decimal(m.importe), comision: decimal(m.comision) });
     const ajusta = () => {
       const t = f.elements.tipo.value;
       const p = prod(f.elements.producto.value);

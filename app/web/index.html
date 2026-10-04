@@ -637,6 +637,7 @@ body.video .tarjetaCanal{display:none}
     <nav class="tabs" id="tabs" role="tablist">
       <button data-tab="patrimonio" role="tab" aria-selected="true">Patrimonio</button>
       <button data-tab="mes" role="tab" aria-selected="false">El mes</button>
+      <button data-tab="periodo" role="tab" aria-selected="false">Periodo</button>
       <button data-tab="fondos" role="tab" aria-selected="false">Productos</button>
       <button data-tab="rendimiento" role="tab" aria-selected="false">Rendimiento</button>
       <button data-tab="datos" role="tab" aria-selected="false">Mis datos</button>
@@ -659,6 +660,8 @@ body.video .tarjetaCanal{display:none}
 <div class="filtrosGlobales" id="filtrosGlobal" hidden>
   <div class="segm" id="segProp"></div>
   <div class="segm" id="segMon"></div>
+  <span class="subt">Cantidades en</span>
+  <div class="segm" id="segVis"></div>
   <span class="subt" id="filtrosGlobalNota"></span>
 </div>
 
@@ -770,14 +773,44 @@ body.video .tarjetaCanal{display:none}
   <section class="tarjeta">
     <header><h2>Qué ha hecho cada componente</h2><span class="subt" id="mesTablaNota"></span></header>
     <div class="tablaEnv"><table class="dt" id="mesTabla"></table></div>
+  </section>    <section class="tarjeta">
+      <header>
+        <h2>Tu esfuerzo y el del mercado, mes a mes</h2>
+        <span class="subt">Lo que aportaste tú, y encima lo que puso o quitó el mercado.</span>
+      </header>
+      <div class="envGraf" id="grafMesHist"></div>
+    </section>
+  </div>
+
+<!-- ==================================================== PERIODO -->
+<div class="panel" id="tab-periodo" role="tabpanel" hidden>
+  <section class="hero" style="padding-bottom:0">
+    <div class="mesBarra">
+      <select id="perSel" aria-label="Elegir el periodo"></select>
+      <span id="perFechas" hidden>
+        <input type="date" id="perDesde" aria-label="Fecha de inicio">
+        <span class="subt">a</span>
+        <input type="date" id="perHasta" aria-label="Fecha de fin">
+      </span>
+      <div class="sep"></div>
+      <span class="subt" id="perNota"></span>
+    </div>
+    <div class="hEtq" id="perEtq">Cambio del periodo</div>
+    <div class="hCifra" id="perCifra">—</div>
+    <div class="hSub" id="perSub"></div>
+  </section>
+
+  <div class="mesTarjetas" id="perTarjetas"></div>
+
+  <section class="tarjeta">
+    <header><h2>Qué ha hecho cada componente</h2><span class="subt" id="perTablaNota"></span></header>
+    <div class="tablaEnv"><table class="dt" id="perTabla"></table></div>
   </section>
 
   <section class="tarjeta">
-    <header>
-      <h2>Tu esfuerzo y el del mercado, mes a mes</h2>
-      <span class="subt">Lo que aportaste tú, y encima lo que puso o quitó el mercado.</span>
-    </header>
-    <div class="envGraf" id="grafMesHist"></div>
+    <header><h2>Tu dinero y el patrimonio en el periodo</h2>
+      <span class="subt">Lo que has ido aportando, día a día, frente a lo que vale la cartera</span></header>
+    <div class="envGraf" id="grafPeriodo"></div>
   </section>
 </div>
 

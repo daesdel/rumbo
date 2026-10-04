@@ -1478,6 +1478,25 @@ def construir(cfg, carpeta, descargar=True):
     fx_actual = {"EURUSD": round(1 / eurus, 6) if eurus else None,
                  "USDEUR": round(eurus, 6) if eurus else None}
 
+    # Serie diaria del cambio (dólares por euro) alineada con el eje de fechas.
+    # El panel la usa para poder mostrar todas las cifras en dólares con el
+    # cambio de CADA DÍA: es lo que hace que una inversión comprada en dólares
+    # rinda distinto vista en euros (con el riesgo de cambio) que en dólares.
+    eurusd_dia = series.get("EURUSD=X") or {}
+    fx_serie, cambio_ultimo = [], None
+    for f in eje_iso:
+        t = valor_en(eurusd_dia, d(f), 7) if eurusd_dia else None
+        if t:
+            cambio_ultimo = t
+        fx_serie.append(r4(cambio_ultimo) if cambio_ultimo else None)
+    cambio_primero = next((x for x in fx_serie if x), None)
+    if cambio_primero:
+        for i, x in enumerate(fx_serie):
+            if x is None:
+                fx_serie[i] = cambio_primero
+            else:
+                break
+
     datos = {
         "generado": dt.datetime.now().replace(microsecond=0).isoformat(),
         "titular": cfg.get("titular", "Mi patrimonio"),
@@ -1487,6 +1506,7 @@ def construir(cfg, carpeta, descargar=True):
                                       {"id": "compartido", "nombre": "Compartido"}],
         "cuentas": cuentas_out,
         "fx": fx_actual,
+        "fxSerie": fx_serie,
         "fechaExtracto": fecha_extracto.isoformat(),
         "fechas": eje_iso,
         "productos": productos,

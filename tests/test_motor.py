@@ -347,6 +347,23 @@ def test_construir_cartera_vacia_devuelve_none(tmp_path):
     assert motor.construir(cfg, str(tmp_path), descargar=False) is None
 
 
+def test_fxserie_alineada_con_el_eje_de_fechas(tmp_path):
+    """fxSerie lleva el cambio diario en dólares por euro, alineado con el eje:
+    es lo que permite mostrar el panel en dólares con el cambio de CADA día
+    (el cambio de hoy solo serviría para escalar, sin efecto real)."""
+    (tmp_path / "cache").mkdir()
+    cambio = {"2024-12-31": 1.10, "2025-06-01": 1.15}
+    (tmp_path / "cache" / "EURUSD_X.json").write_text(json.dumps(cambio), encoding="utf-8")
+
+    cfg = _fondo_y_cuenta(saldo=100.0)
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    serie = datos["fxSerie"]
+    assert len(serie) == len(datos["fechas"])          # alineada con el eje
+    assert serie[0] is not None                        # días iniciales rellenados
+    assert serie[-1] == pytest.approx(1.15)            # último cambio conocido
+    assert all(x is None or x > 0 for x in serie)
+
+
 def test_construir_es_idempotente(tmp_path):
     """Dos cálculos seguidos dan las mismas cifras (y reutilizan la caché)."""
     a = motor.construir(_cartera_de_prueba(), str(tmp_path), descargar=False)

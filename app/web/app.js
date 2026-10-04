@@ -61,7 +61,97 @@
     // Filtros globales del panel: [Total · David · Gina · Compartido] × [Global · EUR · USD]
     prop: recuerda.lee("patrimonio.prop") || "total",
     mon: recuerda.lee("patrimonio.mon") || "global",
+    // Moneda en la que se MUESTRAN las cifras (los datos se convierten al pintar).
+    vis: recuerda.lee("patrimonio.vis") === "USD" ? "USD" : "EUR",
+    // Periodo de la pestaña «Periodo»: últimos X días, año Y o dos fechas.
+    periodo: recuerda.lee("patrimonio.periodo") || "u30",
+    perDesde: recuerda.lee("patrimonio.perDesde") || "",
+    perHasta: recuerda.lee("patrimonio.perHasta") || "",
   };
+  G.setMoneda(estado.vis);
+
+  /* ----------------------------------------------------------------
+     Moneda de visualización: todo se puede ver en euros (por defecto)
+     o en dólares. Las series se convierten con el cambio de CADA DÍA
+     (por eso una inversión comprada en dólares rinde distinto en una
+     moneda que en la otra) y las cifras puntuales con el cambio de hoy.
+     ---------------------------------------------------------------- */
+  const enUSD = () => estado.vis === "USD";
+  const red2 = v => Math.round(v * 100) / 100;
+  let convUSD = new WeakMap();          // conversión cacheada por producto
+  let mapaIdx = null, mapaMeses = null; // fecha -> índice, mes -> último índice
+  const reiniciaConv = () => { convUSD = new WeakMap(); mapaIdx = null; mapaMeses = null; };
+  function idxFecha(f) {
+    if (!mapaIdx) { mapaIdx = new Map(); D.fechas.forEach((x, i) => mapaIdx.set(x, i)); }
+    const i = mapaIdx.get(f);
+    return i === undefined ? -1 : i;
+  }
+  function ultimoIdxMes(ym) {
+    if (!mapaMeses) { mapaMeses = new Map(); D.fechas.forEach((x, i) => mapaMeses.set(x.slice(0, 7), i)); }
+    const i = mapaMeses.get(ym);
+    return i === undefined ? D.fechas.length - 1 : i;
+  }
+  /** Dólares por euro en el día i, con el cambio actual de respaldo.
+      (El motor guarda en fx.USDEUR lo que su nombre no dice: dólares por euro.) */
+  function fxEn(i) {
+    if (!enUSD()) return 1;
+    const s = D.fxSerie || [];
+    let t = null;
+    if (i >= 0) for (let k = Math.min(i, s.length - 1); k >= 0; k--) { if (s[k] != null) { t = s[k]; break; } }
+    if (t == null) for (let k = 0; k < s.length; k++) { if (s[k] != null) { t = s[k]; break; } }
+    if (t == null) t = (D.fx && D.fx.USDEUR) || null;
+    return t || 1;
+  }
+  const fxHoy = () => fxEn(D.fechas.length - 1);
+  const convAhora = v => (v == null || !enUSD()) ? v : red2(v * fxHoy());
+  function convSerie(arr) {
+    if (!arr || !enUSD()) return arr;
+    return arr.map((v, i) => v == null ? null : red2(v * fxEn(i)));
+  }
+  /** Aportado acumulado: cada aporte se convierte con el cambio del día en
+      que se hizo, no con el de hoy (así un depósito en dólares sigue siendo
+      los dólares que metiste realmente). */
+  function convApSerie(arr) {
+    if (!arr || !enUSD()) return arr;
+    let acum = 0, prev = null;
+    return arr.map((v, i) => {
+      if (v == null) return null;
+      acum += (v - (prev == null ? 0 : prev)) * fxEn(i);
+      prev = v;
+      return red2(acum);
+    });
+  }
+  /** Copia del producto con sus cifras en la moneda de visualización (cacheada). */
+  function baseConv(p) {
+    if (!enUSD() || p._conv) return p;      // idempotente: no convertir dos veces
+    let c = convUSD.get(p);
+    if (c) return c;
+    c = Object.assign({}, p, { _conv: true });
+    c.valor = convAhora(p.valor);
+    ["aportado", "realizado", "dividendos", "intereses", "impuestosPagados",
+      "precioMedio", "precioActual", "nav"].forEach(k => { if (p[k] != null) c[k] = convAhora(p[k]); });
+    if (p.serie) c.serie = convSerie(p.serie);
+    if (p.serieAportado) c.serieAportado = convApSerie(p.serieAportado);
+    // El aportado total se toma de su curva ya convertida: así cada aporte va
+    // con el cambio del día en que se hizo (un depósito en dólares sigue siendo
+    // los dólares que metiste) y la rentabilidad en USD difiere de la de EUR.
+    if (p.aportado != null && c.serieAportado) {
+      const ap = c.serieAportado.reduce((a, v) => (v == null ? a : v), null);
+      if (ap != null) c.aportado = ap;
+    }
+    if (p.flujos) c.flujos = p.flujos.map(([f, v]) => [f, v * fxEn(idxFecha(f))]);
+    if (p.aportaciones) c.aportaciones = p.aportaciones.map(a => Object.assign({}, a, {
+      importe: a.importe != null ? red2(a.importe * fxEn(idxFecha(a.fecha))) : null,
+      valor: a.valor != null ? convAhora(a.valor) : null,
+    }));
+    if (p.tramos) {
+      const t = Object.assign({}, p.tramos);
+      ["p33", "p67", "min", "max", "mediana"].forEach(k => { if (t[k] != null) t[k] = convAhora(t[k]); });
+      c.tramos = t;
+    }
+    convUSD.set(p, c);
+    return c;
+  }
 
   /* ---------------------------------------------- ¿y si lo hubieras metido en un indexado? */
   function pintaComparacion() {
@@ -91,21 +181,26 @@
     const pct = r.valor ? dif / r.valor : 0;
     const igual = Math.abs(pct) < 0.005;
     const nom = esc(r.nombre);   // nombre de la referencia (puede ser tuyo)
+    // Las tres series y las cajas se pasan a la moneda de visualización.
+    const apConv = convApSerie(C.aportado);
+    const apHoy = apConv[apConv.length - 1];
+    const tuV = convAhora(C.tuValor), refV = convAhora(r.valor);
+    const difM = tuV - refV;
     const veredicto = igual ? `Vas prácticamente igual que el ${nom}.`
-      : dif > 0 ? `Vas ${G.fmtEur(Math.abs(dif), 0)} por delante del ${nom} (${G.fmtPctSigno(pct, 1)}).`
-      : `Con el ${nom} tendrías ${G.fmtEur(Math.abs(dif), 0)} más (${G.fmtPctSigno(-dif / C.tuValor, 1)}).`;
+      : dif > 0 ? `Vas ${G.fmtEur(Math.abs(difM))} por delante del ${nom} (${G.fmtPctSigno(pct, 1)}).`
+      : `Con el ${nom} tendrías ${G.fmtEur(Math.abs(difM))} más (${G.fmtPctSigno(-dif / C.tuValor, 1)}).`;
     const caja = (et, v, extra, cls = "") => `<div class="compCaja ${cls}"><span>${et}</span><b>${v}</b>${extra ? `<small>${extra}</small>` : ""}</div>`;
     $("#compTitular").innerHTML =
-      caja("Tú tienes hoy", G.fmtEur(C.tuValor, 0), `TIR ${G.fmtPctSigno(C.tuTir, 1)}`) +
-      caja(`Con el ${nom} tendrías`, G.fmtEur(r.valor, 0), `TIR ${G.fmtPctSigno(r.tir, 1)}`) +
-      caja("Has puesto de tu bolsillo", G.fmtEur(C.aportado[C.aportado.length - 1], 0), "compras menos ventas") +
+      caja("Tú tienes hoy", G.fmtEur(tuV), `TIR ${G.fmtPctSigno(C.tuTir, 1)}`) +
+      caja(`Con el ${nom} tendrías`, G.fmtEur(refV), `TIR ${G.fmtPctSigno(r.tir, 1)}`) +
+      caja("Has puesto de tu bolsillo", G.fmtEur(apHoy), "compras menos ventas") +
       caja("Veredicto", veredicto, "", "veredicto");
     G.multiLinea($("#grafComparacion"), {
       fechas: D.fechas, alto: 300,
       series: [
-        { nombre: "Tu cartera", valores: C.tuya, color: G.css("--s1"), destacado: true },
-        { nombre: "Con el " + r.nombre, valores: r.serie, color: G.css("--s2") },
-        { nombre: "Tu dinero puesto", valores: C.aportado, color: G.css("--tinta3") },
+        { nombre: "Tu cartera", valores: convSerie(C.tuya), color: G.css("--s1"), destacado: true },
+        { nombre: "Con el " + r.nombre, valores: convSerie(r.serie), color: G.css("--s2") },
+        { nombre: "Tu dinero puesto", valores: apConv, color: G.css("--tinta3") },
       ],
       formatoY: v => G.fmtEurCorto(v),
       formatoValor: v => G.fmtEur(v, 0),
@@ -143,7 +238,7 @@
       : [mezcla(base, "#fcfcfb", 0.58), base, mezcla(base, "#000000", 0.32)];
   }
 
-  const TODOS_CRUDOS = () => D.productos.concat(D.otrosActivos || [], D.pasivos || []);
+  const TODOS_CRUDOS = () => D.productos.concat(D.otrosActivos || [], D.pasivos || []).map(baseConv);
 
   /* ----------------------------------------------------------------
      Filtros globales: propietario (Total/David/Gina/Compartido) y
@@ -187,7 +282,8 @@
       if (!pasaMoneda(p)) return;
       const f = factorDe(p);
       if (f <= 1e-9) return;
-      out.push(f === 1 ? Object.assign({}, p, { _f: 1 }) : escala(p, f));
+      const b = baseConv(p);
+      out.push(f === 1 ? Object.assign({}, b, { _f: 1 }) : escala(b, f));
     });
     const peso = out.reduce((a, p) => a + (p.valor || 0), 0);
     out.forEach(p => { p.peso = peso ? (p.valor || 0) / peso : 0; });   // reparto dentro del filtro
@@ -208,7 +304,7 @@
   }
   function valorDe(p) {
     const pv = precioVivo();
-    if (pv && p.id === pv.id) return pv.titulos * pv.precio;
+    if (pv && p.id === pv.id) return convAhora(pv.titulos * pv.precio);
     return p.valor || 0;
   }
 
@@ -286,7 +382,8 @@
     const am = D.aportacionesMensuales;
     const ids = new Set(lista.map(p => p.id));
     const porMes = am.meses.map((_, i) => Object.keys(am.porProducto)
-      .reduce((a, id) => a + (ids.has(id) ? (am.porProducto[id][i] || 0) : 0), 0));
+      .reduce((a, id) => a + (ids.has(id) ? (am.porProducto[id][i] || 0) : 0), 0))
+      .map((v, i) => v * fxEn(ultimoIdxMes(am.meses[i])));   // en euros fxEn vale 1
     const mesesConAp = am.meses.filter((m, i) => porMes[i] > 0);
     const ult12 = porMes.slice(-12);
     const ritmo = ult12.length ? ult12.reduce((a, b) => a + b, 0) / ult12.length : 0;
@@ -379,6 +476,14 @@
     if (!props.some(p => p.id === estado.prop)) estado.prop = "total";
     pintaSegm($("#segProp"), props, estado.prop, id => cambiaFiltro("prop", id));
     pintaSegm($("#segMon"), MONEDAS, estado.mon, id => cambiaFiltro("mon", id));
+    pintaSegm($("#segVis"), [{ id: "EUR", et: "€ Euros" }, { id: "USD", et: "$ Dólares" }], estado.vis, id => {
+      if (id === estado.vis) return;
+      estado.vis = id;
+      recuerda.guarda("patrimonio.vis", id);
+      G.setMoneda(id);
+      reiniciaConv();
+      pintar();
+    });
     const n = TODOS().length;
     const et = (props.find(p => p.id === estado.prop) || {}).et || "Total";
     const mo = (MONEDAS.find(m => m.id === estado.mon) || {}).et || "Global";
@@ -460,7 +565,7 @@
     }
     if (filtro) {
       partes.push(`<button class="pill reset" id="btnReset" title="Volver a mostrarlo todo">
-        de ${G.fmtEur(mTodo.valor, 0)} totales · ver todo</button>`);
+        de ${G.fmtEur(mTodo.valor)} totales · ver todo</button>`);
     }
     $("#heroSub").innerHTML = partes.join('<span style="color:var(--tinta3)">·</span>');
     const reset = $("#btnReset");
@@ -483,14 +588,14 @@
 
   function pintaKPIs(m) {
     const kpis = [
-      { e: "Aportado", v: G.fmtEur(m.aportado, 0), n: `${m.numAportaciones} aportaciones` },
+      { e: "Aportado", v: G.fmtEur(m.aportado), n: `${m.numAportaciones} aportaciones` },
       {
         e: "Ganancia total", v: G.fmtEurSigno(m.plusvalia),
         n: m.rentabilidad != null ? G.fmtPctSigno(m.rentabilidad) + " sobre lo aportado" : "sin coste registrado",
         cl: m.plusvalia >= 0 ? "pos" : "neg"
       },
       { e: "TIR anualizada", v: G.fmtPctSigno(m.tir), n: "rentabilidad real del dinero", cl: m.tir >= 0 ? "pos" : "neg" },
-      { e: "Ritmo mensual", v: G.fmtEur(m.ritmo, 0), n: "media de los últimos 12 meses" },
+      { e: "Ritmo mensual", v: G.fmtEur(m.ritmo), n: "media de los últimos 12 meses" },
       { e: "Racha", v: m.racha + (m.racha === 1 ? " mes" : " meses"), n: "aportando sin fallar" },
       { e: "Peor caída", v: G.fmtPctSigno(m.caida), n: m.caidaFecha ? "del patrimonio, el " + G.fmtFecha(m.caidaFecha) : "", cl: "neg" },
     ];
@@ -583,21 +688,24 @@
     const props = {};
     (D.propietarios || []).forEach(p => { props[p.id] = p.nombre; });
     const nom = c => props[c.propietario] || c.propietario || "Compartido";
-    const suma = filas.reduce((a, c) => a + (c.saldoEur || 0), 0);
+    const enEur = c => (c.saldoEur == null ? null : convAhora(c.saldoEur));
+    const suma = filas.reduce((a, c) => a + (enEur(c) || 0), 0);
     const nat = estado.mon !== "global";
+    const nato = v => Number(v == null ? 0 : v).toLocaleString("es-ES",
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     $("#tablaCuentas").innerHTML =
       `<thead><tr><th>Cuenta</th><th>Entidad</th><th>Propietario</th><th>Moneda</th>
-        <th>Saldo</th>${nat ? "" : "<th>En euros</th>"}</tr></thead>
+        <th>Saldo</th>${nat ? "" : `<th>En ${enUSD() ? "dólares" : "euros"}</th>`}</tr></thead>
        <tbody>${filas.map(c => `<tr>
         <td>${esc(c.nombre)}</td>
         <td class="subt">${esc(c.entidad || "")}</td>
         <td>${esc(nom(c))}</td>
         <td class="subt">${esc(c.moneda)}</td>
-        <td>${G.fmtEur(c.saldo, 2).replace("€", c.moneda === "EUR" ? "€" : c.moneda)}</td>
-        ${nat ? "" : `<td>${c.saldoEur == null ? "—" : G.fmtEur(c.saldoEur, 2)}</td>`}
+        <td>${nato(c.saldo)} ${esc(c.moneda)}</td>
+        ${nat ? "" : `<td>${enEur(c) == null ? "—" : G.fmtEur(enEur(c))}</td>`}
       </tr>`).join("")}</tbody>
        <tfoot><tr><td colspan="4">${filas.length} ${filas.length === 1 ? "cuenta" : "cuentas"}</td>
-        <td></td>${nat ? "" : `<td>${G.fmtEur(suma, 2)}</td>`}</tr></tfoot>`;
+        <td></td>${nat ? "" : `<td>${G.fmtEur(suma)}</td>`}</tr></tfoot>`;
   }
 
   function pintaDistribucion() {
@@ -627,11 +735,12 @@
     const series = visibles()
       .filter(p => (am.porProducto[p.id] || []).some(v => v))
       .map(p => ({ nombre: p.corto || p.nombre, color: color(p),
-                   valores: am.porProducto[p.id].slice(i0).map(v => v * (p._f || 1)) }));
+                   valores: am.porProducto[p.id].slice(i0)
+                     .map((v, j) => v * (p._f || 1) * fxEn(ultimoIdxMes(meses[j]))) }));
     G.barrasApiladas($("#grafBarras"), { categorias: meses, alto: 236, series });
     const suma = meses.reduce((a, _, i) => a + series.reduce((b, s) => b + (s.valores[i] || 0), 0), 0);
     $("#notaAport").textContent = meses.length
-      ? `${G.fmtEur(suma, 0)} en ${meses.length} ${meses.length === 1 ? "mes" : "meses"}` : "";
+      ? `${G.fmtEur(suma)} en ${meses.length} ${meses.length === 1 ? "mes" : "meses"}` : "";
   }
 
   function pintaHitos(mVista) {
@@ -639,21 +748,23 @@
     $("#hitos").closest("section").hidden = !D.total.hitos.length;
     const serie = mVista.serie || [];
     $("#hitos").innerHTML = D.total.hitos.map(h => {
-      const i = serie.findIndex(v => v >= h.importe);
+      const imp = convAhora(h.importe);          // hitos en la moneda de visualización
+      const i = serie.findIndex(v => v != null && v >= imp);
       const fecha = i >= 0 ? D.fechas[i] : null;
       const hecho = !!fecha;
       return `<div class="hito ${hecho ? "hecho" : ""}">
-        <div class="im">${G.fmtEurCorto(h.importe)}</div>
-        <div class="fe">${hecho ? "✓ " + G.fmtFecha(fecha) : "faltan " + G.fmtEurCorto(h.importe - mVista.valor)}</div>
+        <div class="im">${G.fmtEurCorto(imp)}</div>
+        <div class="fe">${hecho ? "✓ " + G.fmtFecha(fecha) : "faltan " + G.fmtEurCorto(imp - mVista.valor)}</div>
       </div>`;
     }).join("");
   }
 
   function pintaProyeccion() {
-    const anos = +$("#rAnos").value, rent = +$("#rRent").value / 100, apor = +$("#rApor").value;
+    const anos = +$("#rAnos").value, rent = +$("#rRent").value / 100;
+    const apor = convAhora(+$("#rApor").value);
     $("#vAnos").textContent = anos;
     $("#vRent").textContent = $("#rRent").value.replace(".", ",") + " %";
-    $("#vApor").textContent = G.fmtEur(apor, 0);
+    $("#vApor").textContent = G.fmtEur(apor);
 
     const m = metricas(visibles());
     const rm = rent / 12, n = anos * 12;
@@ -719,7 +830,7 @@
       };
     });
     $("#notaTabla").textContent =
-      `${f.length} movimientos · ${G.fmtEur(f.reduce((a, r) => a + r.importe, 0), 0)}`;
+      `${f.length} movimientos · ${G.fmtEur(f.reduce((a, r) => a + r.importe, 0))}`;
   }
 
   function pintaPatrimonio() {
@@ -759,13 +870,17 @@
     if (!rm.length) { $("#mesCifra").textContent = "—"; return; }
     if (estado.mes == null || estado.mes < 0 || estado.mes >= rm.length) estado.mes = rm.length - 1;
     const r = rm[estado.mes];
+    // Cifras del mes en la moneda de visualización: se convierten con el cambio
+    // del último día del mes (en euros fxEn devuelve 1 y no cambia nada).
+    const idxFinMes = ultimoIdxMes(r.mes);
+    const cv = v => (v == null ? null : red2(v * fxEn(idxFinMes)));
 
     // Con los filtros globales encima, las cifras de este mes se vuelven a sumar.
     const filas = TODOS().map(p => {
       const d = r.porProducto[p.id];
       if (!d) return null;
       const f = p._f || 1;
-      const esc = v => (v == null ? v : v * f);
+      const esc = v => (v == null ? v : cv(v * f));
       return { p, d: { inicio: esc(d.inicio), aportado: esc(d.aportado),
                        mercado: esc(d.mercado), fin: esc(d.fin), nuevo: esc(d.nuevo) } };
     }).filter(Boolean);
@@ -776,6 +891,11 @@
       : r;
     const rentMes = T === r ? r.rentabilidad
       : (T.inicio > 0 ? T.mercado / T.inicio : null);
+    // Para pintar: en modo filtrado las filas ya están convertidas arriba;
+    // sin filtros se convierte el resumen del mes tal cual.
+    const Tm = filtrosActivos() ? T
+      : { inicio: cv(T.inicio), fin: cv(T.fin), aportado: cv(T.aportado),
+          mercado: cv(T.mercado), nuevo: cv(T.nuevo) };
 
     const sel = $("#mesSel");
     if (sel.options.length !== rm.length) {
@@ -785,36 +905,36 @@
     $("#mesPrev").disabled = estado.mes === 0;
     $("#mesNext").disabled = estado.mes === rm.length - 1;
 
-    const cambio = T.fin - T.inicio;
+    const cambio = Tm.fin - Tm.inicio;
     // El titular es el cambio REAL: lo que aportaste mas lo que hizo el mercado.
     // Incorporar una cuenta al panel mueve el saldo pero no es dinero ganado,
     // asi que va aparte y no infla la cifra grande.
-    const real = T.aportado + T.mercado;
+    const real = Tm.aportado + Tm.mercado;
     const ultimo = estado.mes === rm.length - 1;
     $("#mesEtq").textContent = ultimo ? "Cambio en lo que va de mes" : "Cambio del mes";
     $("#mesCifra").textContent = G.fmtEurSigno(real);
     $("#mesCifra").className = "hCifra " + (real >= 0 ? "pos" : "neg");
     $("#mesNota").textContent = ultimo
       ? "Mes en curso, con datos hasta el " + G.fmtFecha(D.fechaExtracto) : "";
-    const trozos = [`De <span class="fuerte">${G.fmtEur(T.inicio)}</span> a <span class="fuerte">${G.fmtEur(T.fin)}</span>`];
+    const trozos = [`De <span class="fuerte">${G.fmtEur(Tm.inicio)}</span> a <span class="fuerte">${G.fmtEur(Tm.fin)}</span>`];
     if (rentMes != null) {
       trozos.push(`rentabilidad de la cartera
         <span class="${rentMes >= 0 ? "pos" : "neg"} fuerte">${G.fmtPctSigno(rentMes)}</span>`);
     }
     if (T.nuevo) {
-      trozos.push(`<span class="pill">de la diferencia, ${G.fmtEur(T.nuevo, 0)} son cuentas que entran al panel</span>`);
+      trozos.push(`<span class="pill">de la diferencia, ${G.fmtEur(Tm.nuevo)} son cuentas que entran al panel</span>`);
     }
     $("#mesSub").innerHTML = trozos.join('<span style="color:var(--tinta3)">·</span>');
 
     const tarjetas = [
-      { e: "Lo pusiste tú", v: G.fmtEur(T.aportado, 0), n: "aportaciones del mes", c: G.css("--s1") },
+      { e: "Lo pusiste tú", v: G.fmtEur(Tm.aportado), n: "aportaciones del mes", c: G.css("--s1") },
       {
-        e: "Lo puso el mercado", v: G.fmtEurSigno(T.mercado), n: "revalorización, sin tocar nada",
-        c: G.css("--s3"), cl: T.mercado >= 0 ? "pos" : "neg"
+        e: "Lo puso el mercado", v: G.fmtEurSigno(Tm.mercado), n: "revalorización, sin tocar nada",
+        c: G.css("--s3"), cl: Tm.mercado >= 0 ? "pos" : "neg"
       },
     ];
-    if (T.nuevo) tarjetas.push({
-      e: "Nuevo en el panel", v: G.fmtEur(T.nuevo, 0),
+    if (Tm.nuevo) tarjetas.push({
+      e: "Nuevo en el panel", v: G.fmtEur(Tm.nuevo),
       n: "no es dinero nuevo: es que empiezas a seguirlo", c: G.css("--s7")
     });
     $("#mesTarjetas").innerHTML = tarjetas.map(t =>
@@ -838,13 +958,13 @@
           <td>${G.fmtEur(d.fin)}</td>
           <td class="${var_ >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(var_)}</td></tr>`;
       }).join("")}</tbody>
-       <tfoot><tr><td>Total</td><td>${G.fmtEur(T.inicio)}</td><td>${G.fmtEur(T.aportado)}</td>
-        <td class="${T.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(T.mercado)}</td>
-        ${hayNuevo ? `<td>${G.fmtEur(T.nuevo)}</td>` : ""}
-        <td>${G.fmtEur(T.fin)}</td>
+       <tfoot><tr><td>Total</td><td>${G.fmtEur(Tm.inicio)}</td><td>${G.fmtEur(Tm.aportado)}</td>
+        <td class="${Tm.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(Tm.mercado)}</td>
+        ${hayNuevo ? `<td>${G.fmtEur(Tm.nuevo)}</td>` : ""}
+        <td>${G.fmtEur(Tm.fin)}</td>
         <td class="${cambio >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(cambio)}</td></tr></tfoot>`;
-    $("#mesTablaNota").textContent = T.nuevo
-      ? `Incluye ${G.fmtEur(T.nuevo, 0)} que entran al seguimiento este mes.` : "";
+    $("#mesTablaNota").textContent = Tm.nuevo
+      ? `Incluye ${G.fmtEur(Tm.nuevo)} que entran al seguimiento este mes.` : "";
 
     // histórico de esfuerzo vs mercado (con los filtros, mes a mes)
     const mesDe = x => {
@@ -854,7 +974,8 @@
         const d = (x.porProducto || {})[p.id];
         if (d) { const f = p._f || 1; a += d.aportado * f; m += d.mercado * f; }
       });
-      return { mes: x.mes, aportado: a, mercado: m };
+      const fx = fxEn(ultimoIdxMes(x.mes));   // en euros, 1
+      return { mes: x.mes, aportado: a * fx, mercado: m * fx };
     };
     const ult = rm.slice(-18).map(mesDe);
     G.barrasAgrupadas($("#grafMesHist"), {
@@ -864,6 +985,217 @@
         { nombre: "Lo pusiste tú", color: G.css("--s1"), valores: ult.map(x => x.aportado) },
         { nombre: "Lo puso el mercado", color: G.css("--s3"), valores: ult.map(x => x.mercado) },
       ],
+    });
+  }
+
+  /* ================================================================
+     PESTAÑA 2b · PERIODO — rango libre (últimos X, año Y o dos fechas)
+     ================================================================ */
+  const UDIAS = { u7: 7, u15: 15, u30: 30, u90: 90, u180: 180, u365: 365 };
+  const sumaISO = (iso, dias) => {
+    // En UTC: así «hoy menos 14 días» no se desfasa un día con toISOString.
+    const t = new Date(iso + "T00:00:00Z");
+    t.setUTCDate(t.getUTCDate() + dias);
+    return t.toISOString().slice(0, 10);
+  };
+  /** Fechas (desde/hasta) del periodo elegido. */
+  function rangoPeriodo() {
+    const hoy = D.fechaExtracto;
+    const v = estado.periodo;
+    if (v === "pers") return { desde: estado.perDesde || D.fechas[0], hasta: estado.perHasta || hoy };
+    if (v === "ytd") return { desde: hoy.slice(0, 4) + "-01-01", hasta: hoy };
+    if (v[0] === "a" && v.length === 5) return { desde: v.slice(1) + "-01-01", hasta: v.slice(1) + "-12-31" };
+    const dias = UDIAS[v] || 30;
+    return { desde: sumaISO(hoy, -(dias - 1)), hasta: hoy };
+  }
+  /** iAntes = último día ANTES del periodo (−1 si empieza desde el principio),
+      iFin = último día dentro del periodo. */
+  function indicesPeriodo() {
+    const f = D.fechas;
+    const { desde, hasta } = rangoPeriodo();
+    const h = hasta < D.fechaExtracto ? hasta : D.fechaExtracto;
+    let iFin = -1;
+    for (let i = f.length - 1; i >= 0; i--) { if (f[i] <= h) { iFin = i; break; } }
+    let iAntes = -1;
+    for (let i = f.length - 1; i >= 0; i--) { if (f[i] < desde) { iAntes = i; break; } }
+    return { desde, hasta: h, iAntes, iFin };
+  }
+  /** Aportado de un componente dentro del rango (iAntes, iFin]. Espejo exacto
+      del resumen_mensual del motor: el efectivo por su curva de aportado (saldo
+      menos rendimiento); el resto por sus flujos (compras suman, ventas y
+      dividendos cobrados restan). En dólares cada flujo va con el cambio de su día. */
+  function aportadoRango(p, iAntes, iFin) {
+    if (p.tipoClave === "efectivo") {
+      const sa = p.serieAportado || [];
+      const a1 = sa[iFin], a0 = iAntes >= 0 ? sa[iAntes] : null;
+      if (a1 == null) return 0;
+      return a1 - (a0 == null ? 0 : a0);
+    }
+    let ap = 0;
+    (p.flujos || []).forEach(([f, v]) => {
+      const i = idxFecha(f);
+      if (i > iAntes && i <= iFin) ap += -v;
+    });
+    return ap;
+  }
+  /** Resumen de un rango para una lista de componentes. */
+  function resumenRango(lista, iAntes, iFin) {
+    const filas = [];
+    let inicio = 0, fin = 0, aportado = 0, nuevo = 0;
+    lista.forEach(p => {
+      const s = p.serie || [];
+      const pv0 = iAntes >= 0 ? (s[iAntes] || 0) : 0;
+      const pv1 = s[iFin] || 0;
+      const ap = aportadoRango(p, iAntes, iFin);
+      const estrena = (iAntes < 0 || s[iAntes] == null) && s[iFin] != null;
+      const pnuevo = (estrena && p.aportado == null) ? pv1 : 0;
+      if (!(pv1 || pv0 || ap)) return;
+      inicio += pv0; fin += pv1; aportado += ap; nuevo += pnuevo;
+      filas.push({ p, inicio: pv0, fin: pv1, aportado: ap, nuevo: pnuevo,
+                   mercado: pv1 - pv0 - ap - pnuevo });
+    });
+    return { filas, inicio, fin, aportado, nuevo, mercado: fin - inicio - aportado - nuevo };
+  }
+
+  function pintaPeriodo() {
+    const sel = $("#perSel");
+    if (!sel) return;
+    if (!sel.options.length) {          // opciones: se construyen una vez
+      const anos = [];
+      for (let y = +D.fechaExtracto.slice(0, 4); y >= +D.fechas[0].slice(0, 4); y--) anos.push(y);
+      sel.innerHTML = [
+        '<optgroup label="Últimos días, semanas o meses">',
+        '<option value="u7">Últimos 7 días (1 semana)</option>',
+        '<option value="u15">Últimos 15 días</option>',
+        '<option value="u30">Últimos 30 días (1 mes)</option>',
+        '<option value="u90">Últimos 3 meses</option>',
+        '<option value="u180">Últimos 6 meses</option>',
+        '<option value="u365">Últimos 12 meses</option>',
+        '</optgroup><optgroup label="Años completos">',
+        '<option value="ytd">Lo que va del año</option>',
+        ...anos.map(y => `<option value="a${y}">Año ${y} completo</option>`),
+        '</optgroup><optgroup label="Dos fechas">',
+        '<option value="pers">Del… al… (elegir fechas)</option>',
+        '</optgroup>',
+      ].join("");
+    }
+    if (![...sel.options].some(o => o.value === estado.periodo)) estado.periodo = "u30";
+    sel.value = estado.periodo;
+    sel.onchange = () => {
+      estado.periodo = sel.value;
+      recuerda.guarda("patrimonio.periodo", sel.value);
+      if (sel.value === "pers" && !estado.perDesde) {
+        estado.perDesde = sumaISO(D.fechaExtracto, -29);
+        estado.perHasta = D.fechaExtracto;
+      }
+      pintaPeriodo();
+    };
+    const pers = estado.periodo === "pers";
+    $("#perFechas").hidden = !pers;
+    const dEl = $("#perDesde"), hEl = $("#perHasta");
+    dEl.min = hEl.min = D.fechas[0];
+    dEl.max = hEl.max = D.fechaExtracto;
+    if (pers) {
+      if (estado.perDesde > estado.perHasta) estado.perHasta = estado.perDesde;
+      dEl.value = estado.perDesde;
+      hEl.value = estado.perHasta;
+      dEl.onchange = () => {
+        estado.perDesde = dEl.value || D.fechas[0];
+        if (estado.perDesde > estado.perHasta) { estado.perHasta = estado.perDesde; hEl.value = estado.perHasta; }
+        recuerda.guarda("patrimonio.perDesde", estado.perDesde);
+        recuerda.guarda("patrimonio.perHasta", estado.perHasta);
+        pintaPeriodo();
+      };
+      hEl.onchange = () => {
+        estado.perHasta = hEl.value || D.fechaExtracto;
+        if (estado.perHasta < estado.perDesde) { estado.perDesde = estado.perHasta; dEl.value = estado.perDesde; }
+        recuerda.guarda("patrimonio.perDesde", estado.perDesde);
+        recuerda.guarda("patrimonio.perHasta", estado.perHasta);
+        pintaPeriodo();
+      };
+    }
+    pintaPeriodoCifras();
+  }
+
+  function pintaPeriodoCifras() {
+    const { desde, hasta, iAntes, iFin } = indicesPeriodo();
+    const vacio = iFin < 0 || iFin <= iAntes;
+    $("#perNota").textContent = vacio ? "" : `${G.fmtFecha(desde)} – ${G.fmtFecha(hasta)}`;
+    if (vacio) {
+      $("#perCifra").textContent = "—";
+      $("#perCifra").className = "hCifra";
+      $("#perEtq").textContent = "Cambio del periodo";
+      $("#perSub").textContent = desde > hasta
+        ? "La fecha de inicio es posterior a la de fin."
+        : "No hay datos en ese periodo.";
+      $("#perTarjetas").innerHTML = "";
+      $("#perTabla").innerHTML = "";
+      $("#perTablaNota").textContent = "";
+      $("#grafPeriodo").innerHTML = "";
+      return;
+    }
+    const lista = visibles();
+    const T = resumenRango(lista, iAntes, iFin);
+    const cambio = T.fin - T.inicio;
+    const rent = T.inicio > 0 ? T.mercado / T.inicio : null;
+    // El titular es el cambio REAL (lo aportado más lo que hizo el mercado),
+    // igual que en «El mes»: lo que entra al panel no infla la cifra.
+    const real = T.aportado + T.mercado;
+    const enCurso = hasta >= D.fechaExtracto;
+    $("#perEtq").textContent = enCurso ? "Cambio desde el inicio hasta hoy" : "Cambio del periodo";
+    $("#perCifra").textContent = G.fmtEurSigno(real);
+    $("#perCifra").className = "hCifra " + (real >= 0 ? "pos" : "neg");
+
+    const trozos = [`De <span class="fuerte">${G.fmtEur(T.inicio)}</span> a <span class="fuerte">${G.fmtEur(T.fin)}</span>`];
+    if (rent != null) trozos.push(`rentabilidad de la cartera
+      <span class="${rent >= 0 ? "pos" : "neg"} fuerte">${G.fmtPctSigno(rent)}</span>`);
+    if (T.nuevo) trozos.push(`<span class="pill">de la diferencia, ${G.fmtEur(T.nuevo)} son cuentas que entran al panel</span>`);
+    $("#perSub").innerHTML = trozos.join('<span style="color:var(--tinta3)">·</span>');
+
+    const tarjetas = [
+      { e: "Lo pusiste tú", v: G.fmtEur(T.aportado), n: "aportaciones en el periodo", c: G.css("--s1") },
+      { e: "Lo puso el mercado", v: G.fmtEurSigno(T.mercado), n: "revalorización, sin tocar nada",
+        c: G.css("--s3"), cl: T.mercado >= 0 ? "pos" : "neg" },
+    ];
+    if (T.nuevo) tarjetas.push({
+      e: "Nuevo en el panel", v: G.fmtEur(T.nuevo),
+      n: "no es dinero nuevo: es que empiezas a seguirlo", c: G.css("--s7"),
+    });
+    $("#perTarjetas").innerHTML = tarjetas.map(t =>
+      `<div class="mesT" style="--c:${t.c}"><span class="barra"></span>
+       <div class="e">${t.e}</div><div class="v ${t.cl || ""}">${t.v}</div><div class="n">${t.n}</div></div>`).join("");
+
+    const hayNuevo = T.filas.some(x => x.nuevo);
+    const colNuevo = hayNuevo ? "<th>Entra al panel</th>" : "";
+    $("#perTabla").innerHTML =
+      `<thead><tr><th>Componente</th><th>Al empezar</th><th>Aportaste</th>
+        <th>Mercado</th>${colNuevo}<th>Al cerrar</th><th>Variación</th></tr></thead>
+       <tbody>${T.filas.map(f => {
+        const var_ = f.fin - f.inicio;
+        return `<tr>
+          <td><i class="pt" style="background:${color(f.p)}"></i>${esc(f.p.corto || f.p.nombre)}</td>
+          <td>${G.fmtEur(f.inicio)}</td>
+          <td>${f.aportado ? G.fmtEur(f.aportado) : "—"}</td>
+          <td class="${f.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(f.mercado)}</td>
+          ${hayNuevo ? `<td>${f.nuevo ? G.fmtEur(f.nuevo) : "—"}</td>` : ""}
+          <td>${G.fmtEur(f.fin)}</td>
+          <td class="${var_ >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(var_)}</td></tr>`;
+       }).join("")}</tbody>
+       <tfoot><tr><td>Total</td><td>${G.fmtEur(T.inicio)}</td><td>${G.fmtEur(T.aportado)}</td>
+        <td class="${T.mercado >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(T.mercado)}</td>
+        ${hayNuevo ? `<td>${G.fmtEur(T.nuevo)}</td>` : ""}
+        <td>${G.fmtEur(T.fin)}</td>
+        <td class="${cambio >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(cambio)}</td></tr></tfoot>`;
+    $("#perTablaNota").textContent = T.nuevo
+      ? `Incluye ${G.fmtEur(T.nuevo)} que entran al seguimiento en este periodo.` : "";
+
+    const i0 = iAntes + 1;
+    const m = metricas(lista);
+    G.lineaConEventos($("#grafPeriodo"), {
+      fechas: D.fechas.slice(i0, iFin + 1),
+      valores: m.serie.slice(i0, iFin + 1),
+      color: G.css("--s1"), alto: 260,
+      overlay: { nombre: "Aportado", valores: m.serieAportado.slice(i0, iFin + 1) },
     });
   }
 
@@ -1162,17 +1494,19 @@
 
     const c = D.comisiones;
     if (c && c.lineas.length) {
+      // Importes en la moneda de visualización (convAhora es 1× en euros).
+      const anual = convAhora(c.anual), base = convAhora(c.base);
       $("#notaComisiones").textContent =
-        `${G.fmtEur(c.anual)} al año · ${G.fmtPct(c.terPonderado, 3)} de lo invertido`;
+        `${G.fmtEur(anual)} al año · ${G.fmtPct(c.terPonderado, 3)} de lo invertido`;
       $("#tablaComisiones").innerHTML =
         `<thead><tr><th>Producto</th><th>Comisión</th><th>Sobre</th><th>Al año</th><th>Al mes</th></tr></thead>
          <tbody>${c.lineas.map(l => `<tr>
             <td><i class="pt" style="background:${temaOscuro() ? l.color[1] : l.color[0]}"></i>${esc(l.nombre)}</td>
-            <td>${G.fmtPct(l.ter, 2)}</td><td>${G.fmtEur(l.valor, 0)}</td>
-            <td>${G.fmtEur(l.anual)}</td><td>${G.fmtEur(l.anual / 12)}</td></tr>`).join("")}</tbody>
+            <td>${G.fmtPct(l.ter, 2)}</td><td>${G.fmtEur(convAhora(l.valor))}</td>
+            <td>${G.fmtEur(convAhora(l.anual))}</td><td>${G.fmtEur(convAhora(l.anual / 12))}</td></tr>`).join("")}</tbody>
          <tfoot><tr><td>Total</td><td>${G.fmtPct(c.terPonderado, 3)}</td>
-           <td>${G.fmtEur(c.base, 0)}</td><td>${G.fmtEur(c.anual)}</td>
-           <td>${G.fmtEur(c.anual / 12)}</td></tr></tfoot>`;
+           <td>${G.fmtEur(base)}</td><td>${G.fmtEur(anual)}</td>
+           <td>${G.fmtEur(convAhora(c.anual / 12))}</td></tr></tfoot>`;
     }
   }
 
@@ -1248,6 +1582,7 @@
     pintaFiltrosGlobal();
     if (estado.tab === "patrimonio") pintaPatrimonio();
     else if (estado.tab === "mes") pintaMes();
+    else if (estado.tab === "periodo") pintaPeriodo();
     else if (estado.tab === "fondos") pintaFondos();
     else if (estado.tab === "rendimiento") pintaRendimiento();
     else if (estado.tab === "datos" && window.Editor) window.Editor.mostrar();
@@ -1265,6 +1600,7 @@
       if (!nuevo || !nuevo.fechas || !nuevo.fechas.length) return null;
       D = nuevo;
       window.DATOS = nuevo;
+      reiniciaConv();
       pintar();
       return nuevo.generado || null;
     } catch (e) {

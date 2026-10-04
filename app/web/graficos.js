@@ -9,6 +9,11 @@
   /* -------------------------------------------------- formato */
   const nfEur = new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const nfEur0 = new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+  // Moneda en la que el panel MUESTRA las cifras (los datos llegan ya convertidos
+  // por app.js): euros por defecto, con opción de verlo todo en dólares.
+  let MONEDA = "EUR";
+  const nfUsd = (v, dec) => Number(v).toLocaleString("es-ES",
+    { minimumFractionDigits: dec, maximumFractionDigits: dec }) + " $";
   const nfNum = new Intl.NumberFormat("es-ES", { maximumFractionDigits: 2 });
   const MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
@@ -19,15 +24,17 @@
   function fmtEur(v, dec) {
     if (oculto()) return "•••";
     if (v === null || v === undefined || isNaN(v)) return "—";
+    if (MONEDA === "USD") return nfUsd(v, dec === 0 ? 0 : 2);
     return dec === 0 ? nfEur0.format(v) : nfEur.format(v);
   }
   function fmtEurCorto(v) {
     if (oculto()) return "•••";
     if (v === null || v === undefined || isNaN(v)) return "—";
     const a = Math.abs(v);
-    if (a >= 1e6) return (v / 1e6).toLocaleString("es-ES", { maximumFractionDigits: 2 }) + " M€";
-    if (a >= 1000) return (v / 1000).toLocaleString("es-ES", { maximumFractionDigits: 1 }) + "k €";
-    return Math.round(v) + " €";
+    const esUsd = MONEDA === "USD";
+    if (a >= 1e6) return (v / 1e6).toLocaleString("es-ES", { maximumFractionDigits: 2 }) + (esUsd ? " M$" : " M€");
+    if (a >= 1000) return (v / 1000).toLocaleString("es-ES", { maximumFractionDigits: 1 }) + (esUsd ? "k $" : "k €");
+    return Math.round(v) + (esUsd ? " $" : " €");
   }
   function fmtPct(v, dec) {
     if (v === null || v === undefined || isNaN(v)) return "—";
@@ -768,6 +775,8 @@
   global.G = {
     fmtEur, fmtEurCorto, fmtPct, fmtPctSigno, fmtEurSigno, fmtFecha, fmtFechaCorta, fmtMes, nfNum: nfUnidades,
     areaApilada, lineaConEventos, barrasApiladas, donut, mini, escalaBonita, css,
-    barrasHorizontales, barrasSimples, multiLinea, barrasAgrupadas
+    barrasHorizontales, barrasSimples, multiLinea, barrasAgrupadas,
+    setMoneda: m => { MONEDA = m === "USD" ? "USD" : "EUR"; },
+    moneda: () => MONEDA,
   };
 })(window);

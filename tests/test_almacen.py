@@ -147,6 +147,62 @@ def test_una_cuenta_no_admite_movimientos():
     assert any("saldos" in e for e in ex.value.errores)
 
 
+def _cfg_tesla():
+    return {
+        "productos": [{"id": "f", "nombre": "Tesla", "corto": "Tesla", "tipo": "accion",
+                       "fuente": "yahoo", "codigo": "TSLA"}],
+        "cuentas": [{"id": "revolut_usd", "nombre": "REVOLUT USD", "tipo": "broker",
+                     "moneda": "USD", "propietario": "david"}],
+        "movimientos": [{"id": "m1", "fecha": "2025-01-17", "producto": "f",
+                         "tipo": "compra", "unidades": 1, "importe": 291.21,
+                         "cuenta": "revolut_usd", "propietario": "david",
+                         "importeOriginal": 300.0, "monedaOriginal": "USD",
+                         "tipoCambio": 0.9707, "origen": "portfolio",
+                         "contrapartida": "revolut_dolares"}],
+        "valoraciones": [],
+    }
+
+
+def test_editar_movimiento_conserva_importe_original_y_moneda():
+    """El formulario solo vuelve a mandar unos pocos campos: al editar no se
+    pierden los datos de la importación (importe original, moneda, cambio,
+    contrapartida, origen)."""
+    cfg = _cfg_tesla()
+    m = almacen.guarda_movimiento(cfg, {
+        "id": "m1", "fecha": "2025-01-17", "producto": "f", "tipo": "compra",
+        "unidades": 1, "importe": 291.21, "cuenta": "revolut_usd",
+        "propietario": "david"})
+    assert m["importeOriginal"] == 300.0
+    assert m["monedaOriginal"] == "USD"
+    assert m["tipoCambio"] == 0.9707
+    assert m["origen"] == "portfolio"
+    assert m["contrapartida"] == "revolut_dolares"
+    assert len(cfg["movimientos"]) == 1
+
+
+def test_editar_movimiento_permite_corregir_cuenta_y_propietario():
+    """Se puede corregir a mano a quién pertenece un movimiento importado mal
+    (el caso de las compras de Tesla atribuidas al propietario equivocado)."""
+    cfg = _cfg_tesla()
+    m = almacen.guarda_movimiento(cfg, {
+        "id": "m1", "fecha": "2025-01-17", "producto": "f", "tipo": "compra",
+        "unidades": 1, "importe": 291.21, "cuenta": "revolut_usd",
+        "propietario": "gina"})
+    assert m["propietario"] == "gina"
+    assert m["cuenta"] == "revolut_usd"
+
+
+def test_al_cambiar_el_importe_se_actualiza_el_original():
+    """Si se corrige el importe en euros, el de la moneda original se recalcula
+    con el tipo de cambio guardado para que no quede descoherente."""
+    cfg = _cfg_tesla()
+    m = almacen.guarda_movimiento(cfg, {
+        "id": "m1", "fecha": "2025-01-17", "producto": "f", "tipo": "compra",
+        "unidades": 1, "importe": 194.14, "cuenta": "revolut_usd"})
+    assert m["importeOriginal"] == pytest.approx(200.0)   # 194,14 € ÷ 0,9707
+    assert m["importe"] == 194.14
+
+
 # ---------------------------------------------------------------- disco
 
 def test_guarda_hace_copia_automatica_y_escritura_atomica(tmp_path):
