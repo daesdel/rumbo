@@ -262,7 +262,10 @@
         if (sa[i] != null) serieAp[i] += sa[i];
       }
       valor += valorDe(p);
-      if (p.aportado != null && p.aportado > 0) {
+      // Puede ser negativo (una cuenta cuyo saldo procede de dividendos ya
+      // reinvertidos): el efectivo tiene que contar aunque sea así, o el
+      // patrimonio no cuadra con aportado + ganancia.
+      if (p.aportado != null) {
         aportado += p.aportado;
         valorConCoste += valorDe(p);
         nAp += (p.aportaciones || []).filter(a => a.importe).length;
@@ -482,8 +485,8 @@
     const kpis = [
       { e: "Aportado", v: G.fmtEur(m.aportado, 0), n: `${m.numAportaciones} aportaciones` },
       {
-        e: "Plusvalía latente", v: G.fmtEurSigno(m.plusvalia),
-        n: m.rentabilidad != null ? G.fmtPctSigno(m.rentabilidad) + " sobre el coste" : "sin coste registrado",
+        e: "Ganancia total", v: G.fmtEurSigno(m.plusvalia),
+        n: m.rentabilidad != null ? G.fmtPctSigno(m.rentabilidad) + " sobre lo aportado" : "sin coste registrado",
         cl: m.plusvalia >= 0 ? "pos" : "neg"
       },
       { e: "TIR anualizada", v: G.fmtPctSigno(m.tir), n: "rentabilidad real del dinero", cl: m.tir >= 0 ? "pos" : "neg" },

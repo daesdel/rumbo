@@ -680,6 +680,12 @@ def construir(cfg, carpeta, descargar=True):
         for sim in sims:
             if sim not in series:
                 series[sim] = descargar_serie(sim)
+        # Y el cambio de las monedas de las cuentas/productos (una cuenta en dólares
+        # tiene que entrar en el panel en euros, con el cambio de cada día).
+        for mon in {(p.get("moneda") or "EUR").upper() for p in productos_cfg} - {"EUR"}:
+            sim = simbolo_fx(mon)[0]
+            if sim and sim not in series:
+                series[sim] = descargar_serie(sim)
 
     movs_por, vals_por = defaultdict(list), defaultdict(list)
     for m in cfg.get("movimientos", []):
@@ -966,6 +972,19 @@ def construir(cfg, carpeta, descargar=True):
 
     # ---- totales ----
 
+    # Lo que cada cuenta RINDE (intereses, dividendos, comisiones e impuestos de la
+    # propia cuenta). Su «aportado» es el saldo menos eso: lo que rendió no es
+    # dinero de tu bolsillo. Así el efectivo cuenta como dinero metido y el
+    # patrimonio cuadra con aportado + ganancia, igual que en Portfolio Performance.
+    RENDIMIENTO = {"interes": 1, "dividendo": 1, "comision": -1, "impuesto": -1}
+    movs_cuenta, rend_cuenta = defaultdict(list), defaultdict(list)
+    for m in cfg.get("movimientos", []):
+        for key in {m.get("cuenta"), m.get("contrapartida")} - {None, ""}:
+            movs_cuenta[key].append(m)
+        sgn = RENDIMIENTO.get(m.get("tipo"))
+        if sgn and m.get("cuenta") and m.get("importe"):
+            rend_cuenta[m["cuenta"]].append((m["fecha"], sgn * float(m["importe"])))
+
     def suma_manual(lista, signo):
         total = 0.0
         series_extra = []
@@ -973,19 +992,59 @@ def construir(cfg, carpeta, descargar=True):
             snaps = sorted(it.get("snapshots", []), key=lambda s: s[0])
             if not snaps:
                 continue
-            total += signo * float(snaps[-1][1])
+            # El saldo está guardado en la moneda de la cuenta: al panel entra en euros.
+            mon = (it.get("moneda") or "EUR").upper()
+            fx = series.get(simbolo_fx(mon)[0]) if mon != "EUR" else None
+            if mon != "EUR" and not fx and not series.get("EURUSD=X"):
+                aviso(f"{it.get('corto') or it.get('nombre')}: no tengo el cambio a "
+                      f"euros de {mon}; su saldo se muestra sin convertir.")
+
+            def a_eur(fecha, v, _mon=mon, _fx=fx):
+                if _mon == "EUR":
+                    return v
+                x = valor_en(_fx or {}, fecha, 5)
+                if x:
+                    return v * x
+                inv = valor_en(series.get("EURUSD=X") or {}, fecha, 5)
+                return v / inv if inv else v
+
+            sn = [[f, a_eur(f, v), a] for f, v, a in snaps]
+            nativo = float(snaps[-1][1])
+            total += signo * float(sn[-1][1])
             serie, j = [], -1
             for f in eje:
-                while j + 1 < len(snaps) and d(snaps[j + 1][0]) <= f:
+                while j + 1 < len(sn) and d(sn[j + 1][0]) <= f:
                     j += 1
-                v = float(snaps[j][1]) if j >= 0 else None
+                v = float(sn[j][1]) if j >= 0 else None
                 serie.append(r2(signo * v) if v is not None else None)
+            # Aportado de una cuenta = saldo − lo que ha rendido, día a día.
+            serie_ap, aportado = [None] * len(eje), None
+            if it.get("tipoClave") == "efectivo":
+                # Sin movimientos no hay rendimiento que separar: todo el saldo
+                # cuenta como dinero metido. El aportado puede salir negativo
+                # (dividendos acumulados mayores que el saldo) y también cuadra:
+                # ese dinero ya está en los productos que compraste con él.
+                pend = sorted(rend_cuenta.get(it.get("cuenta"), [])) \
+                    if movs_cuenta.get(it.get("cuenta")) else []
+                acum, k = 0.0, 0
+                for i, f in enumerate(eje_iso):
+                    while k < len(pend) and pend[k][0] <= f:
+                        acum += pend[k][1]
+                        k += 1
+                    if serie[i] is not None:
+                        serie_ap[i] = r2(serie[i] - acum)
+                aportado = serie_ap[-1]
+            valor_ult = round(signo * float(sn[-1][1]), 2)
             series_extra.append({**it, "serie": serie,
-                                 "serieAportado": [None] * len(eje),
+                                 "serieAportado": serie_ap,
                                  "aportaciones": [],
-                                 "valor": round(signo * float(snaps[-1][1]), 2),
-                                 "aportado": None, "plusvalia": None,
-                                 "rentabilidad": None, "tir": None,
+                                 "valor": valor_ult,
+                                 "valorNat": round(nativo, 2),
+                                 "aportado": aportado,
+                                 "plusvalia": round(valor_ult - aportado, 2) if aportado is not None else None,
+                                 "rentabilidad": r4((valor_ult - aportado) / aportado)
+                                 if aportado and aportado > 0 else None,
+                                 "tir": None,
                                  "desde": snaps[0][0],
                                  "slotColor": PALETA.get(it.get("slot", 8), PALETA[8])})
         return total, series_extra
@@ -993,16 +1052,23 @@ def construir(cfg, carpeta, descargar=True):
     tot_otros, ser_otros = suma_manual(otros, 1)
     tot_pasivos, ser_pasivos = suma_manual(pasivos, -1)
 
+    # Las cuentas con saldo y movimientos también aportan: sin esto el patrimonio
+    # (que sí incluye el efectivo) no cuadra con aportado + ganancia.
+    con_aporte = productos + ser_otros
+    for p in ser_otros:
+        if p.get("aportado") is not None:
+            valor_conocido += p["valor"]
+
     serie_total, serie_ap_total = [], []
     for i in range(n):
         s = sum((p["serie"][i] or 0) for p in productos)
         for e in ser_otros + ser_pasivos:
             s += e["serie"][i] or 0
         serie_total.append(round(s, 2))
-        serie_ap_total.append(round(sum((p["serieAportado"][i] or 0) for p in productos), 2))
+        serie_ap_total.append(round(sum((p["serieAportado"][i] or 0) for p in con_aporte), 2))
 
     patrimonio = round(serie_total[-1], 2)
-    aportado_total = round(sum(p["aportado"] or 0 for p in productos), 2)
+    aportado_total = round(sum(p["aportado"] or 0 for p in con_aporte), 2)
     plusvalia_total = round(valor_conocido - aportado_total, 2)
     flujos_globales.append((fecha_extracto, valor_tir))
     tir_total = r4(xirr(flujos_globales))
@@ -1304,13 +1370,21 @@ def construir(cfg, carpeta, descargar=True):
             return sum((p["serie"][i] or 0) for p in todos_p) if i >= 0 else 0.0
 
         v0, v1 = suma(ant), suma(i_fin)
-        ap = sum(flujo_dia[i] for i in idxs)
+        ap = 0.0
         nuevos, detalle = 0.0, {}
         for p in todos_p:
             s = p["serie"]
             pv0 = (s[ant] or 0) if ant >= 0 else 0.0
             pv1 = s[i_fin] or 0.0
             pap = sum(flujo_prod.get(p["id"], [0.0] * n)[i] for i in idxs)
+            if p.get("tipoClave") == "efectivo":
+                # Una cuenta no tiene «flujos» de producto: lo que metes o sacas
+                # de ella se ve en su curva de aportado (saldo − rendimiento).
+                sa = p.get("serieAportado") or []
+                a0 = sa[ant] if ant >= 0 and sa[ant] is not None else 0.0
+                a1 = sa[i_fin] if sa[i_fin] is not None else a0
+                pap = a1 - a0
+            ap += pap
             # Un producto sin coste registrado (efectivo, pensiones) que aparece
             # a mitad de mes no es "el mercado subiendo": es que entra al panel.
             estrena = (ant < 0 or s[ant] is None) and s[i_fin] is not None
@@ -1386,7 +1460,10 @@ def construir(cfg, carpeta, descargar=True):
     cuentas_out = []
     for c in cfg.get("cuentas", []):
         e = saldos_por_cuenta.get(c["id"])
-        saldo = float(e.get("valor") or 0) if e else 0.0
+        saldo = 0.0
+        if e:
+            saldo = float(e.get("valorNat") if e.get("valorNat") is not None
+                          else e.get("valor") or 0)
         mon = (c.get("moneda") or "EUR").upper()
         if mon == "EUR":
             eur = saldo

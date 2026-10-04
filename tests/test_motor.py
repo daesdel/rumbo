@@ -226,9 +226,12 @@ def test_construir_sin_red_calcula_el_panel(tmp_path):
 
     # 1.200 del fondo + 500 de la cuenta
     assert datos["total"]["patrimonio"] == pytest.approx(1700.0)
-    # El aportado sale de los movimientos del fondo (la cuenta no aporta)
-    assert datos["total"]["aportado"] == pytest.approx(1000.0)
+    # El aportado es lo del fondo (1.000) más el saldo de la cuenta (500):
+    # el efectivo también es dinero metido, y sin él el patrimonio no cuadra.
+    assert datos["total"]["aportado"] == pytest.approx(1500.0)
     assert datos["total"]["plusvalia"] == pytest.approx(200.0)
+    assert datos["total"]["patrimonio"] == pytest.approx(
+        datos["total"]["aportado"] + datos["total"]["plusvalia"])
     assert datos["total"]["tir"] is not None
 
     fondo = next(p for p in datos["productos"] if p["id"] == "fondo")
@@ -240,12 +243,103 @@ def test_construir_sin_red_calcula_el_panel(tmp_path):
 
     cuenta = datos["otrosActivos"][0]
     assert cuenta["valor"] == 500.0
+    assert cuenta["aportado"] == pytest.approx(500.0)   # sin movimientos: todo el saldo
 
     # El hito de 10.000 € no se ha alcanzado
     assert datos["total"]["hitos"][0]["fecha"] is None
 
     # Y la cartera original no se toca (construir no la muta)
     assert cfg["productos"][0]["tipo"] == "efectivo"
+
+
+# ------------------------------- identidad: patrimonio = aportado + ganancia
+
+def _fondo_y_cuenta(saldo, moneda="EUR"):
+    """Fondo manual (coste 1.000, vale 1.200) más una cuenta de efectivo
+    con ese saldo anotado. La cuenta tiene su «cuenta» para que los
+    movimientos de depósito e intereses le lleguen."""
+    return {
+        "titular": "Prueba",
+        "cuentas": [{"id": "c1", "nombre": "Cuenta", "moneda": moneda}],
+        "productos": [
+            {"id": "fondo", "nombre": "Fondo", "corto": "Fondo",
+             "tipo": "otro", "fuente": "manual", "clase": "Fondos", "slot": 1},
+            {"id": "cta", "nombre": "Cuenta", "corto": "Cuenta",
+             "tipo": "efectivo", "fuente": "manual", "moneda": moneda, "cuenta": "c1"},
+        ],
+        "movimientos": [
+            {"id": "m1", "fecha": "2025-01-01", "producto": "fondo",
+             "tipo": "compra", "unidades": 10, "importe": 1000.0},
+        ],
+        "valoraciones": [
+            {"id": "v1", "producto": "fondo", "fecha": "2025-06-01", "valor": 1200.0},
+            {"id": "v2", "producto": "cta", "fecha": "2025-06-01", "valor": saldo},
+        ],
+    }
+
+
+def test_cuenta_con_intereses_aporta_saldo_menos_rendimiento(tmp_path):
+    """1.000 depositados + 50 de intereses y saldo 1.050: la cuenta aporta
+    1.000 (lo rendido no es dinero del bolsillo) y el patrimonio cuadra."""
+    cfg = _fondo_y_cuenta(saldo=1050.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-01-01", "tipo": "deposito",
+         "importe": 1000.0, "cuenta": "c1"},
+        {"id": "m3", "fecha": "2025-05-01", "tipo": "interes",
+         "importe": 50.0, "cuenta": "c1"},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    cuenta = datos["otrosActivos"][0]
+    assert cuenta["aportado"] == pytest.approx(1000.0)     # 1.050 − 50 de intereses
+    assert cuenta["plusvalia"] == pytest.approx(50.0)
+    t = datos["total"]
+    assert t["aportado"] == pytest.approx(2000.0)          # 1.000 fondo + 1.000 cuenta
+    assert t["plusvalia"] == pytest.approx(250.0)          #   200 fondo +    50 cuenta
+    assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
+
+
+def test_aportado_de_cuenta_puede_ser_negativo_y_la_identidad_sigue(tmp_path):
+    """Una cuenta cuyo saldo procede de dividendos ya reinvertidos en productos
+    tiene aportado negativo: hay que contarlo igualmente; si se omite, su valor
+    desaparece del aportado y el patrimonio deja de cuadrar (el hueco de la
+    captura del usuario)."""
+    cfg = _fondo_y_cuenta(saldo=150.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-01-01", "tipo": "deposito",
+         "importe": 100.0, "cuenta": "c1"},
+        {"id": "m3", "fecha": "2025-03-01", "tipo": "dividendo",
+         "importe": 200.0, "cuenta": "c1"},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    cuenta = datos["otrosActivos"][0]
+    assert cuenta["aportado"] == pytest.approx(-50.0)      # 150 − 200 de dividendos
+    assert cuenta["plusvalia"] == pytest.approx(200.0)
+    t = datos["total"]
+    assert t["aportado"] == pytest.approx(950.0)           # 1.000 fondo − 50
+    assert t["plusvalia"] == pytest.approx(400.0)
+    assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
+
+
+def test_cuenta_en_dolares_entra_convertida_a_euros(tmp_path):
+    """El saldo anotado en la moneda de la cuenta (USD) entra en el panel en
+    euros con el cambio de cada día: sin la serie de cambio, la cuenta sumaba
+    dólares por euros y el patrimonio salía inflado."""
+    (tmp_path / "cache").mkdir()
+    cambio = {f"2025-{m:02d}-01": 0.5 for m in range(1, 7)}
+    (tmp_path / "cache" / "USDEUR_X.json").write_text(json.dumps(cambio), encoding="utf-8")
+
+    cfg = _fondo_y_cuenta(saldo=100.0, moneda="USD")
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    cuenta = datos["otrosActivos"][0]
+    assert cuenta["valor"] == pytest.approx(50.0)          # 100 USD × 0,5
+    assert cuenta["valorNat"] == pytest.approx(100.0)
+    assert cuenta["aportado"] == pytest.approx(50.0)       # sin movimientos: todo el saldo
+    c = datos["cuentas"][0]
+    assert c["saldo"] == pytest.approx(100.0)              # en su moneda
+    assert c["saldoEur"] == pytest.approx(50.0)            # y en euros
+    assert not any("no tengo el cambio" in a for a in datos["avisos"])
+    t = datos["total"]
+    assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
 
 
 def test_construir_cartera_vacia_devuelve_none(tmp_path):
