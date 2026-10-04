@@ -25,9 +25,13 @@
   const nombre = p => p ? (p.corto || p.nombre) : "¿?";
   const prod = id => E.cfg.productos.find(p => p.id === id);
   const cuentaDe = id => (E.cfg.cuentas || []).find(c => c.id === id);
+  const opCuentas = () => (E.cfg.cuentas || []).map(c =>
+    `<option value="${esc(c.id)}">${esc(c.nombre)}${c.moneda && c.moneda !== "EUR" ? " · " + esc(c.moneda) : ""}</option>`).join("");
   const propDe = id => (E.cfg.propietarios || []).find(p => p.id === id);
   const soloSaldo = p => SOLO_SALDO.includes(p.tipo);
   const manual = p => p.fuente === "manual" || soloSaldo(p);
+  // Se le puede pedir el precio a la fuente: cotiza en internet o tiene URL de donde leerlo.
+  const actualizable = p => !manual(p) || !!p.urlFuente;
   const opciones = (obj, sel) => Object.entries(obj)
     .map(([k, v]) => `<option value="${esc(k)}"${k === sel ? " selected" : ""}>${esc(v)}</option>`).join("");
   const recuerda = {
@@ -202,7 +206,8 @@
         <td>${esc(E.tipos[p.tipo] || p.tipo)}</td><td>${precioDe(p)}</td>
         <td>${esc(E.fuentes[p.fuente] || "")}${p.codigo ? ` <small>${esc(p.codigo)}</small>` : ""}</td>
         <td>${n}</td>
-        <td class="acc"><button data-acc="editarProducto" data-id="${esc(p.id)}">Editar</button>
+        <td class="acc">${actualizable(p) ? `<button data-acc="actPrecio" data-id="${esc(p.id)}" title="Baja solo el precio de este producto">Actualizar</button>` : ""}
+          <button data-acc="editarProducto" data-id="${esc(p.id)}">Editar</button>
           <button data-acc="borrarProducto" data-id="${esc(p.id)}">Borrar</button></td></tr>`;
     }).join("");
     return `<section class="tarjeta"><header><h2>Productos</h2>
@@ -254,6 +259,7 @@
         ${campo("Tipo", `<select name="tipo">${opciones(E.tipos, p.tipo)}</select>`)}
         ${campo("ISIN o ticker", '<input name="identificador">', "opcional")}
         ${campo("Banco o bróker", '<input name="entidad">', "opcional")}
+        ${campo("Cuenta", `<select name="cuenta"><option value="">— ninguna todavía —</option>${opCuentas()}</select>`, "de sus compras, ventas y dividendos")}
       </div>
 
       <div class="siCotiza">${seccion("De dónde sale el precio")}
@@ -376,13 +382,15 @@
     const filas = movs.map(m => {
       const p = prod(m.producto);
       const c = cuentaDe(m.cuenta);
+      const cp = cuentaDe(m.contrapartida);
       const pr = propDe(m.propietario);
       const precio = m.unidades ? (m.importe - (m.comision || 0)) / m.unidades : null;
       const original = m.monedaOriginal && m.monedaOriginal !== "EUR" && m.importeOriginal != null
         ? `${num(m.importeOriginal, 2)} ${esc(m.monedaOriginal)}` : "—";
+      const etqCuenta = `${c ? c.nombre : "—"}${cp ? ` ⇄ ${cp.nombre}` : ""}`;
       return `<tr><td>${fecha(m.fecha)}</td><td style="text-align:left">${p ? `<i class="pt" style="background:var(--s${p.slot || 1})"></i>` : ""}${esc(nombre(p))}</td>
         <td style="text-align:left">${esc(E.tiposMov[m.tipo] || m.tipo)}</td>
-        <td style="text-align:left" class="subt" title="${esc(c ? c.nombre : "")}">${esc(c ? c.nombre : "—")}</td>
+        <td style="text-align:left" class="subt" title="${esc(etqCuenta)}">${esc(etqCuenta)}</td>
         <td style="text-align:left">${esc(pr ? pr.nombre : (m.propietario || "—"))}</td>
         <td>${m.unidades ? num(m.unidades) : "—"}</td>
         <td class="${m.tipo === "compra" || m.tipo === "comision" ? "" : "pos"}">${eur(m.importe)}</td>
@@ -411,13 +419,38 @@
     dividendo: "Lo que te ingresaron por el dividendo o el cupón.",
     comision: "Comisiones sueltas, como la de custodia. Las de compra y venta ya van dentro de su importe.",
   };
+  // Movimientos de una cuenta: pueden llevar contrapartida (la otra cuenta).
+  const MOV_CONTRAPARTIDA = ["deposito", "retirada", "transferencia", "traspaso", "saldo",
+                             "cambio_divisa", "apertura", "interes", "impuesto", "comision"];
+  // Qué significa la cuenta elegida según el tipo: la primera opción (vacía) se titula así.
+  const ETQ_CUENTA = {
+    compra: "— Externa: aportación de dinero nuevo —",
+    venta: "— Fuera de la app: bolsillo o gasto —",
+    dividendo: "— Sin cuenta —",
+    deposito: "— Cuenta que recibe el dinero —",
+    retirada: "— Cuenta de la que sale el dinero —",
+    transferencia: "— Cuenta de la que sale —",
+    traspaso: "— Cuenta de la que sale —",
+    cambio_divisa: "— Cuenta que cambia de divisa —",
+    apertura: "— Cuenta que se abre —",
+    saldo: "— Elige la cuenta —",
+    interes: "— Sin cuenta —", impuesto: "— Sin cuenta —", comision: "— Sin cuenta —",
+  };
+  const PISTA_CUENTA = {
+    compra: "de qué cuenta sale el dinero",
+    venta: "a qué cuenta entra el dinero",
+    dividendo: "a qué cuenta va el dinero",
+    deposito: "cuenta que lo recibe",
+    retirada: "cuenta de la que sale",
+    transferencia: "de dónde sale", traspaso: "de dónde sale",
+    cambio_divisa: "la cuenta en su moneda",
+  };
 
   function formMovimiento(m, productoId) {
     const cotizables = E.cfg.productos.filter(p => !soloSaldo(p));
     if (!cotizables.length) { alert("Primero añade un producto en «Productos»."); return; }
     const nuevo = !m;
     m = m || { fecha: hoy(), tipo: "compra", producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) };
-    const cuentas = E.cfg.cuentas || [];
     const props = E.cfg.propietarios || [];
     // Cuenta y propietario por defecto: los del producto, y si no, los de la cuenta.
     const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
@@ -430,8 +463,8 @@
       <div class="rejilla" style="margin-top:18px">
         ${campo("Producto", `<select name="producto"><option value="">— Ninguno: es un movimiento de cuenta —</option>${cotizables.map(p =>
           `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`, "", "ancho")}
-        ${campo("Cuenta", `<select name="cuenta"><option value="">— sin cuenta —</option>${cuentas.map(c =>
-          `<option value="${esc(c.id)}">${esc(c.nombre)}${c.moneda && c.moneda !== "EUR" ? " · " + esc(c.moneda) : ""}</option>`).join("")}</select>`, "de qué cuenta sale o entra", "ancho")}
+        ${campo("Cuenta", `<select name="cuenta"><option value="">— sin cuenta —</option>${opCuentas()}</select>`, "de qué cuenta sale o entra", "ancho cuentaCampo")}
+        ${campo("Cuenta contrapartida", `<select name="contrapartida"><option value="">— ninguna —</option>${opCuentas()}</select>`, "la otra cuenta, si la hay", "ancho siContra")}
         ${campo("Propietario", `<select name="propietario">${props.map(p =>
           `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select>`, "de quién es")}
         ${campo("Fecha", `<input type="date" name="fecha" max="${hoy()}">`)}
@@ -440,23 +473,53 @@
         ${campo("Comisión", '<div class="conSufijo"><input name="comision" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "ya incluida en el importe", "siCom")}
         ${campo("Nota", '<input name="nota" maxlength="200" placeholder="Por ejemplo: aportación mensual">', "opcional", "ancho")}
       </div>
+      <label class="interruptor siVincula" hidden><input type="checkbox" name="vincular"><span class="pista"></span>
+        <span><b>Vincular «<span id="mVincNombre"></span>» a esta cuenta</b>
+          <small>Sus próximas compras, ventas y dividendos usarán esta cuenta automáticamente.</small></span></label>
       <div class="resumen"><span id="mAyuda"></span><b id="mPrecio"></b></div>`,
     async f => {
       const d = campos(f);
       if (!nuevo) d.id = m.id;
+      const hayVinculo = !f.querySelector(".siVincula").hidden && f.elements.vincular.checked;
+      d.vincular = hayVinculo ? "1" : "";
+      const pv = prod(d.producto);
+      const avisoVinc = hayVinculo && pv && d.cuenta
+        ? `«${nombre(pv)}» queda vinculado a la cuenta «${(cuentaDe(d.cuenta) || {}).nombre}»: ` +
+          "sus próximos movimientos la usarán solos."
+        : null;
       await guarda("movimientos", d);
       E.vista = "movimientos";
       recuerda.guarda("patrimonio.editor", "movimientos");
-      return null;
+      return avisoVinc ? () => avisa([avisoVinc]) : null;
     }, nuevo ? "Guardar movimiento" : "Guardar cambios");
     rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
+      contrapartida: m.contrapartida || "",
       unidades: decimal(m.unidades || ""), importe: decimal(m.importe), comision: decimal(m.comision) });
+    let vinMostrado = false;
     const ajusta = () => {
       const t = f.elements.tipo.value;
       const p = prod(f.elements.producto.value);
       const conUnid = t === "compra" || t === "venta";
       f.querySelector(".siUnid").hidden = !conUnid;
       f.querySelector(".siCom").hidden = !conUnid;
+      // Qué significa «cuenta» según el tipo: de dónde sale el dinero, quién la recibe…
+      f.elements.cuenta.options[0].textContent = ETQ_CUENTA[t] || "— Sin cuenta —";
+      const emC = f.querySelector(".cuentaCampo .et em");
+      if (emC) emC.textContent = PISTA_CUENTA[t] || "de qué cuenta sale o entra";
+      // La contrapartida solo tiene sentido en los movimientos de una cuenta.
+      const hayCp = MOV_CONTRAPARTIDA.includes(t);
+      f.querySelector(".siContra").hidden = !hayCp;
+      if (!hayCp) f.elements.contrapartida.value = "";
+      // Vincular producto ↔ cuenta al anotar una compra, venta o dividendo.
+      const cid = f.elements.cuenta.value;
+      const conVin = ["compra", "venta", "dividendo"].includes(t) && p && cid && p.cuenta !== cid;
+      const caja = f.querySelector(".siVincula");
+      if (conVin && !vinMostrado) {
+        f.elements.vincular.checked = !p.cuenta;   // sugerido solo si aún no está vinculado
+        $("#mVincNombre").textContent = nombre(p);
+      }
+      caja.hidden = !conVin;
+      vinMostrado = !!conVin;
       // Con la caja de unidades oculta, la del importe ocupa su hueco sin descuadrar la rejilla.
       $("#mAyuda").textContent = AYUDA_IMPORTE[t] + (p && manual(p) && t === "compra"
         ? " Como este producto se valora a mano, las unidades son opcionales." : "");
@@ -561,6 +624,27 @@
                 : "URL quitada."]);
       pinta();
     } catch (x) { alert(x.message); }
+  }
+
+  /* Baja el precio de UN producto sin tocar los demás (mucho más rápido que
+     «Actualizar precios», que baja los de toda la cartera). */
+  async function actPrecio(id) {
+    const p = prod(id);
+    const b = document.querySelector(`[data-acc="actPrecio"][data-id="${CSS.escape(id)}"]`);
+    if (b) { b.disabled = true; b.textContent = "…"; }
+    try {
+      const j = await api("POST", `api/productos/${encodeURIComponent(id)}/actualizar`);
+      if (j.cartera) E.cfg = j.cartera;
+      const c = D && (D.productos || []).find(x => x.id === id);
+      if (c && j.nav != null) { c.nav = j.nav; c.navFecha = j.navFecha; }
+      window.EDITOR_SUCIO = true;
+      pinta();
+      avisa([`Precio de «${nombre(p)}» actualizado${j.nav != null ? `: ${num(j.nav)} € (${fecha(j.navFecha)})` : ""}.`]
+        .concat(j.avisos || []));
+    } catch (x) {
+      if (b) { b.disabled = false; b.textContent = "Actualizar"; }
+      alert(x.message);
+    }
   }
 
   function conectaSaldos() {
@@ -930,6 +1014,7 @@
     todosValores: soloPropio(todosValores),
     cargarPlantilla: soloPropio(() => { const i = $("#plantArchivo"); if (i) i.click(); }),
     guardarUrl: soloPropio(guardarUrl),
+    actPrecio: soloPropio(actPrecio),
     repartirColores: soloPropio(async () => {
       try {
         const j = await api("POST", "api/repartir-colores");

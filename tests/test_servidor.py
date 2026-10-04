@@ -172,3 +172,64 @@ def test_en_demo_no_se_puede_escribir(cliente):
 def test_coleccion_desconocida_es_404(cliente):
     assert cliente.post("/api/loquesea", json={}).status_code == 404
     assert cliente.delete("/api/loquesea/x").status_code == 404
+
+
+# ------------------------------------------- actualizar el precio de UN producto
+def test_actualizar_un_producto(cliente, monkeypatch):
+    """Baja el precio de un solo producto (sin bajar los demás), recalcula el
+    panel y deja claro qué es lo que no se puede actualizar."""
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    try:
+        s.escribe_json(ruta, {
+            "productos": [{"id": "f1", "nombre": "Fondo", "corto": "Fondo", "tipo": "fondo",
+                           "fuente": "yahoo", "codigo": "ABC"},
+                          {"id": "m1", "nombre": "Piso", "corto": "Piso", "tipo": "otro",
+                           "fuente": "manual"}],
+            "movimientos": [],
+            "valoraciones": [{"id": "v1", "producto": "m1", "fecha": "2025-06-01", "valor": 100000.0}]})
+        llamado = {}
+
+        def serie_fingida(p, carpeta, fresca=False):
+            llamado.update(id=p["id"], fresca=fresca)
+            return {"2025-05-01": 10.0, "2025-06-01": 11.5}
+
+        monkeypatch.setattr(s.motor, "serie_producto", serie_fingida)
+
+        r = cliente.post("/api/productos/f1/actualizar")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        j = r.get_json()
+        assert j["ok"] is True
+        assert llamado == {"id": "f1", "fresca": True}      # descarga fresca de ese producto
+        assert j["nav"] == 11.5 and j["navFecha"] == "2025-06-01"
+        datos = s.lee_json(calc) or {}
+        assert any(p.get("id") == "m1" for p in datos.get("productos", []))   # panel al día
+
+        # valorado a mano y sin URL: no hay precio que bajar
+        r2 = cliente.post("/api/productos/m1/actualizar")
+        assert r2.status_code == 400
+        assert "a mano" in r2.get_json()["errores"][0]
+
+        # producto que no existe
+        assert cliente.post("/api/productos/nada/actualizar").status_code == 404
+    finally:
+        if cartera_antes is None:
+            if os.path.exists(ruta):
+                os.remove(ruta)
+        else:
+            s.escribe_json(ruta, cartera_antes)
+        if calc_antes == "ausente":
+            if os.path.exists(calc):
+                os.remove(calc)
+        else:
+            s.escribe_json(calc, calc_antes)
+
+
+def test_actualizar_un_producto_en_demo_no_se_puede(cliente):
+    r = cliente.post("/api/productos/x/actualizar")
+    assert r.status_code == 403
+    assert "ejemplo" in r.get_json()["errores"][0]

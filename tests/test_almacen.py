@@ -203,6 +203,78 @@ def test_al_cambiar_el_importe_se_actualiza_el_original():
     assert m["importe"] == 194.14
 
 
+# --------------------------------- cuentas de efectivo y contrapartida
+
+def _cfg_cuentas():
+    return {
+        "productos": [{"id": "f", "nombre": "Tesla", "corto": "Tesla", "tipo": "accion",
+                       "fuente": "yahoo", "codigo": "TSLA"}],
+        "cuentas": [{"id": "efectivo", "nombre": "Caja", "tipo": "efectivo", "moneda": "EUR"},
+                    {"id": "banco", "nombre": "Banco", "tipo": "banco", "moneda": "EUR"}],
+        "movimientos": [], "valoraciones": [],
+    }
+
+
+def test_deposito_con_contrapartida_se_guarda():
+    """Un depósito o una retirada pueden llevar la otra cuenta implicada."""
+    cfg = _cfg_cuentas()
+    m = almacen.guarda_movimiento(cfg, {"fecha": "2025-03-01", "tipo": "deposito",
+                                        "importe": 500, "cuenta": "efectivo",
+                                        "contrapartida": "banco"})
+    assert m["cuenta"] == "efectivo" and m["contrapartida"] == "banco"
+
+
+def test_contrapartida_invalida_o_igual_a_la_cuenta():
+    cfg = _cfg_cuentas()
+    # una contrapartida que no existe se ignora (igual que la cuenta)
+    m = almacen.guarda_movimiento(cfg, {"fecha": "2025-03-01", "tipo": "retirada",
+                                        "importe": 20, "cuenta": "efectivo",
+                                        "contrapartida": "no_existe"})
+    assert "contrapartida" not in m
+    # la misma cuenta en los dos lados no tiene sentido
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_movimiento(cfg, {"fecha": "2025-03-02", "tipo": "retirada",
+                                        "importe": 20, "cuenta": "efectivo",
+                                        "contrapartida": "efectivo"})
+    assert any("contrapartida" in e for e in ex.value.errores)
+
+
+def test_compra_externa_y_vinculo_del_producto_a_su_cuenta():
+    """Sin cuenta, una compra es dinero nuevo (externo); con el checkbox de
+    vincular, el producto queda unido a la cuenta para futuros movimientos."""
+    cfg = _cfg_cuentas()
+    m = almacen.guarda_movimiento(cfg, {"fecha": "2025-03-01", "tipo": "compra", "producto": "f",
+                                        "unidades": 1, "importe": 100})
+    assert "cuenta" not in m                      # aportación externa
+    assert cfg["productos"][0].get("cuenta") is None
+
+    almacen.guarda_movimiento(cfg, {"fecha": "2025-03-02", "tipo": "compra", "producto": "f",
+                                    "unidades": 1, "importe": 50, "cuenta": "banco",
+                                    "vincular": "1"})
+    assert cfg["productos"][0]["cuenta"] == "banco"
+
+    # sin el checkbox no se toca el vínculo ya existente
+    almacen.guarda_movimiento(cfg, {"fecha": "2025-03-03", "tipo": "dividendo", "producto": "f",
+                                    "importe": 5, "cuenta": "efectivo"})
+    assert cfg["productos"][0]["cuenta"] == "banco"
+
+
+def test_guarda_producto_valida_la_cuenta_vinculada():
+    cfg = _cfg_cuentas()
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_producto(cfg, {"nombre": "Fondo", "tipo": "fondo", "fuente": "yahoo",
+                                      "codigo": "X", "cuenta": "no_existe"})
+    assert any("cuenta" in e for e in ex.value.errores)
+
+    prod, _ = almacen.guarda_producto(cfg, {"nombre": "Fondo", "tipo": "fondo", "fuente": "yahoo",
+                                            "codigo": "X", "cuenta": "banco"})
+    assert prod["cuenta"] == "banco"
+    # y se puede quitar el vínculo
+    prod2, _ = almacen.guarda_producto(cfg, {"id": prod["id"], "nombre": "Fondo", "tipo": "fondo",
+                                             "fuente": "yahoo", "codigo": "X", "cuenta": ""})
+    assert "cuenta" not in prod2
+
+
 # ---------------------------------------------------------------- disco
 
 def test_guarda_hace_copia_automatica_y_escritura_atomica(tmp_path):

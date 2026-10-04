@@ -374,6 +374,55 @@ def api_producto_url(pid):
     return cambia(fn)
 
 
+@app.post("/api/productos/<pid>/actualizar")
+def api_producto_actualizar(pid):
+    """Actualiza el precio de UN producto (sin bajar los demás) y recalcula el panel."""
+    if modo() == "demo":
+        return jsonify(ok=False, errores=[AVISO_DEMO]), 403
+    hilo = _ACTUALIZA.get("hilo")
+    if motor.PROGRESO.get("activo") or (hilo and hilo.is_alive()):
+        return jsonify(ok=False, errores=["Hay una actualización de precios en marcha: "
+                                          "espera a que termine y vuelve a intentarlo."]), 409
+    cfg = cartera()
+    p = next((x for x in cfg.get("productos", []) if x.get("id") == pid), None)
+    if not p:
+        return jsonify(ok=False, errores=["Ese producto ya no existe."]), 404
+    nm = p.get("corto") or p.get("nombre") or pid
+    con_url = (p.get("urlFuente") or "").strip().startswith(("http://", "https://"))
+    if p.get("fuente") == "manual" and not con_url:
+        return jsonify(ok=False, errores=[f"«{nm}» no cotiza en internet: se valora a mano. "
+                                          "Anota su valor en «Mis datos → Saldos y valores»."]), 400
+    try:
+        with cerrojo:
+            avisos = []
+            nav = nav_fecha = None
+            if p.get("fuente") == "manual":
+                # Sin cotización: se lee el precio de la URL de su fuente.
+                v = _valor_de_url(p["urlFuente"].strip())
+                if not v or v <= 0:
+                    raise ValueError("no he encontrado ningún precio en la página")
+                nav_fecha = dt.date.today().isoformat()
+                almacen.guarda_valoracion(cfg, {"producto": pid, "fecha": nav_fecha,
+                                                 "valor": round(v, 2)})
+                almacen.guarda(os.path.join(DATOS, "cartera.json"), cfg)
+                nav = round(float(v), 4)
+            else:
+                _pon_cache_en_marcha()
+                serie = motor.serie_producto(p, DATOS, fresca=True)
+                pares = [(f, v) for f, v in sorted(serie.items()) if v]
+                if not pares:
+                    raise ValueError("la fuente no me ha devuelto ningún precio")
+                nav_fecha, nav = pares[-1][0], round(float(pares[-1][1]), 4)
+                avisos = sorted(set(motor.AVISOS))
+            datos = recalcula(descargar=False)
+            if datos:
+                avisos = sorted(set(avisos) | set(datos.get("avisos") or []))
+    except Exception as e:
+        logging.exception("Fallo al actualizar un producto")
+        return jsonify(ok=False, errores=[f"No he podido actualizar «{nm}»: {e}"]), 500
+    return jsonify(ok=True, nav=nav, navFecha=nav_fecha, cartera=cfg, avisos=avisos)
+
+
 @app.get("/api/cartera")
 def api_cartera():
     return jsonify(modo=modo(), cartera=cartera(), tipos=motor.TIPOS, fuentes=motor.FUENTES,

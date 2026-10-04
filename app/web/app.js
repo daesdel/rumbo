@@ -1254,12 +1254,14 @@
     const hayVL = !!(p.navSerie && p.navSerie.some(v => v));
     const etqVL = p.etqPrecio || "Valor liquidativo";
     const pocos = (p.serie || []).filter(v => v != null).length < 5;
+    const puedeAct = p.fuente !== "manual" || !!p.urlFuente;
 
     sec.innerHTML = `
       <header>
         <h2><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${color(p)};margin-right:9px"></span>${esc(p.nombre)}</h2>
         <div class="sep"></div>
         ${hayVL ? '<div class="segm" id="segSerie"></div>' : ""}
+        ${puedeAct ? '<button class="btn" id="btnActPrecio" title="Baja solo el precio de este producto, sin tocar los demás">↻ Actualizar precio</button>' : ""}
       </header>
       ${p.papel ? `<div class="papel">${esc(p.papel)}</div>` : ""}
       ${p.indiceDetalle ? `<p style="color:var(--tinta2);font-size:13.5px;margin:0 0 16px">${esc(p.indiceDetalle)}</p>` : ""}
@@ -1268,6 +1270,25 @@
       ${pocos ? '<p class="subt" style="margin:0 0 12px">Solo hay un valor anotado, así que aún no hay curva. Anota más en «Mis datos → Saldos y valores».</p>' : ""}
       <div class="envGraf" id="grafFondo"></div>
       <div class="tramos" id="tramosLey"></div>`;
+
+    // Precio de UN solo producto: lo baja y repinta el panel sin tocar los demás.
+    const bAct = $("#btnActPrecio");
+    if (bAct) bAct.onclick = async () => {
+      bAct.disabled = true;
+      bAct.textContent = "↻ Actualizando…";
+      try {
+        const r = await fetch(`api/productos/${encodeURIComponent(p.id)}/actualizar`, { method: "POST" });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.ok === false)
+          throw new Error((j.errores || []).join("\n") || "No he podido bajar el precio.");
+        bAct.textContent = "✓ Precio actualizado";
+        if (!(await window.__refrescaDatos())) pintaFondos();
+      } catch (e) {
+        bAct.disabled = false;
+        bAct.textContent = "↻ Actualizar precio";
+        alert(e.message || "No he podido bajar el precio de este producto. ¿Tienes conexión a internet?");
+      }
+    };
 
     // "Al cierre" es la cifra comparable con MyInvestor, que fuera de horario
     // se queda en el último cierre. "En vivo" sigue al bitcoin a cualquier hora.

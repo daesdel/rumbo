@@ -189,6 +189,8 @@ def guarda_producto(cfg, datos):
     riesgo = numero(datos.get("riesgo"), "el nivel de riesgo", errores, obligatorio=False, minimo=1)
     if riesgo is not None and riesgo > 7:
         errores.append("El nivel de riesgo va de 1 a 7.")
+    if nuevo.get("cuenta") and not cuenta(cfg, nuevo["cuenta"]):
+        errores.append("La cuenta que quieres vincular no existe.")
     if errores:
         raise ErrorValidacion(errores)
 
@@ -299,6 +301,11 @@ def guarda_movimiento(cfg, datos):
     cid = texto(datos.get("cuenta"))
     if cid and not cuenta(cfg, cid):
         cid = ""
+    cp = texto(datos.get("contrapartida"))
+    if cp and not cuenta(cfg, cp):
+        cp = ""
+    if cp and cp == cid:
+        errores.append("La cuenta contrapartida tiene que ser distinta de la cuenta.")
     if not p:
         if not cid:
             errores.append("Elige el producto (o la cuenta, si es un movimiento de efectivo).")
@@ -329,6 +336,11 @@ def guarda_movimiento(cfg, datos):
     if errores:
         raise ErrorValidacion(errores)
 
+    # Checkbox del formulario: vincula el producto con la cuenta elegida para que
+    # las próximas compras, ventas y dividendos la anoten solos.
+    if p and cid and datos.get("vincular"):
+        p["cuenta"] = cid
+
     mov = {"fecha": f, "tipo": tipo, "unidades": round(unidades, 8),
            "importe": round(importe, 2)}
     if p and not (p.get("tipo") in SOLO_SALDO and cid):
@@ -336,11 +348,13 @@ def guarda_movimiento(cfg, datos):
     if cid:
         mov["cuenta"] = cid
     for k in CAMPOS_MOV_EXTRA:
-        if k in ("cuenta", "producto"):
+        if k in ("cuenta", "producto", "contrapartida"):
             continue
         v = datos.get(k)
         if v not in (None, ""):
             mov[k] = round(v, 4) if isinstance(v, float) else v
+    if cp:
+        mov["contrapartida"] = cp
     if comision:
         mov["comision"] = round(comision, 2)
     if texto(datos.get("nota")):
