@@ -12,10 +12,11 @@ import os
 import re
 import unicodedata
 
-from .motor import TIPOS, FUENTES, num_es
+from .motor import TIPOS, FUENTES, num_es, aplicar_movimientos
 
 COPIAS_MAX = 20
-TIPOS_MOV = {"compra": "Compra", "venta": "Venta", "dividendo": "Dividendo o cupón",
+TIPOS_MOV = {"compra": "Compra", "venta": "Venta", "entrega": "Entrega entrante",
+             "dividendo": "Dividendo o cupón",
              "comision": "Comisión", "interes": "Intereses", "impuesto": "Impuesto",
              "deposito": "Depósito", "retirada": "Retirada", "transferencia": "Transferencia",
              "traspaso": "Traspaso", "saldo": "Saldo", "cambio_divisa": "Cambio de divisa",
@@ -43,10 +44,15 @@ CARTERA_VACIA = {
 class ErrorValidacion(Exception):
     def __init__(self, errores):
         super().__init__("; ".join(errores))
-        self.errores = errores
+        self.errores = errores# ---------------------------------------------------------------- disco
+def protege(ruta):
+    """Permisos 600: solo el dueño del archivo puede leer o escribir los datos
+    de la cartera. En Windows no aplica, y si no puede, tampoco pasa nada."""
+    try:
+        os.chmod(ruta, 0o600)
+    except OSError:
+        pass
 
-
-# ---------------------------------------------------------------- disco
 
 def carga(ruta):
     with open(ruta, "r", encoding="utf-8") as f:
@@ -65,10 +71,13 @@ def guarda(ruta, cfg):
         viejas = sorted(n for n in os.listdir(copias) if n.startswith("auto_"))
         for n in viejas[:-COPIAS_MAX]:
             os.remove(os.path.join(copias, n))
+        for n in viejas:
+            protege(os.path.join(copias, n))
     tmp = ruta + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     os.replace(tmp, ruta)
+    protege(ruta)
 
 
 # ---------------------------------------------------------------- ayudas
@@ -217,9 +226,13 @@ def guarda_producto(cfg, datos):
             usos = [sum(1 for p in cfg["productos"] if p.get("slot") == s) for s in range(1, 13)]
             nuevo["slot"] = usos.index(min(usos)) + 1
         cfg["productos"].append(destino)
-    # Se conservan los campos que el formulario no toca (la exposición del índice, etc.).
+    # Se conservan los campos que el formulario no toca (la exposición del índice,
+    # la URL de la fuente, el propietario…): lo que no viene en el envío no se borra.
+    ausentes = {k for k in CAMPOS_TEXTO if k not in datos}
     for k, v in nuevo.items():
         if v in ("", None):
+            if k in ausentes:
+                continue
             destino.pop(k, None)
         else:
             destino[k] = v
@@ -288,8 +301,32 @@ def unidades_a(cfg, pid, fecha_iso, excluir=None):
         if m.get("producto") != pid or m.get("id") == excluir or m["fecha"] > fecha_iso:
             continue
         u = float(m.get("unidades") or 0)
-        total += u if m.get("tipo") == "compra" else -u if m.get("tipo") == "venta" else 0
+        t = m.get("tipo")
+        total += (u if t in ("compra", "entrega") else -u if t == "venta" else 0)
     return total
+
+
+def aportado_de(cfg, pid, excluir=None):
+    """Lo que tienes invertido en un producto que se sigue con movimientos, ya con
+    las escisiones aplicadas (el coste que otras entregas le han restado).
+    Devuelve None cuando viene de los valores anotados a mano y no se puede comprobar."""
+    p = producto(cfg, pid)
+    if not p or p.get("tipo") in SOLO_SALDO:
+        return None
+    movs = [m for m in cfg.get("movimientos", [])
+            if m.get("producto") == pid and m.get("id") != excluir]
+    for m in cfg.get("movimientos", []):
+        # Otras entregas que le descuentan coste (escisión). La que se está
+        # editando se excluye con «excluir».
+        if m.get("tipo") == "entrega" and m.get("id") != excluir \
+                and m.get("productoOrigen") == pid and float(m.get("importe") or 0) > 0:
+            movs.append({"tipo": "reclasifica", "fecha": m["fecha"],
+                         "importe": -float(m["importe"])})
+    ap = round(sum(d for _, _, d in aplicar_movimientos(p, movs)["eventos"]), 2)
+    if ap <= 0 and p.get("fuente") == "manual" and not any(
+            m.get("tipo") in ("compra", "venta", "entrega") for m in movs):
+        return None                      # su aportado viene de los valores anotados
+    return ap
 
 
 def guarda_movimiento(cfg, datos):
@@ -313,7 +350,15 @@ def guarda_movimiento(cfg, datos):
         errores.append(f"«{p.get('corto') or p['nombre']}» se sigue con saldos, no con movimientos: "
                        "anótalo en «Saldos y valores».")
     f = fecha(datos.get("fecha"), errores)
-    importe = numero(datos.get("importe"), "el importe", errores, mayor_que=0)
+    # En una entrega entrante (escisión) el importe es el coste asignado a los
+    # títulos nuevos: puede ser 0 si la entrega ha sido gratis.
+    es_entrega = tipo == "entrega"
+    importe = numero(datos.get("importe"), "el importe", errores,
+                     obligatorio=not es_entrega,
+                     mayor_que=0 if not es_entrega else None,
+                     minimo=0 if es_entrega else None)
+    if es_entrega and importe is None and not errores:
+        importe = 0.0
     cotiza = bool(p and p.get("fuente") != "manual")
     unidades = 0.0
     if tipo == "compra":
@@ -322,9 +367,30 @@ def guarda_movimiento(cfg, datos):
     elif tipo == "venta":
         unidades = numero(datos.get("unidades"), "cuántas unidades vendiste", errores,
                           obligatorio=cotiza, minimo=0) or 0.0
+    elif es_entrega:
+        unidades = numero(datos.get("unidades"), "cuántas unidades entran", errores,
+                          obligatorio=True, mayor_que=0) or 0.0
     elif datos.get("unidades") not in (None, ""):
         unidades = numero(datos.get("unidades"), "las unidades", errores,
                           obligatorio=False) or 0.0
+    # De dónde sale el coste de la entrega: de otro activo (escisión) o es nuevo.
+    origen = texto(datos.get("productoOrigen"))
+    if origen and es_entrega and not errores:
+        if not producto(cfg, origen):
+            errores.append("El producto del que sale el coste de la entrega no existe.")
+        elif p and origen == p["id"]:
+            errores.append("El producto de origen tiene que ser distinto del que recibe la entrega.")
+        elif importe and importe > 0:
+            ap = aportado_de(cfg, origen, excluir=datos.get("id"))
+            if ap is not None and importe > ap + 0.01:
+                o = producto(cfg, origen)
+                errores.append(
+                    f"El coste de la entrega ({fmt_num(importe)} €) es mayor que lo que tienes "
+                    f"invertido en «{o.get('corto') or o['nombre']}» ({fmt_num(max(ap, 0))} €): "
+                    "no se le puede restar más de lo que hay. Baja el precio unitario o deja "
+                    "el origen vacío para que el coste sea nuevo.")
+    elif origen and not es_entrega:
+        origen = ""
     comision = numero(datos.get("comision"), "la comisión", errores, obligatorio=False, minimo=0)
     if comision and importe and comision >= importe:
         errores.append("La comisión no puede ser mayor que el importe total.")
@@ -350,7 +416,7 @@ def guarda_movimiento(cfg, datos):
     for k in CAMPOS_MOV_EXTRA:
         if k in ("cuenta", "producto", "contrapartida"):
             continue
-        v = datos.get(k)
+        v = origen if k == "productoOrigen" else datos.get(k)
         if v not in (None, ""):
             mov[k] = round(v, 4) if isinstance(v, float) else v
     if cp:
@@ -369,7 +435,8 @@ def guarda_movimiento(cfg, datos):
         # contrapartida, origen…) se conserva: editar un movimiento no debe
         # borrar los datos que vinieron de la importación.
         for k in ("contrapartida", "importeOriginal", "monedaOriginal", "tipoCambio",
-                  "impuestos", "origen", "fuente", "urlFuente", "propietario"):
+                  "impuestos", "origen", "fuente", "urlFuente", "propietario",
+                  "productoOrigen"):
             if k not in existente and previo.get(k) not in (None, ""):
                 existente[k] = previo[k]
         # Si cambia el importe en euros, se actualiza el de su moneda original
@@ -385,7 +452,8 @@ def guarda_movimiento(cfg, datos):
 
 
 CAMPOS_MOV_EXTRA = ("cuenta", "contrapartida", "propietario", "importeOriginal",
-                    "monedaOriginal", "tipoCambio", "impuestos", "origen", "fuente", "urlFuente")
+                    "monedaOriginal", "tipoCambio", "impuestos", "origen", "fuente", "urlFuente",
+                    "productoOrigen")
 
 
 def borra_movimiento(cfg, mid):

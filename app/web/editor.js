@@ -238,6 +238,7 @@
   function formProducto(p) {
     const nuevo = !p;
     p = p || { tipo: "fondo", fuente: "morningstar", moneda: "EUR", largoPlazo: true, slot: siguienteColor() };
+    const props = E.cfg.propietarios || [];
     const clases = [...new Set(E.cfg.productos.map(x => x.clase).filter(Boolean))];
     const colores = Array.from({ length: 12 }, (_, i) =>
       `<label class="color" style="--c:var(--s${i + 1})" title="Color ${i + 1}"><input type="radio" name="slot" value="${i + 1}"><i></i></label>`).join("");
@@ -260,6 +261,9 @@
         ${campo("ISIN o ticker", '<input name="identificador">', "opcional")}
         ${campo("Banco o bróker", '<input name="entidad">', "opcional")}
         ${campo("Cuenta", `<select name="cuenta"><option value="">— ninguna todavía —</option>${opCuentas()}</select>`, "de sus compras, ventas y dividendos")}
+        ${campo("Propietario", `<select name="propietario">${props.map(x =>
+          `<option value="${esc(x.id)}"${x.id === p.propietario ? " selected" : ""}>${esc(x.nombre)}</option>`).join("")}</select>`,
+          "para los filtros David / Gina / Compartido")}
       </div>
 
       <div class="siCotiza">${seccion("De dónde sale el precio")}
@@ -416,6 +420,7 @@
   const AYUDA_IMPORTE = {
     compra: "Lo que salió de tu cuenta, con las comisiones incluidas.",
     venta: "Lo que te ingresaron, ya descontadas las comisiones.",
+    entrega: "Coste asignado a los títulos que entran (escisión o entrega). Si ha sido gratis, déjalo en 0.",
     dividendo: "Lo que te ingresaron por el dividendo o el cupón.",
     comision: "Comisiones sueltas, como la de custodia. Las de compra y venta ya van dentro de su importe.",
   };
@@ -470,6 +475,9 @@
         ${campo("Fecha", `<input type="date" name="fecha" max="${hoy()}">`)}
         ${campo("Unidades", '<input name="unidades" inputmode="decimal" placeholder="0">', "participaciones, acciones…", "siUnid")}
         ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "en euros")}
+        ${campo("Coste salido de", `<select name="productoOrigen"><option value="">— Ninguno: es coste nuevo —</option>${cotizables.map(p =>
+          `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`,
+          "escisión: de qué activo se resta el coste", "ancho siEntrega")}
         ${campo("Comisión", '<div class="conSufijo"><input name="comision" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "ya incluida en el importe", "siCom")}
         ${campo("Nota", '<input name="nota" maxlength="200" placeholder="Por ejemplo: aportación mensual">', "opcional", "ancho")}
       </div>
@@ -482,6 +490,9 @@
       if (!nuevo) d.id = m.id;
       const hayVinculo = !f.querySelector(".siVincula").hidden && f.elements.vincular.checked;
       d.vincular = hayVinculo ? "1" : "";
+      // Una entrega entrante no toca dinero: ni cuenta, ni contrapartida, ni comisión.
+      if (d.tipo === "entrega") { d.cuenta = ""; d.contrapartida = ""; d.comision = ""; }
+      else d.productoOrigen = "";
       const pv = prod(d.producto);
       const avisoVinc = hayVinculo && pv && d.cuenta
         ? `«${nombre(pv)}» queda vinculado a la cuenta «${(cuentaDe(d.cuenta) || {}).nombre}»: ` +
@@ -493,15 +504,18 @@
       return avisoVinc ? () => avisa([avisoVinc]) : null;
     }, nuevo ? "Guardar movimiento" : "Guardar cambios");
     rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
-      contrapartida: m.contrapartida || "",
+      contrapartida: m.contrapartida || "", productoOrigen: m.productoOrigen || "",
       unidades: decimal(m.unidades || ""), importe: decimal(m.importe), comision: decimal(m.comision) });
     let vinMostrado = false;
     const ajusta = () => {
       const t = f.elements.tipo.value;
       const p = prod(f.elements.producto.value);
-      const conUnid = t === "compra" || t === "venta";
+      const conUnid = t === "compra" || t === "venta" || t === "entrega";
       f.querySelector(".siUnid").hidden = !conUnid;
-      f.querySelector(".siCom").hidden = !conUnid;
+      f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta");
+      // Una entrega entrante (escisión) no mueve dinero de ninguna cuenta.
+      f.querySelector(".cuentaCampo").hidden = t === "entrega";
+      f.querySelector(".siEntrega").hidden = t !== "entrega";
       // Qué significa «cuenta» según el tipo: de dónde sale el dinero, quién la recibe…
       f.elements.cuenta.options[0].textContent = ETQ_CUENTA[t] || "— Sin cuenta —";
       const emC = f.querySelector(".cuentaCampo .et em");
@@ -525,7 +539,9 @@
         ? " Como este producto se valora a mano, las unidades son opcionales." : "");
       const u = leeNum(f.elements.unidades.value), imp = leeNum(f.elements.importe.value);
       const com = leeNum(f.elements.comision.value) || 0;
-      $("#mPrecio").textContent = conUnid && u > 0 && imp > 0 ? `${num((imp - com) / u)} € / unidad` : "";
+      $("#mPrecio").textContent = t === "entrega" && u > 0
+        ? `${num(imp / u)} € / unidad asignado`
+        : conUnid && u > 0 && imp > 0 ? `${num((imp - com) / u)} € / unidad` : "";
     };
     f.oninput = ajusta;
     f.onchange = ajusta;
@@ -574,56 +590,162 @@
       ${vistaSinCotizacion()}`;
   }
 
-  /* --- valores que no se pueden bajar de internet: edición y URL de fuente --- */
+  /* --- valores que no se pueden bajar de internet: edición y fuente de precio --- */
   function sinCotizacion() {
     return E.cfg.productos.filter(p => p.fuente === "manual" && !soloSaldo(p));
   }
   const ultimoValor = id => E.cfg.valoraciones
     .filter(v => v.producto === id).sort((a, b) => a.fecha < b.fecha ? 1 : -1)[0];
 
+  /* La fuente de precio, como en Portfolio Performance: la URL y CÓMO leerla
+     (automático, JSON con rutas, tabla web o el precio marcado en la página). */
+  const MODOS_FUENTE = [["auto", "Automático"], ["json", "JSON con rutas"],
+                        ["tabla", "Tabla en la web"], ["web", "Precio marcado en la web"]];
+  const CAMPOS_FUENTE_UI = [
+    ["json", "urlRutaPrecio", "Ruta para la cotización", "$[*].kurs", true],
+    ["json", "urlRutaFecha", "Ruta para la fecha", "$[*].datum"],
+    ["json", "urlFormatoFecha", "Formato de fecha (si no es 2025-01-31)", "%d.%m.%Y"],
+    ["tabla", "urlColPrecio", "Columna del precio", "Precio", true],
+    ["tabla", "urlColFecha", "Columna de la fecha", "Fecha"],
+    ["tabla", "urlFormatoFecha", "Formato de fecha (si no es 2025-01-31)", "%d.%m.%Y"],
+    ["web", "urlSelector", "Dónde está el precio", "span#precio o el texto de al lado", true],
+    ["json tabla web", "urlFactor", "Factor (multiplica al precio)", "1"]];
+  const FUENTE = { estado: {} };   // id → fila de ajustes abierta a mano
+
+  function detalleFuente(p) {
+    const campos = CAMPOS_FUENTE_UI.map(([mods, k, etq, ph, nec]) =>
+      `<label data-modos="${mods}" hidden><span>${etq}${nec ? "" : " (opcional)"}</span>
+        <input data-campo="${k}" data-id="${esc(p.id)}" value="${esc(p[k] || "")}"
+          placeholder="${esc(ph)}" spellcheck="false"></label>`).join("");
+    return `<tr data-fuente-fila="${esc(p.id)}" hidden><td colspan="5" style="text-align:left">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px 16px;align-items:end">
+        ${campos}
+        <p class="ayuda" data-modos="auto">Automático busca el precio en la página (JSON-LD, meta o el
+          primer número). Si la fuente es un JSON, una tabla o el precio está marcado, elige otro modo y pon aquí las rutas.</p>
+      </div>
+      <div data-fuente-res="${esc(p.id)}" style="margin-top:8px"></div></td></tr>`;
+  }
+
   function vistaSinCotizacion() {
     const lista = sinCotizacion();
     if (!lista.length) return "";
     const filas = lista.map(p => {
       const u = ultimoValor(p.id);
+      const modo = p.urlModo || "auto";
+      const sel = `<select data-fuente-modo="${esc(p.id)}" title="Cómo leer la URL"
+          style="width:100%;margin-top:4px">${MODOS_FUENTE.map(([v, t]) =>
+            `<option value="${v}"${modo === v ? " selected" : ""}>${t}</option>`).join("")}</select>`;
       return `<tr>
         <td style="text-align:left"><i class="pt" style="background:var(--s${p.slot || 1})"></i> ${esc(nombre(p))}
           <small class="subt">${esc(E.tipos[p.tipo] || "")}${p.moneda && p.moneda !== "EUR" ? " · " + esc(p.moneda) : ""}</small></td>
         <td>${u ? fecha(u.fecha) : '<span class="neg">sin valores</span>'}</td>
         <td>${u ? eur(u.valor) : "—"}</td>
         <td style="text-align:left"><input type="url" data-url="${esc(p.id)}" value="${esc(p.urlFuente || "")}"
-          placeholder="https://…" style="width:100%" spellcheck="false"></td>
+          placeholder="https://…" style="width:100%" spellcheck="false">${sel}</td>
         <td class="acc">
-          <button data-acc="guardarUrl" data-id="${esc(p.id)}">Guardar URL</button>
+          <button data-acc="guardarUrl" data-id="${esc(p.id)}">Guardar fuente</button>
+          <button data-acc="probarFuente" data-id="${esc(p.id)}">Probar</button>
+          <button data-acc="fuenteDet" data-id="${esc(p.id)}">Ajustes</button>
           <a class="btn" href="api/valores/plantilla?producto=${encodeURIComponent(p.id)}" download>Plantilla</a>
           <button data-acc="nuevoValor" data-id="${esc(p.id)}">Anotar fecha y valor</button>
-        </td></tr>`;
+        </td></tr>${detalleFuente(p)}`;
     }).join("");
     return `<section class="tarjeta" style="margin-top:16px">
       <header><h2>Valores sin cotización automática</h2>
         <span class="subt">Planes, oro, fondos sin precio en internet… Anota fecha y valor, o pon una URL
-        y la app leerá el precio de ahí cada vez que actualices.</span></header>
+        y la app leerá el precio de ahí cada vez que actualices (JSON, tabla web o precio marcado).</span></header>
       <div class="tablaEnv"><table class="dt"><thead><tr>
         <th style="text-align:left">Producto</th><th>Última fecha</th><th>Último valor</th>
-        <th style="text-align:left">URL de la fuente (opcional)</th><th></th></tr></thead>
+        <th style="text-align:left">Fuente de precio (URL y lectura)</th><th></th></tr></thead>
         <tbody>${filas}</tbody></table></div>
       <p class="ayuda" style="margin-top:12px">La plantilla <code>fecha;valor</code> de cada fila actualiza solo a ese producto;
         la general trae <code>producto;fecha;valor</code> para actualizar varios de una vez.</p>
     </section>`;
   }
 
-  async function guardarUrl(id) {
-    const inp = document.querySelector(`input[data-url="${CSS.escape(id)}"]`);
-    if (!inp) return;
-    const url = inp.value.trim();
+  const datosFuente = id => {
+    const d = {};
+    const url = document.querySelector(`input[data-url="${CSS.escape(id)}"]`);
+    if (url) d.urlFuente = url.value.trim();
+    const modo = document.querySelector(`select[data-fuente-modo="${CSS.escape(id)}"]`);
+    if (modo) d.urlModo = modo.value;
+    document.querySelectorAll(`[data-campo][data-id="${CSS.escape(id)}"]`).forEach(i => {
+      d[i.dataset.campo] = i.value.trim();
+    });
+    return d;
+  };
+
+  function ajustaFuente(id) {
+    const fila = document.querySelector(`tr[data-fuente-fila="${CSS.escape(id)}"]`);
+    if (!fila) return;
+    const modo = (document.querySelector(`select[data-fuente-modo="${CSS.escape(id)}"]`) || {}).value || "auto";
+    fila.querySelectorAll("[data-modos]").forEach(el => {
+      el.hidden = !el.dataset.modos.split(" ").includes(modo);
+    });
+  }
+
+  function alternaFuente(id) {
+    const fila = document.querySelector(`tr[data-fuente-fila="${CSS.escape(id)}"]`);
+    if (!fila) return;
+    fila.hidden = !fila.hidden;
+    FUENTE.estado[id] = !fila.hidden;
+    if (!fila.hidden) ajustaFuente(id);
+  }
+
+  function pintaProbar(id, j) {
+    const caja = document.querySelector(`[data-fuente-res="${CSS.escape(id)}"]`);
+    if (!caja) return;
+    if (!j || !j.ok) {
+      caja.innerHTML = `<span class="neg">${esc(((j && j.errores) || ["No he podido leer la fuente."]).join(" "))}</span>`;
+      return;
+    }
+    let h = "";
+    if (j.precio != null) h += `<p><strong>Lee ${num(j.precio)} € del ${fecha(j.fecha)}</strong> · ${j.total} fila(s) en total.</p>`;
+    if (j.tablas) h += `<p class="ayuda">Tablas en la página: ${j.tablas.map(t =>
+      esc((t.cabeceras || []).join(" | "))).join("  ·  ")}${j.filas ? "" : ". Indica la columna de la fecha y la del precio."}</p>`;
+    const filas = (j.filas || []).map(f => `<tr><td>${esc(String(f[0]))}</td><td>${num(f[1])}</td></tr>`).join("");
+    if (filas) h += `<div class="tablaEnv" style="max-height:220px;overflow:auto"><table class="dt">
+      <thead><tr><th>Fecha</th><th>Precio</th></tr></thead><tbody>${filas}</tbody></table></div>`;
+    caja.innerHTML = h || '<span class="neg">La fuente no ha devuelto nada legible.</span>';
+  }
+
+  async function probarFuente(id) {
+    const fila = document.querySelector(`tr[data-fuente-fila="${CSS.escape(id)}"]`);
+    if (fila) { fila.hidden = false; FUENTE.estado[id] = true; ajustaFuente(id); }
+    const caja = document.querySelector(`[data-fuente-res="${CSS.escape(id)}"]`);
+    if (caja) caja.textContent = "Leyendo la fuente…";
     try {
-      const j = await api("POST", `api/productos/${encodeURIComponent(id)}/url`, { urlFuente: url });
+      const j = await api("POST", `api/productos/${encodeURIComponent(id)}/fuente/probar`, datosFuente(id));
+      pintaProbar(id, j);
+    } catch (x) { pintaProbar(id, { ok: false, errores: [x.message] }); }
+  }
+
+  async function guardarUrl(id) {
+    try {
+      const j = await api("POST", `api/productos/${encodeURIComponent(id)}/url`, datosFuente(id));
       E.cfg = j.cartera;
       window.EDITOR_SUCIO = true;
-      avisa([url ? "URL guardada: el precio se leerá al pulsar «Actualizar precios» del panel."
+      avisa([datosFuente(id).urlFuente
+                ? "Fuente guardada: el precio se leerá al pulsar «Actualizar precios» del panel."
                 : "URL quitada."]);
       pinta();
     } catch (x) { alert(x.message); }
+  }
+
+  function conectaFuente() {
+    document.querySelectorAll("tr[data-fuente-fila]").forEach(f => {
+      const id = f.dataset.fuenteFila;
+      const modo = (document.querySelector(`select[data-fuente-modo="${CSS.escape(id)}"]`) || {}).value || "auto";
+      f.hidden = FUENTE.estado[id] != null ? FUENTE.estado[id] : modo !== "auto";
+      ajustaFuente(id);
+    });
+    document.querySelectorAll("select[data-fuente-modo]").forEach(sel => {
+      sel.onchange = () => {
+        ajustaFuente(sel.dataset.fuenteModo);
+        const fila = document.querySelector(`tr[data-fuente-fila="${CSS.escape(sel.dataset.fuenteModo)}"]`);
+        if (fila && sel.value !== "auto") { fila.hidden = false; ajustaFuente(sel.dataset.fuenteModo); }
+      };
+    });
   }
 
   /* Baja el precio de UN producto sin tocar los demás (mucho más rápido que
@@ -648,6 +770,7 @@
   }
 
   function conectaSaldos() {
+    conectaFuente();
     const inp = $("#plantArchivo");
     if (inp) inp.onchange = async () => {
       const fallo = $("#plantErr");
@@ -929,11 +1052,16 @@
         <div class="bloque"><b>Guardar una copia</b>
           <p class="ayuda">Descarga un archivo <code>.json</code> con todos tus productos, movimientos y saldos.
             Guárdalo en tu nube o en un USB de vez en cuando.</p>
-          ${propio ? '<a class="btn prim" href="api/copia/descargar" download>Descargar copia</a>'
+          ${propio ? `<input type="password" id="copClave" placeholder="Frase de paso (opcional)" autocomplete="new-password"
+              title="Si pones frase de paso, el archivo se guarda cifrado: sin ella no se puede leer.">
+            <p class="ayuda">Con frase de paso el archivo sale <b>cifrado</b> y sin ella no se puede abrir:
+              apúntala en tu gestor de contraseñas. Déjala vacía para una copia normal.</p>
+            <button class="btn prim" data-acc="descargarCopia">Descargar copia</button>`
             : '<span class="subt">Disponible cuando empieces tu propia cartera.</span>'}</div>
         <div class="bloque"><b>Recuperar desde un archivo</b>
           <p class="ayuda">Sube una copia que descargaste antes. Sustituye la cartera actual (que se guarda antes, por si acaso).</p>
           ${zona(".json", false, "Arrastra aquí tu copia")}
+          <input type="password" id="copClaveSubir" placeholder="Frase de paso (si la copia está cifrada)" autocomplete="current-password">
           <div class="imErr" id="copFallo" hidden></div>
           <div class="imAcc"><span class="sp"></span><button class="btn prim" data-acc="subirCopia" id="copSubirBtn">Recuperar esta copia</button></div></div>
       </div></section>
@@ -960,6 +1088,26 @@
       <p class="ayuda">La web lleva la fecha de hoy: cuando actualices tus datos, vuelve a descargarla y súbela otra vez.</p></section>`;
   }
 
+  async function descargarCopia() {
+    const clave = $("#copClave") ? $("#copClave").value : "";
+    const r = await fetch("api/copia/descargar", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clave }) });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      alert((j.errores || ["No he podido generar la copia."]).join("\n"));
+      return;
+    }
+    const cd = r.headers.get("Content-Disposition") || "";
+    const nombre = (/filename="([^"]+)"/.exec(cd) || [])[1] || "copia_patrimonio.json";
+    const enlace = document.createElement("a");
+    enlace.href = URL.createObjectURL(await r.blob());
+    enlace.download = nombre;
+    document.body.appendChild(enlace);
+    enlace.click();
+    enlace.remove();
+    setTimeout(() => URL.revokeObjectURL(enlace.href), 4000);
+  }
+
   async function subirCopia() {
     const inp = $("#imArchivos"), fallo = $("#copFallo");
     fallo.hidden = true;
@@ -967,6 +1115,7 @@
     if (E.modo === "propio" && !confirm("Esto sustituye tu cartera actual por la de la copia. Tu cartera actual se guarda antes en «Copias automáticas». ¿Seguir?")) return;
     const fd = new FormData();
     fd.append("archivo", inp.files[0]);
+    fd.append("clave", $("#copClaveSubir") ? $("#copClaveSubir").value : "");
     const r = await fetch("api/copia/subir", { method: "POST", body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) { fallo.textContent = (j.errores || ["No he podido leer la copia."]).join("\n"); fallo.hidden = false; return; }
@@ -1014,6 +1163,8 @@
     todosValores: soloPropio(todosValores),
     cargarPlantilla: soloPropio(() => { const i = $("#plantArchivo"); if (i) i.click(); }),
     guardarUrl: soloPropio(guardarUrl),
+    probarFuente: soloPropio(probarFuente),
+    fuenteDet: alternaFuente,
     actPrecio: soloPropio(actPrecio),
     repartirColores: soloPropio(async () => {
       try {
@@ -1027,6 +1178,7 @@
     imRevisar: soloPropio(imRevisar),
     imCancelar() { IMP.informe = null; IMP.token = null; pinta(); },
     imConfirmar,
+    descargarCopia,
     subirCopia,
     recuperarCopia,
     exportarWeb() { location.href = "api/exportar-web?ocultar=" + ($("#webOcultar").checked ? "1" : "0"); },

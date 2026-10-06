@@ -294,3 +294,111 @@ def test_guarda_hace_copia_automatica_y_escritura_atomica(tmp_path):
     with open(ruta, encoding="utf-8") as f:
         assert json.load(f)["titular"] == "Cambiado"
     assert not (tmp_path / "cartera.json.tmp").exists()   # sin temporales colgados
+
+
+def test_los_ficheros_de_datos_quedan_solo_para_el_dueno(tmp_path):
+    """Permisos 600: nadie más que el dueño del sistema puede leer la cartera
+    (ni con cp, ni un backup, ni otro usuario del mismo ordenador)."""
+    import os
+    import stat
+    if os.name == "nt":
+        pytest.skip("en Windows no hay permisos unix")
+    ruta = str(tmp_path / "cartera.json")
+    cfg = {"productos": [], "movimientos": [], "valoraciones": []}
+    almacen.guarda(ruta, cfg)
+    assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+
+    cfg["titular"] = "Cambiado"
+    almacen.guarda(ruta, cfg)
+    assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+    copias = list((tmp_path / "copias").glob("auto_*.json"))
+    assert copias and all(stat.S_IMODE(os.stat(c).st_mode) == 0o600 for c in copias)
+
+
+# --------------------------------- escisiones (spin-off): entrega entrante
+
+def _cfg_escision():
+    return {
+        "productos": [
+            {"id": "ctva", "nombre": "Corteva", "corto": "CTVA", "tipo": "accion",
+             "fuente": "yahoo", "codigo": "CTVA"},
+            {"id": "vylr", "nombre": "Vylor", "corto": "VYLR", "tipo": "accion",
+             "fuente": "yahoo", "codigo": "VYLR"}],
+        "cuentas": [{"id": "broker", "nombre": "Bróker", "tipo": "broker", "moneda": "EUR"}],
+        "movimientos": [{"id": "m1", "fecha": "2025-06-01", "producto": "ctva",
+                         "tipo": "compra", "unidades": 20, "importe": 1000.0}],
+        "valoraciones": [],
+    }
+
+
+def test_entrega_entrante_no_toca_efectivo_y_le_quita_coste_al_original():
+    """La entrega entra con títulos y coste asignado, sin cuenta de efectivo; el
+    coste sale del activo original para que no aparezca una pérdida falsa."""
+    cfg = _cfg_escision()
+    m = almacen.guarda_movimiento(cfg, {
+        "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+        "unidades": 20, "importe": 400.0, "productoOrigen": "ctva"})
+    assert m["tipo"] == "entrega"
+    assert m["unidades"] == 20 and m["importe"] == 400.0
+    assert m["productoOrigen"] == "ctva"
+    assert "cuenta" not in m                                  # no mueve dinero
+    assert almacen.aportado_de(cfg, "ctva") == pytest.approx(600.0)
+    assert almacen.unidades_a(cfg, "vylr", "2025-09-30") == 20
+
+
+def test_entrega_gratis_admite_importe_cero():
+    cfg = _cfg_escision()
+    m = almacen.guarda_movimiento(cfg, {
+        "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+        "unidades": 20, "importe": 0, "productoOrigen": "ctva"})
+    assert m["importe"] == 0
+    assert almacen.aportado_de(cfg, "ctva") == pytest.approx(1000.0)   # intacto
+    # sin coste tampoco hace falta descontar nada del original
+    m2 = almacen.guarda_movimiento(cfg, {
+        "producto": "vylr", "fecha": "2025-09-02", "tipo": "entrega",
+        "unidades": 5, "importe": ""})
+    assert m2["importe"] == 0
+    assert "productoOrigen" not in m2
+
+
+def test_entrega_no_puede_consumir_mas_coste_del_que_hay():
+    cfg = _cfg_escision()
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_movimiento(cfg, {
+            "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+            "unidades": 20, "importe": 5000.0, "productoOrigen": "ctva"})
+    assert any("mayor que lo que tienes" in e for e in ex.value.errores)
+    assert len(cfg["movimientos"]) == 1                     # no se guarda nada
+
+
+def test_entrega_requiere_unidades_y_origen_valido():
+    cfg = _cfg_escision()
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_movimiento(cfg, {
+            "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega", "importe": 0})
+    assert any("cuántas unidades entran" in e for e in ex.value.errores)
+
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_movimiento(cfg, {
+            "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+            "unidades": 5, "importe": 0, "productoOrigen": "no_existe"})
+    assert any("no existe" in e for e in ex.value.errores)
+
+    with pytest.raises(almacen.ErrorValidacion) as ex:
+        almacen.guarda_movimiento(cfg, {
+            "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+            "unidades": 5, "importe": 0, "productoOrigen": "vylr"})
+    assert any("distinto" in e for e in ex.value.errores)
+
+
+def test_tras_una_entrega_se_puede_vender_lo_recibido():
+    """Antes solo contaban compras y ventas: sin esto, vender los títulos de una
+    escisión daba error de «solo tenías 0 unidades»."""
+    cfg = _cfg_escision()
+    almacen.guarda_movimiento(cfg, {
+        "producto": "vylr", "fecha": "2025-09-01", "tipo": "entrega",
+        "unidades": 20, "importe": 400.0, "productoOrigen": "ctva"})
+    m = almacen.guarda_movimiento(cfg, {
+        "producto": "vylr", "fecha": "2025-10-01", "tipo": "venta",
+        "unidades": 20, "importe": 500.0})
+    assert m["tipo"] == "venta"

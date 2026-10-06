@@ -371,3 +371,99 @@ def test_construir_es_idempotente(tmp_path):
     assert a["total"]["patrimonio"] == b["total"]["patrimonio"]
     assert a["total"]["tir"] == b["total"]["tir"]
     assert copy.deepcopy(a["fechas"]) == b["fechas"]
+
+
+# ------------------------------- escisiones (spin-off): entrega entrante
+
+def test_entrega_entrante_suma_titulos_sin_tocar_dinero():
+    """Una escisión (VYLR recibida por mantener CTVA) entra con sus títulos y su
+    coste asignado, pero sin que salga ni un euro del bolsillo."""
+    r = motor.aplicar_movimientos({"corto": "VYLR"}, [
+        {"fecha": "2025-09-01", "tipo": "entrega", "unidades": 20, "importe": 400.0}])
+    assert r["eventos"] == [("2025-09-01", 20.0, 400.0)]
+    assert r["flujos"] == []                 # no es una compra: la TIR no la ve
+    assert r["realizado"] == 0.0
+
+
+def test_reclasifica_solo_mueve_coste_de_un_activo_a_otro():
+    r = motor.aplicar_movimientos({"corto": "CTVA"}, [
+        {"fecha": "2025-09-01", "tipo": "reclasifica", "unidades": 0, "importe": -400.0}])
+    assert r["eventos"] == [("2025-09-01", 0.0, -400.0)]   # ni unidades ni flujos
+    assert r["flujos"] == []
+
+
+def _cfg_escision():
+    return {
+        "titular": "Prueba",
+        "cuentas": [],
+        "productos": [
+            {"id": "ctva", "nombre": "Corteva", "corto": "CTVA", "tipo": "otro",
+             "fuente": "manual", "clase": "Renta variable", "slot": 1},
+            {"id": "vylr", "nombre": "Vylor", "corto": "VYLR", "tipo": "otro",
+             "fuente": "manual", "clase": "Renta variable", "slot": 2},
+        ],
+        "movimientos": [
+            {"id": "m1", "fecha": "2025-01-01", "producto": "ctva", "tipo": "compra",
+             "unidades": 20, "importe": 1000.0},
+            {"id": "m2", "fecha": "2025-06-01", "producto": "vylr", "tipo": "entrega",
+             "unidades": 20, "importe": 400.0, "productoOrigen": "ctva"},
+        ],
+        "valoraciones": [
+            {"id": "v1", "producto": "ctva", "fecha": "2025-06-01", "valor": 600.0},
+            {"id": "v2", "producto": "vylr", "fecha": "2025-06-01", "valor": 400.0},
+        ],
+    }
+
+
+def test_escision_no_inventa_ninguna_perdida(tmp_path):
+    """CTVA cae de golpe en el mercado y VYLR nace con su parte: el coste se
+    REPARTA, no se crea. El aportado total, el patrimonio y la plusvalía no se
+    mueven, así que no aparece la falsa pérdida de la escisión."""
+    datos = motor.construir(_cfg_escision(), str(tmp_path), descargar=False)
+    ctva = next(p for p in datos["productos"] if p["id"] == "ctva")
+    vylr = next(p for p in datos["productos"] if p["id"] == "vylr")
+    t = datos["total"]
+    assert ctva["aportado"] == pytest.approx(600.0)     # cedió 400 de coste
+    assert vylr["aportado"] == pytest.approx(400.0)     # y las recibió
+    assert t["aportado"] == pytest.approx(1000.0)       # dinero real intacto
+    assert t["patrimonio"] == pytest.approx(1000.0)     # 600 + 400
+    assert t["plusvalia"] == pytest.approx(0.0)         # ni pérdida ni ganancia
+    # Los dos quedan relacionados, para verlos juntos en la ficha
+    assert ctva.get("relacionados") == ["vylr"]
+    assert vylr.get("relacionados") == ["ctva"]
+
+
+def test_entrega_gratis_no_toca_el_coste_del_original(tmp_path):
+    cfg = _cfg_escision()
+    cfg["movimientos"][1]["importe"] = 0.0
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    ctva = next(p for p in datos["productos"] if p["id"] == "ctva")
+    vylr = next(p for p in datos["productos"] if p["id"] == "vylr")
+    assert ctva["aportado"] == pytest.approx(1000.0)
+    assert vylr["aportado"] is None                       # sin coste registrado
+    assert datos["total"]["aportado"] == pytest.approx(1000.0)
+    assert datos["total"]["patrimonio"] == pytest.approx(1000.0)
+
+
+def test_comparacion_cuadra_con_el_patrimonio(tmp_path):
+    """El gadget «¿y si lo hubieras metido en un indexado?» tiene que valer lo
+    mismo que la pestaña Patrimonio (antes solo contaba los productos con
+    compras y se quedaba muy por debajo)."""
+    cfg = _cfg_escision()
+    cfg["cuentas"] = [{"id": "c1", "nombre": "Caja", "moneda": "EUR"}]
+    cfg["productos"].append({"id": "cta", "nombre": "Caja", "corto": "Caja",
+                             "tipo": "efectivo", "fuente": "manual", "cuenta": "c1", "slot": 3})
+    cfg["movimientos"].append({"id": "m3", "fecha": "2025-02-01", "tipo": "deposito",
+                               "importe": 500.0, "cuenta": "c1"})
+    cfg["valoraciones"].append({"id": "v3", "producto": "cta", "fecha": "2025-06-01",
+                                "valor": 500.0})
+    (tmp_path / "cache").mkdir()
+    for sim in ("IWDA.AS", "SXR8.DE", "XEON.DE", "EUNA.DE"):
+        (tmp_path / "cache" / f"{sim}.json").write_text(
+            json.dumps({"2025-01-01": 100.0, "2025-06-01": 110.0}), encoding="utf-8")
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    c = datos["comparacion"]
+    assert c is not None
+    assert c["tuValor"] == pytest.approx(datos["total"]["patrimonio"])
+    ap = [x for x in c["aportado"] if x is not None]
+    assert ap[-1] == pytest.approx(datos["total"]["aportado"])

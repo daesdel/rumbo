@@ -572,6 +572,13 @@ body.video .tarjeta{padding:22px 24px}
 .bloque > b{font-size:14.5px}
 .bloque .zona{background:var(--sup);padding:18px 12px}
 .bloque .imAcc{margin-top:12px}
+.bloque input[type=password]{font:inherit;font-size:14px;color:var(--tinta);background:var(--sup);
+  border:1px solid var(--borde);border-radius:11px;height:42px;padding:0 13px;width:100%;box-sizing:border-box;
+  margin:10px 0 0;transition:border-color .12s,box-shadow .12s,background .12s}
+.bloque input[type=password]:hover{border-color:color-mix(in srgb,var(--tinta3) 55%,transparent)}
+.bloque input[type=password]:focus{outline:0;background:var(--sup);border-color:var(--s1);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--s1) 22%,transparent)}
+.bloque input[type=password]::placeholder{color:var(--tinta3);opacity:.8}
 #editor .tarjeta > .interruptor{margin-top:4px}
 @media(max-width:760px){.dosCol{grid-template-columns:1fr}}
 @media(max-width:720px){

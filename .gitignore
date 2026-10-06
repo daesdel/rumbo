@@ -16,3 +16,6 @@ cache/
 .DS_Store
 .freebuff
 HANDOFF.md
+
+# Copia de seguridad de los datos locales de antes de sincronizar con el servidor
+mis_datos_local*/

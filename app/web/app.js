@@ -104,22 +104,21 @@
   }
   const fxHoy = () => fxEn(D.fechas.length - 1);
   const convAhora = v => (v == null || !enUSD()) ? v : red2(v * fxHoy());
+  /** Ver la cartera en otra divisa es SIEMPRE una traducción al cambio de hoy:
+      cada cifra en euros se multiplica por el cambio actual, ni más ni menos.
+      Así «en euros» y «en dólares» dan el mismo signo, el mismo porcentaje y la
+      misma rentabilidad. Si cada día se convirtiera con su cambio de ese día, el
+      movimiento del EUR/USD del periodo se colaría en la cifra y un +170 € de hoy
+      podía salir como −24 $: la ganancia no cambia de signo por mirarla en dólares. */
   function convSerie(arr) {
     if (!arr || !enUSD()) return arr;
-    return arr.map((v, i) => v == null ? null : red2(v * fxEn(i)));
+    const k = fxHoy();
+    return arr.map(v => v == null ? null : red2(v * k));
   }
-  /** Aportado acumulado: cada aporte se convierte con el cambio del día en
-      que se hizo, no con el de hoy (así un depósito en dólares sigue siendo
-      los dólares que metiste realmente). */
   function convApSerie(arr) {
     if (!arr || !enUSD()) return arr;
-    let acum = 0, prev = null;
-    return arr.map((v, i) => {
-      if (v == null) return null;
-      acum += (v - (prev == null ? 0 : prev)) * fxEn(i);
-      prev = v;
-      return red2(acum);
-    });
+    const k = fxHoy();
+    return arr.map(v => v == null ? null : red2(v * k));
   }
   /** Copia del producto con sus cifras en la moneda de visualización (cacheada). */
   function baseConv(p) {
@@ -139,9 +138,9 @@
       const ap = c.serieAportado.reduce((a, v) => (v == null ? a : v), null);
       if (ap != null) c.aportado = ap;
     }
-    if (p.flujos) c.flujos = p.flujos.map(([f, v]) => [f, v * fxEn(idxFecha(f))]);
+    if (p.flujos) c.flujos = p.flujos.map(([f, v]) => [f, red2(v * (enUSD() ? fxHoy() : 1))]);
     if (p.aportaciones) c.aportaciones = p.aportaciones.map(a => Object.assign({}, a, {
-      importe: a.importe != null ? red2(a.importe * fxEn(idxFecha(a.fecha))) : null,
+      importe: a.importe != null ? convAhora(a.importe) : null,
       valor: a.valor != null ? convAhora(a.valor) : null,
     }));
     if (p.tramos) {
@@ -153,13 +152,195 @@
     return c;
   }
 
+  /* ----------------------------------------------------------------
+     Secciones que el motor calcula con TODA la cartera (rentabilidad anual,
+     comparador de riesgo, «¿y si lo hubieras metido en un indexado?» y
+     comisiones). Aquí se vuelven a montar con los filtros puestos, para que
+     al elegir propietario, divisa u ocultar componentes cambien también ellas.
+     Sin filtros se usan los datos tal cual los mandó el motor.
+     ---------------------------------------------------------------- */
+  /** Los datos en crudo (sin convertir a la divisa de vista) ya filtrados. */
+  function crudos(lista) {
+    const out = [];
+    lista.forEach(p => {
+      if (!pasaMoneda(p)) return;
+      const f = factorDe(p);
+      if (f <= 1e-9) return;
+      if (estado.ocultos.has(p.id)) return;
+      out.push(f === 1 ? p : escala(p, f));
+    });
+    return out;
+  }
+  const r4 = v => (v == null ? null : Math.round(v * 10000) / 10000);
+  const r2 = v => (v == null ? null : Math.round(v * 100) / 100);
+
+  /** Índice encadenado (base 100), limpio del efecto de cuándo entra el dinero.
+      Espejo exacto de motor.indice_twr(). */
+  function indiceTWR(valores, flujos) {
+    const out = [];
+    let ant = null, nivel = 100;
+    for (let i = 0; i < valores.length; i++) {
+      const v = valores[i];
+      const f = i < flujos.length ? flujos[i] : 0;
+      if (v == null) { out.push(nivel); continue; }
+      if (ant == null || ant <= 1) { if (f > 0) nivel *= Math.max(v / f, 0.05); }
+      else nivel *= 1 + Math.max((v - f) / ant - 1, -0.95);
+      out.push(nivel);
+      ant = v;
+    }
+    return out;
+  }
+
+  /** Índice de TU cartera con los filtros puestos (sin filtros, el del motor). */
+  function idxCartera() {
+    if (!filtrando()) {
+      const real = (D.comparador || []).find(x => x.real);
+      return real && real.indice ? real.indice : null;
+    }
+    const n = D.fechas.length;
+    const lista = crudos(D.productos).filter(p => p.origen === "csv" || p.origen === "ordenes");
+    if (!lista.length) return null;
+    const serie = new Array(n).fill(0), fl = new Array(n).fill(0);
+    let hay = false;
+    lista.forEach(p => {
+      const s = p.serie || [];
+      for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] += s[i]; hay = true; }
+      (p.flujos || []).forEach(([f, v]) => { const i = idxFecha(f); if (i >= 0) fl[i] -= v; });
+    });
+    return hay ? indiceTWR(serie, fl) : null;
+  }
+
+  /** Rentabilidad por año natural de un índice (espejo de rentabilidadAnual.cartera). */
+  function rentAnualDe(idx, anos) {
+    if (!idx) return null;
+    const f = D.fechas;
+    return anos.map(ano => {
+      let ini = -1, fin = -1;
+      for (let i = 0; i < f.length; i++) if (f[i].slice(0, 4) === ano) { if (ini < 0) ini = i; fin = i; }
+      if (fin < 0) return null;
+      const b = ini > 0 ? idx[ini - 1] : 100;
+      return b ? r4(idx[fin] / b - 1) : null;
+    });
+  }
+
+  /** Riesgo y rentabilidad de un índice (espejo de motor.metricas_indice). */
+  function metricasIndice(idx, rf) {
+    if (!idx) return null;
+    const pts = [];
+    idx.forEach((v, i) => { if (v) pts.push(i); });
+    if (pts.length < 30) return null;
+    const i0 = pts[0], i1 = pts[pts.length - 1];
+    const dias = (Date.parse(D.fechas[i1]) - Date.parse(D.fechas[i0])) / 864e5;
+    const anos = dias / 365.25;
+    const rent = idx[i1] / idx[i0] - 1;
+    const cagr = anos > 0.15 ? Math.pow(idx[i1] / idx[i0], 1 / anos) - 1 : null;
+    const rs = [];
+    let ant = null;
+    for (let i = i0; i <= i1; i++) {
+      const wd = new Date(D.fechas[i] + "T00:00:00Z").getUTCDay();
+      if (wd === 0 || wd === 6 || !idx[i]) continue;
+      if (ant) rs.push(idx[i] / ant - 1);
+      ant = idx[i];
+    }
+    let vol = null;
+    if (rs.length > 20) {
+      const mu = rs.reduce((a, b) => a + b, 0) / rs.length;
+      vol = Math.sqrt(rs.reduce((a, b) => a + (b - mu) * (b - mu), 0) / (rs.length - 1)) * Math.sqrt(252);
+    }
+    let pico = 0, dd = 0;
+    for (let i = i0; i <= i1; i++) {
+      if (!idx[i]) continue;
+      pico = Math.max(pico, idx[i]);
+      dd = Math.min(dd, idx[i] / pico - 1);
+    }
+    return {
+      rentTotal: r4(rent), cagr: r4(cagr), vol: r4(vol),
+      sharpe: cagr != null && vol && rf != null ? r4((cagr - rf) / vol) : null,
+      maxDD: r4(dd), desde: D.fechas[i0], hasta: D.fechas[i1],
+    };
+  }
+
   /* ---------------------------------------------- ¿y si lo hubieras metido en un indexado? */
+  /** El comparador del motor, recalculado con los filtros puestos. */
+  function comparacionFiltrada() {
+    const base = D.comparacion;
+    if (!base || !base.referencias || !base.referencias.length) return base;
+    if (!filtrando()) return base;
+    const n = D.fechas.length;
+    // Igual que el motor: TODO lo visible (productos, cuentas y valores a mano)
+    // y las entradas y salidas de dinero (los cambios de la curva de aportado).
+    const conAp = crudos(D.productos).concat(crudos(D.otrosActivos || []));
+    const tuya = new Array(n).fill(0), ap = new Array(n).fill(0);
+    conAp.concat(crudos(D.pasivos || [])).forEach(p => {
+      const s = p.serie || [];
+      for (let i = 0; i < n; i++) if (s[i] != null) tuya[i] += s[i];
+    });
+    conAp.forEach(p => {
+      const a = p.serieAportado || [];
+      for (let i = 0; i < n; i++) if (a[i] != null) ap[i] += a[i];
+    });
+    const flujo = new Array(n).fill(0);
+    let hayFlujo = false;
+    for (let i = 1; i < n; i++) {
+      const dif = (ap[i] || 0) - (ap[i - 1] || 0);
+      if (Math.abs(dif) >= 0.005) { flujo[i] = dif; hayFlujo = true; }
+    }
+    if (!hayFlujo) return null;
+    let i0 = -1;
+    for (let i = 0; i < n; i++) {
+      tuya[i] = r2(tuya[i]);
+      if (i0 < 0 && (tuya[i] || flujo[i])) i0 = i;
+    }
+    if (i0 < 0) return null;
+    const aportado = [];
+    for (let i = 0; i < n; i++) aportado.push(i >= i0 ? r2(ap[i]) : null);
+    const flujosC = [];
+    for (let i = 0; i < n; i++) if (flujo[i]) flujosC.push({ t: Date.parse(D.fechas[i]), v: -flujo[i] });
+    const cierre = Date.parse(D.fechaExtracto);
+    const refs = [];
+    base.referencias.forEach(r => {
+      const piezas = r.piezas;
+      if (!piezas) { refs.push(r); return; }       // cálculo viejo guardado: nos quedamos con el suyo
+      const primeros = piezas.map(p => p.precios.find(v => v) || null);
+      if (primeros.some(v => v == null)) return;
+      const unidades = piezas.map(() => 0);
+      const serie = [];
+      let antes = false;
+      for (let i = 0; i < n; i++) {
+        const prHoy = piezas.map((p, k) => p.precios[i] || primeros[k]);
+        if (flujo[i]) {
+          antes = antes || piezas.some((p, k) => p.precios[i] == null);
+          for (let k = 0; k < piezas.length; k++) unidades[k] += flujo[i] * piezas[k].peso / prHoy[k];
+        }
+        const val = piezas.reduce((a, p, k) => a + unidades[k] * prHoy[k], 0);
+        serie.push(i >= i0 ? r2(val) : null);
+      }
+      const final = serie[n - 1];
+      refs.push({
+        id: r.id, nombre: r.nombre, detalle: r.detalle, serie, valor: final,
+        tir: xirr(flujosC.concat([{ t: cierre, v: final }])),
+        aviso: antes ? "Tienes aportaciones anteriores a los precios de esta referencia: " +
+                       "para esas se usa su primer precio conocido." : null,
+      });
+    });
+    if (!refs.length) return null;
+    return {
+      desde: D.fechas[i0], tuya: tuya.map((v, i) => i >= i0 ? v : null), aportado,
+      tuValor: tuya[n - 1],
+      tuTir: xirr(flujosC.concat([{ t: cierre, v: tuya[n - 1] }])),
+      referencias: refs,
+    };
+  }
+
   function pintaComparacion() {
-    const C = D.comparacion, sec = $("#seccionComparar");
+    const sec = $("#seccionComparar");
+    const C = comparacionFiltrada();
     if (!sec) return;
     if (!C || !C.referencias.length) {
       // Sin el campo, los datos los calculó una versión anterior de la app (que sigue abierta).
-      $("#compTitular").innerHTML = "comparacion" in D
+      $("#compTitular").innerHTML = !C && filtrando()
+        ? '<p class="vacio">Con estos filtros no queda ninguna compra anotada, así que no hay nada que comparar. Quita el filtro de arriba para ver la comparación completa.</p>'
+        : "comparacion" in D
         ? '<p class="vacio">Aparecerá cuando tengas compras anotadas.</p>'
         : '<p class="vacio">Cierra la ventana negra de la app y vuelve a abrirla para calcular esta sección.</p>';
       $("#compRef").innerHTML = "";
@@ -208,8 +389,10 @@
     });
     const ley = (c, t) => `<span class="leyItem"><i style="background:${G.css(c)}"></i>${esc(t)}</span>`;
     $("#compNota").innerHTML = `<span class="leyComp">${ley("--s1", "Tu cartera")}${ley("--s2", "Con el " + r.nombre)}${ley("--tinta3", "Tu dinero puesto")}</span>
-      ${esc(r.detalle)} Solo cuenta los productos con compras anotadas (no las cuentas ni lo
-      que valoras a mano sin movimientos), desde el ${G.fmtFecha(C.desde)}. Sin impuestos ni comisiones de compra.
+      ${esc(r.detalle)} Se compara con <b>todo tu patrimonio</b> (productos, cuentas de efectivo y lo que
+      valoras a mano), con las entradas y salidas de dinero que has anotado, desde el ${G.fmtFecha(C.desde)}:
+      las cifras cuadran con las de la pestaña Patrimonio. Sin impuestos ni comisiones de compra.
+      ${filtrando() ? "<br><b>Con los filtros de arriba aplicados</b>: solo entran los componentes que estás viendo." : ""}
       ${r.aviso ? "<br>" + esc(r.aviso) : ""}`;
   }
 
@@ -383,7 +566,7 @@
     const ids = new Set(lista.map(p => p.id));
     const porMes = am.meses.map((_, i) => Object.keys(am.porProducto)
       .reduce((a, id) => a + (ids.has(id) ? (am.porProducto[id][i] || 0) : 0), 0))
-      .map((v, i) => v * fxEn(ultimoIdxMes(am.meses[i])));   // en euros fxEn vale 1
+      .map(v => convAhora(v));                              // en la divisa de vista
     const mesesConAp = am.meses.filter((m, i) => porMes[i] > 0);
     const ult12 = porMes.slice(-12);
     const ritmo = ult12.length ? ult12.reduce((a, b) => a + b, 0) / ult12.length : 0;
@@ -538,6 +721,56 @@
     });
   }
 
+  /** Cambio del día de un producto (datos en crudo): el último valorado contra
+      el cierre anterior de la última sesión que cambió. La serie rellena los
+      días sin cotización repitiendo el último precio, así que el "cierre
+      anterior" es el último valor distinto del actual; si todo el tramo es
+      igual, no hay cambio. Con precio en vivo (bitcoin) se mide desde ese
+      mismo cierre. El importe sale en la divisa de vista y escalado al
+      propietario. */
+  function cambioDia(p, valorActual) {
+    const n = D.fechas.length;
+    const s = p.serie || [];
+    if (s.length < n || n < 2) return null;
+    const act = valorActual != null ? valorActual : s[n - 1];
+    if (act == null) return null;
+    let base = null;
+    for (let i = n - 2; i >= 0 && i >= n - 90; i--) {
+      if (s[i] == null) continue;
+      if (base == null) base = s[i];
+      if (s[i] !== act) { base = s[i]; break; }
+    }
+    const f = factorDe(p);
+    if (base == null || f <= 1e-9) return null;
+    return { eur: convAhora((act - base) * f), pct: base ? (act - base) / base : null };
+  }
+
+  /** Los componentes visibles con cambio de día que puede enseñar el ticker. */
+  function candidatosTicker() {
+    const out = [];
+    (D.productos || []).forEach(p => {
+      if (!pasaMoneda(p) || estado.ocultos.has(p.id)) return;
+      const c = cambioDia(p);
+      if (c && c.pct != null) out.push({ p, c });
+    });
+    return out;
+  }
+
+  /** El activo que toca del ticker rotatorio (uno cada X segundos). */
+  function pintaTicker() {
+    const cont = $("#tickerActivo");
+    if (!cont) return;
+    const lista = candidatosTicker();
+    if (!lista.length) { cont.innerHTML = ""; cont.hidden = true; return; }
+    cont.hidden = false;
+    const { p, c } = lista[((estado.tick || 0) % lista.length + lista.length) % lista.length];
+    const cl = c.eur >= 0 ? "pos" : "neg";
+    const nm = p.corto || p.nombre;
+    cont.innerHTML = `<span class="latido"></span>${esc(nm)}
+      <span class="${cl}">${G.fmtEurSigno(c.eur)} · ${G.fmtPctSigno(c.pct, 2)}</span>`;
+    cont.title = `Última sesión de ${nm}: ${G.fmtEurSigno(c.eur)} (${G.fmtPctSigno(c.pct, 2)})`;
+  }
+
   function pintaHero(mVis, mTodo) {
     const filtro = filtrando();
     const m = filtro ? mVis : mTodo;
@@ -555,19 +788,24 @@
     const pv = precioVivo();
     if (pv) {
       const p = D.productos.find(x => x.id === pv.id);
-      if (p && !estado.ocultos.has(p.id)) {
-        const delta = pv.titulos * pv.precio - p.valor;
-        partes.push(`<span class="pill vivo"><span class="latido"></span>Bitcoin en vivo
-          <span class="${delta >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(delta)}</span></span>`);
+      const c = p && !estado.ocultos.has(p.id) && pasaMoneda(p)
+        ? cambioDia(p, pv.titulos * pv.precio) : null;
+      if (c && c.pct != null) {
+        partes.push(`<span class="pill vivo" id="pillBtc"><span class="latido"></span>Bitcoin en vivo
+          <span class="${c.eur >= 0 ? "pos" : "neg"}">${G.fmtEurSigno(c.eur)} · ${G.fmtPctSigno(c.pct, 2)}</span></span>`);
       }
     } else if (D.vivo) {
       partes.push(`<span class="pill">Cotización a cierre del ${G.fmtFechaCorta(D.fechaExtracto)}</span>`);
     }
+    // El ticker que va recorriendo todos los activos, junto al bitcoin.
+    if (candidatosTicker().length)
+      partes.push('<span class="pill vivo" id="tickerActivo"></span>');
     if (filtro) {
       partes.push(`<button class="pill reset" id="btnReset" title="Volver a mostrarlo todo">
         de ${G.fmtEur(mTodo.valor)} totales · ver todo</button>`);
     }
     $("#heroSub").innerHTML = partes.join('<span style="color:var(--tinta3)">·</span>');
+    pintaTicker();
     const reset = $("#btnReset");
     if (reset) reset.onclick = () => { estado.ocultos.clear(); pintaPatrimonio(); };
 
@@ -736,7 +974,7 @@
       .filter(p => (am.porProducto[p.id] || []).some(v => v))
       .map(p => ({ nombre: p.corto || p.nombre, color: color(p),
                    valores: am.porProducto[p.id].slice(i0)
-                     .map((v, j) => v * (p._f || 1) * fxEn(ultimoIdxMes(meses[j]))) }));
+                     .map(v => convAhora(v * (p._f || 1))) }));
     G.barrasApiladas($("#grafBarras"), { categorias: meses, alto: 236, series });
     const suma = meses.reduce((a, _, i) => a + series.reduce((b, s) => b + (s.valores[i] || 0), 0), 0);
     $("#notaAport").textContent = meses.length
@@ -793,8 +1031,10 @@
   }
 
   function pintaTabla() {
+    if (estado.tablaFiltro !== "todos" &&
+        !visibles().some(p => p.id === estado.tablaFiltro)) estado.tablaFiltro = "todos";
     const filas = [];
-    TODOS().forEach(p => (p.aportaciones || []).forEach(a => {
+    visibles().forEach(p => (p.aportaciones || []).forEach(a => {
       if (!a.importe) return;
       filas.push({
         fecha: a.fecha, producto: p.corto || p.nombre, color: color(p), id: p.id,
@@ -857,7 +1097,7 @@
       { id: "entidad", et: "Entidad" }, { id: "tipo", et: "Tipo" }
     ], estado.dist, id => { estado.dist = id; pintaDistribucion(); });
     pintaSegm($("#segTabla"), [{ id: "todos", et: "Todos" }].concat(
-      TODOS().filter(p => (p.aportaciones || []).some(a => a.importe))
+      visibles().filter(p => (p.aportaciones || []).some(a => a.importe))
         .map(p => ({ id: p.id, et: p.corto || p.nombre }))),
       estado.tablaFiltro, id => { estado.tablaFiltro = id; pintaTabla(); });
   }
@@ -870,13 +1110,11 @@
     if (!rm.length) { $("#mesCifra").textContent = "—"; return; }
     if (estado.mes == null || estado.mes < 0 || estado.mes >= rm.length) estado.mes = rm.length - 1;
     const r = rm[estado.mes];
-    // Cifras del mes en la moneda de visualización: se convierten con el cambio
-    // del último día del mes (en euros fxEn devuelve 1 y no cambia nada).
-    const idxFinMes = ultimoIdxMes(r.mes);
-    const cv = v => (v == null ? null : red2(v * fxEn(idxFinMes)));
+    // Cifras del mes en la moneda de visualización (cambio de hoy, como todo).
+    const cv = v => convAhora(v);
 
     // Con los filtros globales encima, las cifras de este mes se vuelven a sumar.
-    const filas = TODOS().map(p => {
+    const filas = visibles().map(p => {
       const d = r.porProducto[p.id];
       if (!d) return null;
       const f = p._f || 1;
@@ -884,7 +1122,7 @@
       return { p, d: { inicio: esc(d.inicio), aportado: esc(d.aportado),
                        mercado: esc(d.mercado), fin: esc(d.fin), nuevo: esc(d.nuevo) } };
     }).filter(Boolean);
-    const T = filtrosActivos()
+    const T = filtrando()
       ? filas.reduce((a, x) => ({ inicio: a.inicio + x.d.inicio, aportado: a.aportado + x.d.aportado,
           mercado: a.mercado + x.d.mercado, fin: a.fin + x.d.fin, nuevo: a.nuevo + (x.d.nuevo || 0) }),
           { inicio: 0, aportado: 0, mercado: 0, fin: 0, nuevo: 0 })
@@ -893,7 +1131,7 @@
       : (T.inicio > 0 ? T.mercado / T.inicio : null);
     // Para pintar: en modo filtrado las filas ya están convertidas arriba;
     // sin filtros se convierte el resumen del mes tal cual.
-    const Tm = filtrosActivos() ? T
+    const Tm = filtrando() ? T
       : { inicio: cv(T.inicio), fin: cv(T.fin), aportado: cv(T.aportado),
           mercado: cv(T.mercado), nuevo: cv(T.nuevo) };
 
@@ -968,14 +1206,13 @@
 
     // histórico de esfuerzo vs mercado (con los filtros, mes a mes)
     const mesDe = x => {
-      if (!filtrosActivos()) return x;
+      if (!filtrando()) return x;
       let a = 0, m = 0;
-      TODOS().forEach(p => {
+      visibles().forEach(p => {
         const d = (x.porProducto || {})[p.id];
         if (d) { const f = p._f || 1; a += d.aportado * f; m += d.mercado * f; }
       });
-      const fx = fxEn(ultimoIdxMes(x.mes));   // en euros, 1
-      return { mes: x.mes, aportado: a * fx, mercado: m * fx };
+      return { mes: x.mes, aportado: convAhora(a), mercado: convAhora(m) };
     };
     const ult = rm.slice(-18).map(mesDe);
     G.barrasAgrupadas($("#grafMesHist"), {
@@ -1305,6 +1542,24 @@
       res.push(["En vivo ahora", `${G.fmtEur(valorDe(p))} · ${G.fmtPctSigno(plv.pct, 2)}`]);
     }
     res.push(["TIR", p.tir != null ? G.fmtPctSigno(p.tir) : "—"]);
+    // Una escisión deja dos activos que nacieron del mismo dinero: aquí se ven
+    // juntos, para que la caída mecánica del original no parezca una pérdida.
+    const rel = (p.relacionados || []).map(id => D.productos.find(x => x.id === id)).filter(Boolean);
+    if (rel.length) {
+      const crudo = D.productos.find(x => x.id === p.id);
+      const juntos = [crudo].concat(rel).filter(Boolean);
+      let val = 0, ap = 0, hayAp = false;
+      juntos.forEach(x => {
+        const f = factorDe(x);
+        if (f <= 1e-9) return;
+        val += convAhora((x.valor || 0) * f);
+        if (x.aportado != null) { ap += x.aportado * f; hayAp = true; }
+      });
+      const rent = hayAp && ap > 0 ? (val - convAhora(ap)) / convAhora(ap) : null;
+      const nmRel = rel.map(x => x.corto || x.nombre).join(" y ");
+      res.push([`Juntos con ${nmRel}`,
+        `${G.fmtEur(val)} · ${rent == null ? "sin coste registrado" : G.fmtPctSigno(rent, 1)}`]);
+    }
     // Tu posición y el comportamiento del producto van en filas separadas:
     // el "1 año" del bitcoin es del precio, no de tu dinero.
     let html = `<div class="ventanas"><span class="grupoEtq">Tu posición</span>` +
@@ -1433,14 +1688,23 @@
   function pintaRendimiento() {
     const ra = D.rentabilidadAnual;
     if (ra && ra.anos.length) {
-      G.barrasSimples($("#grafAnual"), {
-        categorias: ra.anos.map((a, i) => a + (ra.parcial[i] ? " *" : "")),
-        valores: ra.cartera, alto: 240,
-        color: G.css("--s1"),
-        colores: ra.cartera.map(v => v >= 0 ? G.css("--s1") : G.css("--s2")),
-      });
-      $("#notaAnual").textContent =
-        "Tu cartera completa, limpia del efecto de cuándo metiste el dinero. * año incompleto.";
+      // Con filtros encima, la rentabilidad de TU cartera se recalcula aquí.
+      const idx = idxCartera();
+      const cartera = filtrando() ? rentAnualDe(idx, ra.anos) : ra.cartera;
+      if (cartera) {
+        G.barrasSimples($("#grafAnual"), {
+          categorias: ra.anos.map((a, i) => a + (ra.parcial[i] ? " *" : "")),
+          valores: cartera, alto: 240,
+          color: G.css("--s1"),
+          colores: cartera.map(v => v >= 0 ? G.css("--s1") : G.css("--s2")),
+        });
+        $("#notaAnual").textContent = `${filtrando() ? "Tu cartera con los filtros puestos" : "Tu cartera completa"},
+          limpia del efecto de cuándo metiste el dinero. * año incompleto.`.replace(/\s+/g, " ");
+      } else {
+        $("#grafAnual").innerHTML = "";
+        $("#notaAnual").textContent =
+          "Con estos filtros no queda ningún producto con cotización, así que no hay rentabilidad anual que calcular.";
+      }
 
       // Solo TU rentabilidad, por producto y año.
       $("#notaTablaAnual").textContent =
@@ -1455,7 +1719,7 @@
         ? `<td class="subt">${verProducto ? "—" : "aún no lo tenías"}</td>`
         : `<td class="${v >= 0 ? "pos" : "neg"}">${G.fmtPctSigno(v, 1)}` +
           `${d ? `<span class="subt" style="font-weight:400"> · desde ${corto(d)}</span>` : ""}</td>`;
-      const prods = TODOS().filter(p => tabla[p.id]);
+      const prods = visibles().filter(p => tabla[p.id]);
       $("#tablaAnual").innerHTML =
         `<thead><tr><th>Producto</th>${ra.anos.map((a, i) =>
           `<th>${a}${ra.parcial[i] ? " *" : ""}</th>`).join("")}</tr></thead>
@@ -1463,13 +1727,31 @@
            <td><i class="pt" style="background:${color(p)}"></i>${esc(p.corto)}</td>
            ${tabla[p.id].map((v, i) => celda(v, (desde[p.id] || [])[i])).join("")}
          </tr>`).join("")}</tbody>` +
-        (verProducto ? "" : `<tfoot><tr><td>Tu cartera</td>${ra.cartera.map(v =>
+        (verProducto || !cartera ? "" : `<tfoot><tr><td>${filtrando() ? "Tu cartera (filtro)" : "Tu cartera"}</td>${cartera.map(v =>
           `<td class="${v == null ? "" : v >= 0 ? "pos" : "neg"}">${G.fmtPctSigno(v, 1)}</td>`).join("")}</tr></tfoot>`);
     }
 
     pintaComparacion();
 
-    const comp = D.comparador || [];
+    const comp = (() => {
+      const base = D.comparador || [];
+      const real = base.find(x => x.real);
+      if (!filtrando() || !real) return base;
+      // El tipo sin riesgo del motor (para el Sharpe): si no viene, se deduce
+      // de cualquier alternativa que lo tenga calculado.
+      let rf = real.rf != null ? real.rf : null;
+      if (rf == null) {
+        const conS = base.find(x => x.metricas && x.metricas.sharpe != null && x.metricas.vol);
+        if (conS) rf = conS.metricas.cagr - conS.metricas.sharpe * conS.metricas.vol;
+      }
+      const idx = idxCartera();
+      const met = metricasIndice(idx, rf);
+      if (!met) return base.filter(x => !x.real);   // sin datos: la cartera real se queda fuera
+      return base.map(x => x.real
+        ? Object.assign({}, x, { indice: idx.map(v => v == null ? null : Math.round(v * 100) / 100),
+                                  metricas: met })
+        : x);
+    })();
     const detalles = $("#compDetalles");
     // Los detalles solo se dibujan al abrirlos: un SVG dentro de algo cerrado no tiene ancho.
     if (detalles && !detalles.dataset.conectado) {
@@ -1511,23 +1793,39 @@
          así que valen para comparar entre ellas, no como pronóstico. Tu cartera real cambia de pesos
          con el tiempo y cada producto solo cuenta desde que lo compraste; las alternativas son
          hipotéticas y llevan sus pesos fijos desde el primer día.`;
+    } else if (!detalles || detalles.open) {
+      $("#grafComparador").innerHTML = "";
+      $("#tablaComparador").innerHTML = "";
+      $("#notaComparador").textContent = "";
+      $("#notaRiesgo").innerHTML = "";
     }
 
     const c = D.comisiones;
-    if (c && c.lineas.length) {
+    const lineas = !c ? [] : (filtrando()
+      ? crudos(D.productos).filter(p => p.ter && p.valor).map(p => ({
+          id: p.id, nombre: p.corto, ter: p.ter, valor: p.valor,
+          anual: Math.round(p.valor * p.ter * 100) / 100, color: p.slotColor }))
+      : c.lineas);
+    if (lineas.length) {
       // Importes en la moneda de visualización (convAhora es 1× en euros).
-      const anual = convAhora(c.anual), base = convAhora(c.base);
+      const anualNat = lineas.reduce((a, l) => a + l.anual, 0);
+      const baseNat = lineas.reduce((a, l) => a + l.valor, 0);
+      const anual = convAhora(anualNat), base = convAhora(baseNat);
+      const ponderado = baseNat ? anualNat / baseNat : 0;
       $("#notaComisiones").textContent =
-        `${G.fmtEur(anual)} al año · ${G.fmtPct(c.terPonderado, 3)} de lo invertido`;
+        `${G.fmtEur(anual)} al año · ${G.fmtPct(ponderado, 3)} de lo invertido${filtrando() ? " (vista filtrada)" : ""}`;
       $("#tablaComisiones").innerHTML =
         `<thead><tr><th>Producto</th><th>Comisión</th><th>Sobre</th><th>Al año</th><th>Al mes</th></tr></thead>
-         <tbody>${c.lineas.map(l => `<tr>
+         <tbody>${lineas.map(l => `<tr>
             <td><i class="pt" style="background:${temaOscuro() ? l.color[1] : l.color[0]}"></i>${esc(l.nombre)}</td>
             <td>${G.fmtPct(l.ter, 2)}</td><td>${G.fmtEur(convAhora(l.valor))}</td>
             <td>${G.fmtEur(convAhora(l.anual))}</td><td>${G.fmtEur(convAhora(l.anual / 12))}</td></tr>`).join("")}</tbody>
-         <tfoot><tr><td>Total</td><td>${G.fmtPct(c.terPonderado, 3)}</td>
+         <tfoot><tr><td>Total</td><td>${G.fmtPct(ponderado, 3)}</td>
            <td>${G.fmtEur(base)}</td><td>${G.fmtEur(anual)}</td>
-           <td>${G.fmtEur(convAhora(c.anual / 12))}</td></tr></tfoot>`;
+           <td>${G.fmtEur(convAhora(anualNat / 12))}</td></tr></tfoot>`;
+    } else if (c && c.lineas.length) {
+      $("#tablaComisiones").innerHTML = "";
+      $("#notaComisiones").textContent = "Con estos filtros no queda ningún producto con comisión.";
     }
   }
 
@@ -1751,5 +2049,21 @@
     pintarTab();
   }
   actualizaVivo();
-  setInterval(actualizaVivo, 60000);
+  setInterval(actualizaVivo, 60000);          // el precio en vivo, cada minuto
+  setInterval(() => {                          // el ticker pasa a otro activo cada 7 s
+    estado.tick = (estado.tick || 0) + 1;
+    pintaTicker();
+  }, 7000);
+  // Si los precios cambian detrás (una actualización en marcha, o desde otra
+  // pestaña), el panel se refresca solo. Nunca mientras escribes en «Mis datos».
+  let vigente = null;
+  setInterval(async () => {
+    if (location.protocol === "file:" || window.EDITOR_SUCIO || estado.tab === "datos") return;
+    try {
+      const j = await (await fetch("api/datos/vigente?_=" + Date.now())).json();
+      if (!j || !j.vigente) return;
+      if (vigente === null) { vigente = j.vigente; return; }
+      if (j.vigente !== vigente) { vigente = j.vigente; await window.__refrescaDatos(); }
+    } catch (e) { /* sin servidor detrás (archivo suelto): no pasa nada */ }
+  }, 120000);
 })();

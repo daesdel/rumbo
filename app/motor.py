@@ -123,6 +123,8 @@ def descargar_serie(simbolo, anos=None):
     previo = lee_cache(ruta)
     if SIN_RED or (SOLO_FALTAN and previo and _cache_es_diaria(previo)):
         return previo
+    if previo and cache_al_dia(ruta, previo):
+        return previo          # ya tiene el cierre de hoy: no hay nada nuevo que bajar
 
     def pide(params):
         url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -169,6 +171,8 @@ def descargar_morningstar(secid, universo="]2]0]FOESP$$ALL", anos=30):
     ruta = os.path.join(CACHE, "MS_" + re.sub(r"[^A-Za-z0-9]", "_", secid) + ".json")
     previo = lee_cache(ruta)
     if SIN_RED or (SOLO_FALTAN and previo):
+        return mover_fin_de_semana(previo)
+    if previo and cache_al_dia(ruta, previo):
         return mover_fin_de_semana(previo)
     hoy_ = dt.date.today()
     q = {"currencyId": "EUR", "idtype": "Morningstar", "frequency": "daily",
@@ -423,6 +427,8 @@ def descargar_coingecko(coin, dias=365):
     previo = lee_cache(ruta)
     if SIN_RED or (SOLO_FALTAN and previo):
         return previo
+    if previo and cache_al_dia(ruta, previo):
+        return previo          # ya está al día: no hay nada nuevo que bajar
     url = (f"https://api.coingecko.com/api/v3/coins/{urllib.parse.quote(coin)}/market_chart"
            f"?vs_currency=eur&days={dias}&interval=daily")
     try:
@@ -462,7 +468,8 @@ FUENTES = {"morningstar": "Morningstar", "yahoo": "Yahoo Finance",
            "coingecko": "CoinGecko", "manual": "Valor anotado a mano"}
 ORDEN_TIPO = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
               "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
-              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
+              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12,
+              "entrega": 13, "reclasifica": 14}
 
 # Carteras de referencia para «¿y si lo hubieras metido en un indexado?». Son ETF
 # reales que cotizan en euros; las piezas son (ticker de Yahoo, peso).
@@ -559,6 +566,16 @@ def aplicar_movimientos(p, movs):
             realizado -= imp
             comisiones += imp
             flujos.append((f, -imp))
+        elif t == "entrega":
+            # Escisión (spin-off): entran títulos nuevos sin que salga dinero de
+            # tu bolsillo. El coste asignado (importe total) sube su aportado; si
+            # la entrega es gratis, entra con 0 y no toca el aportado.
+            eventos.append((f, u, imp))
+        elif t == "reclasifica":
+            # Solo mueve coste de un producto a otro (la mitad de una escisión):
+            # ni unidades ni dinero en el bolsillo. Lo genera el motor a partir
+            # de la entrega, no lo anota el usuario.
+            eventos.append((f, 0.0, imp))
         # deposito, retirada, transferencia, traspaso... son movimientos de una
         # cuenta: su saldo se calcula aparte (motor.saldos_cuentas).
     return {"eventos": eventos, "flujos": flujos, "realizado": realizado,
@@ -566,23 +583,49 @@ def aplicar_movimientos(p, movs):
             "dividendos": dividendos, "intereses": intereses, "vendidas": vendidas}
 
 
-def descarga_series(productos_cfg, series=None, avance=0, total=None):
+def _pinta_pct():
+    """% de avance del PROGRESO: solo puede crecer, para que la barra no dé marcha atrás."""
+    t = max(int(PROGRESO.get("total") or 1), 1)
+    nuevo = min(99, int(100 * (PROGRESO.get("hecho") or 0) / t))
+    PROGRESO["pct"] = max(PROGRESO.get("pct") or 0, nuevo)
+
+
+def cache_al_dia(ruta, serie):
+    """True si esa serie no merece la pena volver a bajarse: ya tiene el cierre de
+    hoy (y el archivo se escribió hace poco) o es fin de semana y el último cierre
+    es el del viernes. Así una segunda actualización del día sale al instante."""
+    if not serie:
+        return False
+    try:
+        escrito = dt.datetime.fromtimestamp(os.path.getmtime(ruta))
+    except OSError:
+        return False
+    ult, hoy_ = max(serie), hoy()
+    if hoy_.weekday() >= 5:                     # sábado o domingo: no habrá sesión nueva
+        return ult >= (hoy_ - dt.timedelta(days=hoy_.weekday() - 4)).isoformat()
+    return ult >= hoy_.isoformat() and (dt.datetime.now() - escrito) <= dt.timedelta(hours=1)
+
+
+def descarga_series(productos_cfg, series=None, avance=0, total=None, contar=True):
     """Descarga (o lee de la cache) las series que necesitan esos productos.
     Devuelve el diccionario de series que usa precio_eur().
     avance/total: descargas ya hechas y descargas globales, para que el contador
-    de PROGRESO siga contando cuando se baja en tramos (desde el servidor)."""
+    de PROGRESO siga contando cuando se baja en tramos (desde el servidor).
+    contar=False: estas consultas no cuentan para el progreso (las que hace el
+    propio recálculo, para que la barra no se reinicie a cero cada vez)."""
     series = {} if series is None else series
-    if PROGRESO.get("activo"):
+    cuenta = bool(contar and PROGRESO.get("activo"))
+    if cuenta:
         PROGRESO["total"] = max(total or (avance + _prev_descargas(productos_cfg)), 1)
         PROGRESO["hecho"] = min(avance, PROGRESO["total"])
-        PROGRESO["pct"] = int(100 * PROGRESO["hecho"] / PROGRESO["total"])
+        _pinta_pct()
 
     def pide(clave, fn, *args):
         if clave and clave not in series:
-            if PROGRESO.get("activo"):
+            if cuenta:
                 PROGRESO["hecho"] += 1
                 PROGRESO["texto"] = clave
-                PROGRESO["pct"] = min(99, int(100 * PROGRESO["hecho"] / PROGRESO["total"]))
+                _pinta_pct()
             series[clave] = fn(*args)
 
     def pide_fx(moneda):
@@ -595,10 +638,10 @@ def descarga_series(productos_cfg, series=None, avance=0, total=None):
             pide(cod, descargar_serie, cod)
             pide_fx(p.get("moneda"))
         elif cod and f == "morningstar" and "MS:" + cod not in series:
-            if PROGRESO.get("activo"):
+            if cuenta:
                 PROGRESO["hecho"] += 1
                 PROGRESO["texto"] = cod
-                PROGRESO["pct"] = min(99, int(100 * PROGRESO["hecho"] / PROGRESO["total"]))
+                _pinta_pct()
             ms = descargar_morningstar(cod)
             # Los codigos 0P... de Morningstar existen tambien en Yahoo con ".F": sirven
             # para cubrir huecos y, donde coinciden, dan un decimal mas.
@@ -674,7 +717,7 @@ def construir(cfg, carpeta, descargar=True):
         p.setdefault("corto", (p.get("nombre") or p["id"])[:24])
 
     print("\n=== 1. Precios ===" if descargar is True else "\n=== 1. Precios guardados ===")
-    series = descarga_series(productos_cfg)
+    series = descarga_series(productos_cfg, contar=False)
     if cfg.get("movimientos"):
         sims = {s for r in REFERENCIAS.values() for s, _ in r["piezas"]} | {"EURUSD=X"}
         for sim in sims:
@@ -693,6 +736,23 @@ def construir(cfg, carpeta, descargar=True):
     for v in cfg.get("valoraciones", []):
         vals_por[v.get("producto")].append(v)
 
+    # Escisiones (spin-offs): el coste que la entrega asigna al producto nuevo se
+    # le resta al producto de origen, para que ni el aportado total ni la plusvalía
+    # se muevan (nada de pérdida falsa). Es un movimiento sintético: se genera aquí
+    # y no se guarda, así que si editas la entrega se rehace solo. Y los dos
+    # productos quedan relacionados, para poder ver su rentabilidad combinada.
+    relacionados = defaultdict(list)
+    for m in [x for x in cfg.get("movimientos", []) if x.get("tipo") == "entrega"]:
+        nuevo_id, origen_id = m.get("producto"), m.get("productoOrigen")
+        if not nuevo_id or not origen_id or nuevo_id == origen_id:
+            continue
+        relacionados[nuevo_id].append(origen_id)
+        relacionados[origen_id].append(nuevo_id)
+        c = float(m.get("importe") or 0)
+        if c > 0:
+            movs_por[origen_id].append({"tipo": "reclasifica", "fecha": m["fecha"],
+                                        "producto": origen_id, "importe": -c})
+
     # Fecha de valoracion: el ultimo precio o valor anotado que haya, sin pasar de hoy.
     ultimas = [v["fecha"] for v in cfg.get("valoraciones", [])]
     for p in productos_cfg:
@@ -706,6 +766,8 @@ def construir(cfg, carpeta, descargar=True):
     productos, otros, pasivos, primera = [], [], [], None
 
     for p in productos_cfg:
+        if relacionados.get(p["id"]):
+            p["relacionados"] = sorted(set(relacionados[p["id"]]))
         clave = p.get("tipo") if p.get("tipo") in TIPOS else "otro"
         p["tipoClave"] = clave
         p["tipo"] = p.get("tipoDetalle") or TIPOS[clave]
@@ -1204,7 +1266,6 @@ def construir(cfg, carpeta, descargar=True):
                   "compraventaPagada": pagadas}
 
     # --- flujos diarios ---
-    flujo_dia = [0.0] * n
     flujo_prod = {p["id"]: [0.0] * n for p in productos}
     flujo_inv = [0.0] * n
     ids_inv = {p["id"] for p in inv}
@@ -1215,7 +1276,6 @@ def construir(cfg, carpeta, descargar=True):
             i = idx_fecha.get(f)
             if i is None:
                 continue
-            flujo_dia[i] -= v
             flujo_prod[p["id"]][i] -= v
             if p["id"] in ids_inv:
                 flujo_inv[i] -= v
@@ -1326,7 +1386,10 @@ def construir(cfg, carpeta, descargar=True):
             continue
         comparador.append({"id": c["id"], "nombre": c["nombre"], "real": bool(c.get("real")),
                            "pesos": c.get("pesos"), "indice": [r2(v) for v in idx],
-                           "metricas": met})
+                           "metricas": met,
+                           # El tipo sin riesgo, para que el panel pueda recalcular
+                           # las métricas de «Tu cartera» con los filtros puestos.
+                           "rf": r4(rf)})
 
     # --- rentabilidad por ano natural ---
     # TU rentabilidad en cada producto y ano: la de tu posicion, encadenada desde el
@@ -1376,7 +1439,8 @@ def construir(cfg, carpeta, descargar=True):
             s = p["serie"]
             pv0 = (s[ant] or 0) if ant >= 0 else 0.0
             pv1 = s[i_fin] or 0.0
-            pap = sum(flujo_prod.get(p["id"], [0.0] * n)[i] for i in idxs)
+            fp = flujo_prod.get(p["id"])
+            pap = sum(fp[i] for i in idxs) if fp else 0.0
             if p.get("tipoClave") == "efectivo":
                 # Una cuenta no tiene «flujos» de producto: lo que metes o sacas
                 # de ella se ve en su curva de aportado (saldo − rendimiento).
@@ -1402,18 +1466,22 @@ def construir(cfg, carpeta, descargar=True):
         })
 
     # ---- ¿y si lo hubieras metido todo en un indexado? ----
-    # Las mismas entradas y salidas de dinero que tú, en los mismos días, pero en una
-    # cartera de referencia. Se compara con lo que valen hoy tus productos con movimientos.
-    con_flujos = [p for p in productos if p["_mv"]["flujos"]]
+    # Se compara con TODO tu patrimonio (productos, cuentas de efectivo y lo que
+    # valoras a mano) y con las entradas y salidas de dinero de tu bolsillo: son
+    # los cambios de la curva de aportado total, que solo se mueve cuando entra o
+    # sale dinero (los intereses, dividendos y subidas no la tocan). Así las cifras
+    # de esta sección cuadran con las de la pestaña Patrimonio.
+    flujo_total = [0.0] * n
+    for i in range(1, n):
+        dif = (serie_ap_total[i] or 0) - (serie_ap_total[i - 1] or 0)
+        if abs(dif) >= 0.005:
+            flujo_total[i] = dif
     comparacion = None
-    if con_flujos and any(flujo_dia):
-        tuya = [round(sum((p["serie"][i] or 0) for p in con_flujos), 2) for i in range(n)]
-        i0 = next(i for i in range(n) if flujo_dia[i] or tuya[i])
-        acum, aportado_c = 0.0, []
-        for i in range(n):
-            acum += flujo_dia[i]
-            aportado_c.append(round(acum, 2) if i >= i0 else None)
-        flujos_c = [(d(eje_iso[i]), -flujo_dia[i]) for i in range(n) if flujo_dia[i]]
+    if any(flujo_total):
+        tuya = [round(v, 2) for v in serie_total]
+        i0 = next(i for i in range(n) if flujo_total[i] or tuya[i])
+        aportado_c = [round(serie_ap_total[i], 2) if i >= i0 else None for i in range(n)]
+        flujos_c = [(d(eje_iso[i]), -flujo_total[i]) for i in range(n) if flujo_total[i]]
 
         refs = []
         for rid, ref in REFERENCIAS.items():
@@ -1424,15 +1492,19 @@ def construir(cfg, carpeta, descargar=True):
             unidades, serie_r, antes = [0.0] * len(precios), [], False
             for i in range(n):
                 pr_hoy = [precios[k][i] or primeros[k] for k in range(len(precios))]
-                if flujo_dia[i]:
+                if flujo_total[i]:
                     antes = antes or any(precios[k][i] is None for k in range(len(precios)))
                     for k, (_, peso) in enumerate(ref["piezas"]):
-                        unidades[k] += flujo_dia[i] * peso / pr_hoy[k]
+                        unidades[k] += flujo_total[i] * peso / pr_hoy[k]
                 valor_r = sum(unidades[k] * pr_hoy[k] for k in range(len(precios)))
                 serie_r.append(round(valor_r, 2) if i >= i0 else None)
             refs.append({"id": rid, "nombre": ref["nombre"], "detalle": ref["detalle"],
                          "serie": serie_r, "valor": serie_r[-1],
                          "tir": r4(xirr(flujos_c + [(fecha_extracto, serie_r[-1])])),
+                         # Los precios crudos de cada pieza: el panel los usa para
+                         # volver a montar esta comparación CON los filtros puestos.
+                         "piezas": [{"sim": sim, "peso": peso, "precios": precios[k]}
+                                    for k, (sim, peso) in enumerate(ref["piezas"])],
                          "aviso": ("Tienes aportaciones anteriores a los precios de esta referencia: "
                                    "para esas se usa su primer precio conocido.") if antes else None})
         if refs:
@@ -1564,6 +1636,10 @@ def construir(cfg, carpeta, descargar=True):
     hist.sort(key=lambda h: h["fecha"])
     with open(hist_ruta, "w", encoding="utf-8") as f:
         json.dump(hist, f, ensure_ascii=False, indent=1)
+    try:
+        os.chmod(hist_ruta, 0o600)   # el historial de tu patrimonio: solo para ti
+    except OSError:
+        pass
 
     print()
     print("=" * 62)

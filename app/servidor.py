@@ -15,9 +15,11 @@ import re
 import secrets
 import sys
 import threading
+import unicodedata
 import urllib.parse
 import urllib.request
 import webbrowser
+from html.parser import HTMLParser
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
@@ -25,7 +27,7 @@ from werkzeug.serving import make_server
 import math
 import copy
 
-from . import almacen, buscar, exportar, importar, motor, plantilla
+from . import almacen, buscar, exportar, importar, motor, plantilla, seguro
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB = os.path.join(RAIZ, "app", "web")
@@ -140,11 +142,24 @@ def escribe_json(ruta, datos):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(datos, f, ensure_ascii=False, indent=1)
     os.replace(tmp, ruta)
+    almacen.protege(ruta)
 
 
 def modo():
     """'propio' si ya hay una cartera en mis_datos; si no, 'demo'."""
     return "propio" if os.path.exists(os.path.join(DATOS, "cartera.json")) else "demo"
+
+
+def protege_datos():
+    """Permisos 600 en los ficheros de datos: solo el dueño del sistema puede
+    leerlos. Cubre también los ficheros antiguos, escritos antes de esta versión."""
+    for base in (DATOS, os.path.join(DATOS, "copias")):
+        if not os.path.isdir(base):
+            continue
+        for n in os.listdir(base):
+            ruta = os.path.join(base, n)
+            if os.path.isfile(ruta):
+                almacen.protege(ruta)
 
 
 def cartera():
@@ -246,10 +261,22 @@ def _actualiza_en_hilo():
         cfg = cartera()
         productos = [dict(p) for p in cfg.get("productos", [])]
         n = len(productos)
-        total = max(motor._prev_descargas(productos), 1)
-        motor.PROGRESO.update(activo=True, total=total, hecho=0, pct=0, texto="", errores=[])
+        # Unidades de progreso: consultas de precio + un recálculo por tramo +
+        # referencias + cierre. Así las tres fases pesan lo mismo que tardan y
+        # la barra avanza de forma lineal y siempre hacia delante.
+        consultas = max(motor._prev_descargas(productos), 1)
         tam = _tramos(n)
-        for i in range(0, max(n, 1), tam):
+        rangos = list(range(0, max(n, 1), tam)) or [0]
+        total = consultas + len(rangos) + 2
+        motor.PROGRESO.update(activo=True, total=total, hecho=0, pct=0, texto="", errores=[])
+        hecho = {"n": 0}
+
+        def avanza(u=1):
+            hecho["n"] = min(total, hecho["n"] + u)
+            motor.PROGRESO["hecho"] = hecho["n"]
+            motor._pinta_pct()
+
+        for i in rangos:
             lote = productos[i:i + tam]
             if not lote:
                 break
@@ -258,8 +285,8 @@ def _actualiza_en_hilo():
                 motor.AVISOS.clear()
                 _pon_cache_en_marcha()
                 # El contador sigue de donde iba: el panel se ve llenar de verde.
-                motor.descarga_series(lote, avance=motor._prev_descargas(productos[:i]),
-                                      total=total)
+                motor.descarga_series(lote, avance=hecho["n"], total=total)
+                hecho["n"] = motor.PROGRESO.get("hecho") or hecho["n"]
                 motor.PROGRESO["errores"] = sorted(set(motor.PROGRESO.get("errores", []) + list(motor.AVISOS)))
             # El panel se recalcula con lo que ya hay en la cache: sale vivo.
             with cerrojo:
@@ -268,6 +295,7 @@ def _actualiza_en_hilo():
                     parcial["modo"] = modo()
                     parcial["preciosActualizados"] = estado().get("preciosActualizados")
                     escribe_json(ruta_calculado(), parcial)
+                avanza()
         with cerrojo:
             motor.PROGRESO["activo"] = True
             motor.PROGRESO["texto"] = "Referencias y cambio de divisa"
@@ -281,6 +309,7 @@ def _actualiza_en_hilo():
                 motor.PROGRESO["texto"] = f"{len(hechos)} valores leídos de su web"
             motor.PROGRESO["errores"] = sorted(set(motor.PROGRESO.get("errores", [])
                                                     + list(motor.AVISOS) + list(fallidos)))
+            avanza()
         with cerrojo:
             datos = motor.construir(cartera(), DATOS, descargar=False)
             est = estado()
@@ -290,6 +319,7 @@ def _actualiza_en_hilo():
                 datos["modo"] = modo()
                 datos["preciosActualizados"] = est["preciosActualizados"]
                 escribe_json(ruta_calculado(), datos)
+            avanza()
         motor.PROGRESO.update(activo=False, pct=100, texto="Listo")
     except Exception as e:
         logging.exception("Fallo al actualizar")
@@ -303,6 +333,369 @@ def api_actualizar_progreso():
     return jsonify(progreso=_progreso(),
                    generado=datos.get("generado"),
                    avisos=(datos.get("avisos") or [])[:6])
+
+
+# ------------------------------------- fuentes de precio a medida (JSON / tabla / web)
+# Un producto sin cotización automática (oro físico, un depósito, un índice raro)
+# puede leer su precio de una URL de tres formas, como en Portfolio Performance:
+#   · «json»  → un JSON con rutas para la fecha y la cotización ($[*].datum)
+#   · «tabla» → una tabla HTML con columnas de fecha y de precio
+#   · «web»   → el precio marcado en una página (selector o el texto de al lado)
+# «auto» (por defecto) sigue siendo el de siempre: JSON-LD, meta o el primer número.
+
+def _http(url, timeout=15):
+    req = urllib.request.Request(url, headers=motor.UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def _ruta_json(nodo, ruta):
+    """Ruta JSONPath a medias ($[*].datum, $.data[0].price, a.b) → lista de valores."""
+    t = (ruta or "").strip()
+    if not t:
+        return []
+    if t.startswith("$"):
+        t = t[1:]
+    vals, i = [nodo], 0
+    while i < len(t) and vals:
+        if t[i] == ".":
+            j = i + 1
+            while j < len(t) and t[j] not in ".[":
+                j += 1
+            nombre, i = t[i + 1:j], j
+            if nombre == "*":
+                out = []
+                for v in vals:
+                    out.extend(v if isinstance(v, list) else v.values() if isinstance(v, dict) else [])
+                vals = out
+            else:
+                vals = [v[nombre] for v in vals if isinstance(v, dict) and nombre in v]
+        elif t[i] == "[":
+            j = t.find("]", i)
+            if j < 0:
+                break
+            clave = t[i + 1:j].strip().strip("'\"")
+            i = j + 1
+            out = []
+            for v in vals:
+                if clave == "*":
+                    if isinstance(v, list):
+                        out.extend(v)
+                elif clave.lstrip("-").isdigit() and isinstance(v, list):
+                    k = int(clave)
+                    if -len(v) <= k < len(v):
+                        out.append(v[k])
+                elif isinstance(v, dict) and clave in v:
+                    out.append(v[clave])
+            vals = out
+        else:
+            i += 1
+    return [v for v in vals if v is not None]
+
+
+def _fecha_fuente(txt, formato=""):
+    """Fecha de una fila: época en segundos/milisegundos, formato propio (strftime)
+    o cualquiera de los habituales (2025-01-31, 31.01.2025, 31/01/2025…)."""
+    if txt is None or txt == "":
+        return None
+    s = str(txt).strip()
+    if not s:
+        return None
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]                                   # ISO, con hora o sin ella
+    if s.isdigit() and len(s) >= 9:
+        n = float(s) / (1000.0 if len(s) > 10 else 1.0)
+        try:
+            return dt.datetime.fromtimestamp(n, dt.timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    if formato:
+        try:
+            return dt.datetime.strptime(s, formato).date().isoformat()
+        except ValueError:
+            pass
+    for f in ("%d.%m.%Y", "%d/%m/%Y", "%Y%m%d", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%y"):
+        try:
+            return dt.datetime.strptime(s, f).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _importe_fuente(v, factor=1.0):
+    """Número de la fuente («3.682,65» en castellano, 3682.65 en inglés) × factor."""
+    x = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else _numero_web(str(v))
+    if x is None or x <= 0:
+        return None
+    try:
+        return round(x * float(factor or 1), 6)
+    except (TypeError, ValueError):
+        return round(x, 6)
+
+
+class _LeeTablas(HTMLParser):
+    """Lee todas las tablas de una página: [[cabecera], [fila], …]."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tablas, self._t, self._f, self._c = [], None, None, None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._t = []
+        elif tag == "tr" and self._t is not None:
+            self._f = []
+        elif tag in ("td", "th") and self._f is not None:
+            self._c = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._c is not None:
+            self._f.append(" ".join("".join(self._c).split()))
+            self._c = None
+        elif tag == "tr" and self._f is not None:
+            if any(x for x in self._f):
+                self._t.append(self._f)
+            self._f = None
+        elif tag == "table" and self._t is not None:
+            if self._t:
+                self.tablas.append(self._t)
+            self._t = None
+
+    def handle_data(self, data):
+        if self._c is not None:
+            self._c.append(data)
+
+
+def _sin_tildes(t):
+    t = unicodedata.normalize("NFKD", str(t or ""))
+    return "".join(c for c in t if not unicodedata.combining(c)).strip().lower()
+
+
+def _columna(cab, texto):
+    """Índice de una columna por número (1-based) o por su cabecera."""
+    t = (texto or "").strip()
+    if not t:
+        return None
+    if t.isdigit():
+        k = int(t) - 1
+        return k if 0 <= k < len(cab) else None
+    q = _sin_tildes(t)
+    for i, c in enumerate(cab):
+        if _sin_tildes(c) == q:
+            return i
+    for i, c in enumerate(cab):
+        if q in _sin_tildes(c):
+            return i
+    return None
+
+
+def _tablas_de(html):
+    p = _LeeTablas()
+    p.feed(html)
+    return p.tablas
+
+
+def _filas_tabla(html, col_fecha, col_precio):
+    """(cabeceras, [(fecha, precio)]) de la tabla que tiene esas dos columnas."""
+    mejor = None
+    for t in _tablas_de(html):
+        if len(t) < 2:
+            continue
+        i_f, i_p = _columna(t[0], col_fecha), _columna(t[0], col_precio)
+        if i_f is None or i_p is None:
+            continue
+        if mejor is None or len(t) > len(mejor[0]):
+            mejor = (t, i_f, i_p)
+    if not mejor:
+        raise ValueError(f"no encuentro una tabla con las columnas «{col_fecha}» y «{col_precio}»")
+    t, i_f, i_p = mejor
+    filas = []
+    for fila in t[1:]:
+        if max(i_f, i_p) >= len(fila):
+            continue
+        filas.append((fila[i_f], fila[i_p]))
+    return t[0], filas
+
+
+class _Nodo:
+    __slots__ = ("tag", "attrs", "hijos", "texto")
+    def __init__(self, tag, attrs=None):
+        self.tag, self.attrs, self.hijos, self.texto = tag, attrs or {}, [], ""
+
+
+class _Dom(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.raiz = _Nodo("raiz")
+        self.pila = [self.raiz]
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("br", "img", "meta", "link", "input", "hr", "source"):
+            return
+        n = _Nodo(tag, {k: (v or "") for k, v in attrs})
+        self.pila[-1].hijos.append(n)
+        self.pila.append(n)
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.pila) - 1, 0, -1):
+            if self.pila[i].tag == tag:
+                del self.pila[i:]
+                return
+
+    def handle_data(self, data):
+        if data and data.strip():
+            self.pila[-1].texto += " " + data
+
+
+def _texto_de(n):
+    return " ".join((n.texto + " " + " ".join(_texto_de(h) for h in n.hijos)).split())
+
+
+def _coincide(n, parte):
+    """Selector a medias: etiqueta, #id, .clase, [attr=valor] y sus combinaciones."""
+    m = re.match(r"^[a-zA-Z][\w-]*", parte)
+    i = 0
+    if m:
+        if n.tag != m.group(0).lower():
+            return False
+        i = m.end()
+    for x in re.finditer(r"#([\w-]+)|\.([\w-]+)|\[([\w-]+)(?:=[\"']?([^\"'\]]+)[\"']?)?\]", parte[i:]):
+        if x.group(1) and n.attrs.get("id") != x.group(1):
+            return False
+        if x.group(2) and x.group(2) not in n.attrs.get("class", "").split():
+            return False
+        if x.group(3):
+            v = n.attrs.get(x.group(3))
+            if v is None or (x.group(4) and v != x.group(4)):
+                return False
+    return True
+
+
+def _desc(n):
+    for h in n.hijos:
+        yield h
+        yield from _desc(h)
+
+
+def _busca_selector(raiz, selector):
+    partes = [x for x in re.split(r"\s+", selector.strip()) if x]
+    if not partes:
+        return []
+    actuales = list(_desc(raiz))
+    for parte in partes:
+        sig, vistos = [], set()
+        for n in actuales:
+            for h in _desc(n):
+                if id(h) not in vistos and _coincide(h, parte):
+                    vistos.add(id(h))
+                    sig.append(h)
+        actuales = sig
+        if not actuales:
+            break
+    return actuales
+
+
+def _es_selector(txt):
+    """Un selector puro no lleva espacios ni tildes («span#precio»): lo que
+    sobra es un texto de la página que aparece justo antes del precio."""
+    return (" " not in txt and not re.search(r"[áéíóúñÁÉÍÓÚÑ¿¡]", txt)
+            and bool(re.match(r"^[#.[a-zA-Z]", txt)))
+
+
+def _precio_web(html, marcador):
+    """Precio de una página: por selector o buscando el texto marcado y el
+    primer número que hay después."""
+    sel = (marcador or "").strip()
+    if not sel:
+        raise ValueError("indica dónde está el precio: un selector (span#precio) o el texto de al lado")
+    if _es_selector(sel):
+        dom = _Dom()
+        dom.feed(html)
+        nodos = _busca_selector(dom.raiz, sel)
+        if not nodos:
+            raise ValueError(f"no encuentro «{sel}» en la página")
+        for n in nodos:
+            t = _texto_de(n)
+            m = re.search(r"\d[\d.,\s\u00a0]*", t)
+            if m:
+                x = _numero_web(m.group(0))
+                if x is not None and x > 0:
+                    return x
+        raise ValueError(f"dentro de «{sel}» no hay ningún precio")
+    i = html.lower().find(sel.lower())
+    if i < 0:
+        raise ValueError(f"no encuentro el texto «{sel}» en la página")
+    # sólo el texto visible a partir de ahí: los números de las etiquetas
+    # (</h1>, <span class="c2">…) no son precios
+    resto = re.sub(r"<[^>]*>", " ", html[i + len(sel):i + len(sel) + 1500])
+    m = re.search(r"\d[\d.,\s\u00a0]*", resto)
+    if not m:
+        raise ValueError(f"después de «{sel}» no hay ningún número")
+    x = _numero_web(m.group(0))
+    if not x or x <= 0:
+        raise ValueError(f"después de «{sel}» no hay ningún precio")
+    return x
+
+
+def _factor_de(p):
+    try:
+        return float(str(p.get("urlFactor") or "1").replace(",", ".")) or 1.0
+    except ValueError:
+        return 1.0
+
+
+def lee_fuente(p, html=None):
+    """Lee las filas (fecha, precio) de la fuente configurada en el producto.
+    Con historico (json o tabla) devuelve todas; con precio suelto, la de hoy."""
+    url = (p.get("urlFuente") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("la URL tiene que empezar por http:// o https://")
+    modo = (p.get("urlModo") or "auto").strip() or "auto"
+    hoy = dt.date.today().isoformat()
+    if modo == "auto":
+        v = _valor_de_url(url)
+        if not v or v <= 0:
+            raise ValueError("no he encontrado ningún precio en la página")
+        return [(hoy, round(v, 4))]
+    texto = html if html is not None else _http(url)
+    factor = _factor_de(p)
+    if modo == "json":
+        datos = json.loads(texto)
+        precios = _ruta_json(datos, p.get("urlRutaPrecio"))
+        if not precios:
+            raise ValueError("la ruta de la cotización no devuelve nada: revísala")
+        fechas = _ruta_json(datos, p.get("urlRutaFecha"))
+        if not fechas:
+            x = _importe_fuente(precios[-1], factor)
+            if not x:
+                raise ValueError("la ruta de la cotización no devuelve ningún precio")
+            return [(hoy, x)]
+        filas = []
+        for i, val in enumerate(precios):
+            f = _fecha_fuente(fechas[i] if i < len(fechas) else None, p.get("urlFormatoFecha"))
+            x = _importe_fuente(val, factor)
+            if f and x:
+                filas.append((f, x))
+        if not filas:
+            raise ValueError("la ruta de la fecha y la de la cotización no casan entre sí")
+        return filas
+    if modo == "tabla":
+        _, brutas = _filas_tabla(texto, p.get("urlColFecha") or "fecha",
+                                 p.get("urlColPrecio") or "precio")
+        filas = []
+        for f_txt, v_txt in brutas:
+            f = _fecha_fuente(f_txt, p.get("urlFormatoFecha"))
+            x = _importe_fuente(v_txt, factor)
+            if f and x:
+                filas.append((f, x))
+        if not filas:
+            raise ValueError("la tabla no tiene filas con fecha y precio legibles")
+        return filas
+    # modo «web»
+    x = _precio_web(texto, p.get("urlSelector"))
+    x = _importe_fuente(x, factor)
+    if not x:
+        raise ValueError("no he podido interpretar el precio de la página")
+    return [(hoy, x)]
 
 
 def _valor_de_url(url):
@@ -322,56 +715,162 @@ def _valor_de_url(url):
 
 
 def _numero_web(t):
-    t = t.strip().replace(" ", "")
+    # primero se limpia lo que la página pega al número («3.692,40.» o «USD»):
+    # sólo quedan dígitos, puntos y comas, y se quita lo que sobra al final
+    t = re.sub(r"[^\d.,]", "", str(t).replace("\u00a0", " ")).strip(" .,")
+    if not t:
+        return None
     if "," in t and "." in t:
-        return motor.num_es(t) if t.rfind(",") > t.rfind(".") else float(t.replace(",", ""))
+        try:
+            return motor.num_es(t) if t.rfind(",") > t.rfind(".") else float(t.replace(",", ""))
+        except ValueError:
+            return None
     if "," in t:
-        return float(t.replace(".", "").replace(",", "."))
+        try:
+            return float(t.replace(".", "").replace(",", "."))
+        except ValueError:
+            return None
     try:
         return float(t)
     except ValueError:
         return None
 
 
+def _aplica_filas(cfg, pid, filas):
+    """Escribe las filas leídas como valores del producto. Solo entran las fechas
+    iguales o posteriores a la última anotada: la fuente aporta histórico nuevo sin
+    pisar lo que ya tenías anotado (y el día de hoy se sustituye, no se duplica)."""
+    hoy = dt.date.today().isoformat()
+    filas = sorted({(f, round(float(x), 2)) for f, x in filas if f and x and f <= hoy})
+    if not filas:
+        return 0
+    ultima = max((v["fecha"] for v in cfg.get("valoraciones", [])
+                  if v.get("producto") == pid), default=None)
+    nuevos = filas if ultima is None else [t for t in filas if t[0] >= ultima]
+    if ultima is None and len(nuevos) > 3000:
+        nuevos = nuevos[-3000:]          # por no hinchar cartera.json
+    for f, x in nuevos:
+        almacen.guarda_valoracion(cfg, {"producto": pid, "fecha": f, "valor": x})
+    return len(nuevos)
+
+
 def _actualiza_urls(cfg):
-    """Productos con una URL de fuente: intenta leer su precio de ahí. Nunca corta."""
+    """Productos con una URL de fuente: leen su precio (o su histórico) de ahí.
+    Nunca corta: lo que falla se anota y sigue con el resto."""
     hechos, fallidos = [], []
     for p in cfg.get("productos", []):
         url = (p.get("urlFuente") or "").strip()
         if not url.startswith(("http://", "https://")):
             continue
+        nm = p.get("corto") or p.get("nombre") or p["id"]
         try:
-            v = _valor_de_url(url)
-            if not v or v <= 0:
-                raise ValueError("no he encontrado ningún precio en la página")
-            almacen.guarda_valoracion(cfg, {"producto": p["id"],
-                                             "fecha": dt.date.today().isoformat(), "valor": round(v, 2)})
-            hechos.append(p.get("corto") or p["nombre"])
+            filas = sorted(lee_fuente(p))
+            _aplica_filas(cfg, p["id"], filas)
+            hechos.append(nm)
         except Exception as e:
-            fallidos.append(f"{p.get('corto') or p['nombre']}: {e}")
+            fallidos.append(f"{nm}: {e}")
     if hechos and modo() == "propio":
         almacen.guarda(os.path.join(DATOS, "cartera.json"), cfg)
     return hechos, fallidos
 
 
+CAMPOS_FUENTE = ("urlModo", "urlRutaFecha", "urlRutaPrecio", "urlFormatoFecha",
+                 "urlFactor", "urlColFecha", "urlColPrecio", "urlSelector")
+MODOS_FUENTE = {"": "Automático", "auto": "Automático", "json": "JSON con rutas",
+                "tabla": "Tabla en la web", "web": "Precio marcado en la web"}
+
+
+def _config_fuente(p, datos):
+    """Aplica al producto lo que mande el formulario de fuente (solo lo presente)."""
+    if "urlFuente" in datos:
+        url = str(datos.get("urlFuente") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            raise almacen.ErrorValidacion(["La URL tiene que empezar por http:// o https://."])
+        if url:
+            p["urlFuente"] = url[:300]
+        else:
+            p.pop("urlFuente", None)
+    for k in CAMPOS_FUENTE:
+        if k not in datos:
+            continue
+        v = str(datos.get(k) or "").strip()[:200]
+        if v:
+            p[k] = v
+        else:
+            p.pop(k, None)
+    if (p.get("urlFuente") or "").startswith("http"):
+        modo = (p.get("urlModo") or "auto").strip() or "auto"
+        if modo not in MODOS_FUENTE:
+            raise almacen.ErrorValidacion(["Ese modo de lectura no existe."])
+        faltan = {"json": ("urlRutaPrecio", "ruta de la cotización"),
+                  "tabla": ("urlColPrecio", "la columna del precio"),
+                  "web": ("urlSelector", "dónde está el precio")}.get(modo)
+        if faltan and not p.get(faltan[0]):
+            raise almacen.ErrorValidacion([f"Para leerlo como {MODOS_FUENTE[modo].lower()} hace falta {faltan[1]}."])
+        if modo == "tabla" and not p.get("urlColFecha") and not p.get("urlFormatoFecha"):
+            raise almacen.ErrorValidacion(["Indica también la columna de la fecha (o el formato de fecha)."])
+    return p
+
+
 @app.post("/api/productos/<pid>/url")
 def api_producto_url(pid):
-    """Guarda la URL de fuente de un producto que no cotiza solo (se leera al actualizar)."""
+    """Guarda la URL de fuente de un producto que no cotiza solo y cómo leerla
+    de ahí (automático, JSON con rutas, tabla web o precio marcado)."""
     datos = request.get_json(silent=True) or {}
 
     def fn(cfg):
         p = almacen.producto(cfg, pid)
         if not p:
             raise almacen.ErrorValidacion(["Ese producto ya no existe."])
-        url = (datos.get("urlFuente") or "").strip()
-        if url and not url.startswith(("http://", "https://")):
-            raise almacen.ErrorValidacion(["La URL tiene que empezar por http:// o https://."])
-        if url:
-            p["urlFuente"] = url[:200]
-        else:
-            p.pop("urlFuente", None)
-        return p
+        return _config_fuente(p, datos)
     return cambia(fn)
+
+
+@app.post("/api/productos/<pid>/fuente/probar")
+def api_fuente_probar(pid):
+    """Baja la fuente y enseña lo que encuentra, sin guardar nada: el «Mostrar
+    respuesta» de Portfolio Performance para poder ajustar rutas y columnas."""
+    if modo() == "demo":
+        return jsonify(ok=False, errores=[AVISO_DEMO]), 403
+    datos = request.get_json(silent=True) or {}
+    base = dict(almacen.producto(cartera(), pid) or {})
+    if not base:
+        return jsonify(ok=False, errores=["Ese producto ya no existe."]), 404
+    _config_fuente(base, datos)
+    if not (base.get("urlFuente") or "").startswith("http"):
+        return jsonify(ok=False, errores=["Pon primero la URL de la fuente."]), 400
+    try:
+        m = (base.get("urlModo") or "auto").strip() or "auto"
+        resp = {"ok": True, "modo": m}
+        if m == "tabla":
+            texto = _http(base["urlFuente"])
+            tablas = _tablas_de(texto)
+            if not tablas:
+                raise ValueError("esa página no tiene ninguna tabla")
+            resp["tablas"] = [{"cabeceras": t[0], "muestra": t[1:6]} for t in tablas[:4]]
+            if base.get("urlColPrecio"):
+                cab, brutas = _filas_tabla(texto, base.get("urlColFecha") or "",
+                                           base["urlColPrecio"])
+                filas = []
+                for f_txt, v_txt in brutas:
+                    f = _fecha_fuente(f_txt, base.get("urlFormatoFecha"))
+                    x = _importe_fuente(v_txt, _factor_de(base))
+                    if f and x:
+                        filas.append((f, x))
+                resp["cabeceras"], resp["filas"] = cab, [[f, v] for f, v in filas[:10]]
+                resp["total"] = len(filas)
+                if filas:
+                    filas = sorted(filas)
+                    resp["precio"], resp["fecha"] = filas[-1][1], filas[-1][0]
+        else:
+            filas = sorted(lee_fuente(base))
+            resp["filas"] = [[f, v] for f, v in filas[:10]]
+            resp["total"] = len(filas)
+            resp["precio"] = filas[-1][1]
+            resp["fecha"] = filas[-1][0]
+    except Exception as e:
+        return jsonify(ok=False, errores=[str(e)]), 400
+    return jsonify(resp)
 
 
 @app.post("/api/productos/<pid>/actualizar")
@@ -397,13 +896,13 @@ def api_producto_actualizar(pid):
             avisos = []
             nav = nav_fecha = None
             if p.get("fuente") == "manual":
-                # Sin cotización: se lee el precio de la URL de su fuente.
-                v = _valor_de_url(p["urlFuente"].strip())
-                if not v or v <= 0:
-                    raise ValueError("no he encontrado ningún precio en la página")
-                nav_fecha = dt.date.today().isoformat()
-                almacen.guarda_valoracion(cfg, {"producto": pid, "fecha": nav_fecha,
-                                                 "valor": round(v, 2)})
+                # Sin cotización: se lee el precio (y el histórico, si lo hay)
+                # de la URL de su fuente.
+                filas = sorted(lee_fuente(p))
+                if not filas:
+                    raise ValueError("la fuente no me ha devuelto ningún precio")
+                nav_fecha, v = filas[-1]
+                _aplica_filas(cfg, pid, filas)
                 almacen.guarda(os.path.join(DATOS, "cartera.json"), cfg)
                 nav = round(float(v), 4)
             else:
@@ -758,25 +1257,52 @@ def api_copias():
     return jsonify(copias=lista)
 
 
-@app.get("/api/copia/descargar")
-def api_copia_descargar():
+def _descarga_copia(clave):
     if modo() != "propio":
         return jsonify(ok=False, errores=["Todavía no tienes una cartera propia que guardar."]), 400
     with open(os.path.join(DATOS, "cartera.json"), "rb") as f:
         contenido = f.read()
     nombre = f"copia_patrimonio_{dt.date.today().isoformat()}.json"
+    if clave:
+        try:
+            contenido = seguro.cifra(contenido, clave)
+        except seguro.ErrorSeguro as e:
+            return jsonify(ok=False, errores=[str(e)]), 400
+        nombre = f"copia_patrimonio_{dt.date.today().isoformat()}.cifrada.json"
     return Response(contenido, mimetype="application/json",
                     headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
 
 
+@app.get("/api/copia/descargar")
+def api_copia_descargar():
+    return _descarga_copia("")
+
+
+@app.post("/api/copia/descargar")
+def api_copia_descargar_clave():
+    """Descarga cifrada: el contenido va con la frase de paso que se pida."""
+    clave = str((request.get_json(silent=True) or {}).get("clave") or "")
+    return _descarga_copia(clave)
+
+
 @app.post("/api/copia/subir")
 def api_copia_subir():
-    """Importa una copia descargada antes (por ejemplo, al cambiar de ordenador)."""
+    """Importa una copia descargada antes (por ejemplo, al cambiar de ordenador).
+    Si la copia viene cifrada, hace falta la frase de paso con la que se guardó."""
     f = request.files.get("archivo")
     if not f:
         return jsonify(ok=False, errores=["Elige el archivo de la copia (termina en .json)."]), 400
+    crudo = f.read()
+    if seguro.es_cifrada(crudo):
+        clave = (request.form.get("clave") or "").strip()
+        if not clave:
+            return jsonify(ok=False, errores=["Esa copia está cifrada: escribe su frase de paso."]), 400
+        try:
+            crudo = seguro.descifra(crudo, clave)
+        except seguro.ErrorSeguro as e:
+            return jsonify(ok=False, errores=[str(e)]), 400
     try:
-        cfg = valida_copia(json.loads(importar.decodifica(f.read())))
+        cfg = valida_copia(json.loads(importar.decodifica(crudo)))
     except ValueError:
         return jsonify(ok=False, errores=["Ese archivo no es una copia de seguridad de esta app."]), 400
     except almacen.ErrorValidacion as e:
@@ -798,9 +1324,10 @@ def api_copia_recuperar():
     if modo() == "propio":
         # Además de la copia automática, una con nombre propio que no se borra sola.
         sello = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(os.path.join(DATOS, "cartera.json"), "rb") as a, \
-                open(os.path.join(ruta_copias(), f"antes_de_recuperar_{sello}.json"), "wb") as b:
+        destino = os.path.join(ruta_copias(), f"antes_de_recuperar_{sello}.json")
+        with open(os.path.join(DATOS, "cartera.json"), "rb") as a, open(destino, "wb") as b:
             b.write(a.read())
+        almacen.protege(destino)
     restaura(cfg)
     return jsonify(ok=True)
 
@@ -871,6 +1398,15 @@ def api_ping():
     return jsonify(app="patrimonio")
 
 
+@app.get("/api/datos/vigente")
+def api_datos_vigente():
+    """Para que el panel sepa, sin bajarse el JSON entero, si los datos han cambiado."""
+    try:
+        return jsonify(vigente=os.path.getmtime(ruta_calculado()))
+    except OSError:
+        return jsonify(vigente=0)
+
+
 @app.get("/<path:archivo>")
 def estaticos(archivo):
     return send_from_directory(WEB, archivo)
@@ -893,6 +1429,9 @@ def main():
     except Exception:
         pass
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    # Datos con permisos de solo-dueño (los de antes de esta versión incluidos).
+    protege_datos()
 
     # Si la app ya está abierta (otra ventana), basta con enseñarla.
     if ya_abierta(PUERTO):
