@@ -417,6 +417,9 @@
         : '<p class="subt">No hay movimientos todavía.</p>'}</section>`;
   }
 
+  // Sufijo que se enseña junto al importe según la moneda elegida.
+  const SUFIJO_MON = { EUR: "€", USD: "$", GBP: "£", JPY: "¥", CHF: "CHF", CAD: "CA$",
+                       AUD: "A$", SEK: "kr", NOK: "kr", DKK: "kr", PLN: "zł", CZK: "Kč" };
   const AYUDA_IMPORTE = {
     compra: "Lo que salió de tu cuenta, con las comisiones incluidas.",
     venta: "Lo que te ingresaron, ya descontadas las comisiones.",
@@ -461,6 +464,15 @@
     const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
     const propPorDef = m.propietario || (cuentaDe(cuentaPorDef) || {}).propietario
       || (props[0] || {}).id || "";
+    // Moneda del importe: la original si el movimiento ya existe; si no, la de la
+    // cuenta por la que circula el dinero y, en su defecto, la del producto.
+    const monedas = ["EUR", "USD", "GBP", "CHF", "JPY", "SEK", "NOK", "DKK", "PLN", "CZK", "CAD", "AUD"];
+    [(cuentaDe(cuentaPorDef) || {}).moneda, (prod(m.producto) || {}).moneda, m.monedaOriginal]
+      .forEach(x => { const u = (x || "").toUpperCase(); if (u && !monedas.includes(u)) monedas.push(u); });
+    const monPorDef = m.monedaOriginal || (cuentaDe(cuentaPorDef) || {}).moneda
+      || (prod(m.producto) || {}).moneda || "EUR";
+    // Importe y comisión están guardados en euros: al editar se devuelven en su moneda.
+    const tcMov = m.monedaOriginal && m.monedaOriginal !== "EUR" && m.tipoCambio ? m.tipoCambio : 1;
     const pildoras = Object.entries(E.tiposMov).map(([k, v]) =>
       `<label><input type="radio" name="tipo" value="${esc(k)}"><span>${esc(k === "dividendo" ? "Dividendo" : v)}</span></label>`).join("");
     const f = abreModal(nuevo ? "Añadir movimiento" : "Editar movimiento", `
@@ -474,7 +486,8 @@
           `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select>`, "de quién es")}
         ${campo("Fecha", `<input type="date" name="fecha" max="${hoy()}">`)}
         ${campo("Unidades", '<input name="unidades" inputmode="decimal" placeholder="0">', "participaciones, acciones…", "siUnid")}
-        ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "en euros")}
+        ${campo("Moneda", `<select name="moneda">${monedas.map(k => `<option value="${k}">${k}</option>`).join("")}</select>`, "del importe")}
+        ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "en la moneda elegida")}
         ${campo("Coste salido de", `<select name="productoOrigen"><option value="">— Ninguno: es coste nuevo —</option>${cotizables.map(p =>
           `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`,
           "escisión: de qué activo se resta el coste", "ancho siEntrega")}
@@ -505,11 +518,28 @@
     }, nuevo ? "Guardar movimiento" : "Guardar cambios");
     rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
       contrapartida: m.contrapartida || "", productoOrigen: m.productoOrigen || "",
-      unidades: decimal(m.unidades || ""), importe: decimal(m.importe), comision: decimal(m.comision) });
+      moneda: monPorDef,
+      unidades: decimal(m.unidades || ""),
+      importe: decimal(tcMov !== 1 && m.importeOriginal != null ? m.importeOriginal : m.importe),
+      comision: decimal(m.comision != null && m.comision !== ""
+        ? (tcMov !== 1 ? Math.round((m.comision / tcMov) * 100) / 100 : m.comision) : m.comision) });
+    // La moneda sigue a la cuenta/producto salvo que el usuario la cambie (o salvo
+    // que estemos editando un movimiento que ya tiene la suya anotada).
+    let monToque = !nuevo;
+    f.elements.moneda.addEventListener("change", () => { monToque = true; });
     let vinMostrado = false;
     const ajusta = () => {
       const t = f.elements.tipo.value;
       const p = prod(f.elements.producto.value);
+      // Moneda del importe: la de la cuenta o del producto, mientras no se cambie a mano.
+      const selMon = f.elements.moneda;
+      if (selMon && !monToque) {
+        const mon = (cuentaDe(f.elements.cuenta.value) || {}).moneda
+          || (prod(f.elements.producto.value) || {}).moneda || "EUR";
+        if ([...selMon.options].some(o => o.value === mon)) selMon.value = mon;
+      }
+      const suf = SUFIJO_MON[(selMon || {}).value] || (selMon ? selMon.value : "€");
+      f.querySelectorAll(".conSufijo span").forEach(s => { s.textContent = suf; });
       const conUnid = t === "compra" || t === "venta" || t === "entrega";
       f.querySelector(".siUnid").hidden = !conUnid;
       f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta");
@@ -540,8 +570,8 @@
       const u = leeNum(f.elements.unidades.value), imp = leeNum(f.elements.importe.value);
       const com = leeNum(f.elements.comision.value) || 0;
       $("#mPrecio").textContent = t === "entrega" && u > 0
-        ? `${num(imp / u)} € / unidad asignado`
-        : conUnid && u > 0 && imp > 0 ? `${num((imp - com) / u)} € / unidad` : "";
+        ? `${num(imp / u)} ${suf} / unidad asignado`
+        : conUnid && u > 0 && imp > 0 ? `${num((imp - com) / u)} ${suf} / unidad` : "";
     };
     f.oninput = ajusta;
     f.onchange = ajusta;

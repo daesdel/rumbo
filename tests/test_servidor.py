@@ -488,3 +488,97 @@ def test_protege_datos_arregla_tambien_los_ficheros_viejos(monkeypatch, tmp_path
     s.protege_datos()
     for ruta in (tmp_path / "cartera.json", tmp_path / "copias" / "auto_1.json"):
         assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+
+
+# --------------------------------- movimientos en la moneda real del movimiento
+
+def _cartera_dolares():
+    return {
+        "titular": "Prueba",
+        "cuentas": [{"id": "rev", "nombre": "Revolut USD", "moneda": "USD"}],
+        "productos": [{"id": "f1", "nombre": "Tesla", "corto": "Tesla", "tipo": "accion",
+                       "fuente": "manual", "moneda": "USD", "cuenta": "rev"}],
+        "movimientos": [], "valoraciones": [],
+    }
+
+
+def _post_mov(cliente, **campos):
+    cuerpo = {"fecha": "2025-06-20", "tipo": "compra", "producto": "f1",
+              "cuenta": "rev", "unidades": 1, "importe": "100", "comision": "5",
+              "moneda": "USD"}
+    cuerpo.update(campos)
+    r = cliente.post("/api/movimientos", json=cuerpo)
+    return r, (r.get_json() if r.status_code == 200 else
+               (r.get_json(silent=True) or {}))
+
+
+def test_movimiento_en_dolares_se_anota_en_dolares_y_se_guarda_en_euros(cliente, monkeypatch):
+    """El formulario manda el importe en la moneda elegida (la real del movimiento):
+    el servidor lo pasa a euros con el cambio del DÍA y guarda también el original.
+    Editar sin cambiar la moneda lo mantiene; cambiarlo a euros lo limpia; volver a
+    dólares lo vuelve a anotar."""
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    monkeypatch.setattr(s.motor, "serie_cambio",
+                        lambda mon, carpeta: {"2025-06-20": 0.92} if mon == "USD" else {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    try:
+        s.escribe_json(ruta, _cartera_dolares())
+        r, j = _post_mov(cliente)
+        assert r.status_code == 200, r.get_data(as_text=True)
+        m = j["item"]
+        assert m["importe"] == pytest.approx(92.0)          # 100 $ × 0,92 €/$
+        assert m["importeOriginal"] == pytest.approx(100.0)
+        assert m["monedaOriginal"] == "USD"
+        assert m["tipoCambio"] == pytest.approx(0.92)
+        assert m["comision"] == pytest.approx(4.6)           # 5 $ → 4,60 €
+        assert len(s.lee_json(ruta)["movimientos"]) == 1
+
+        # Editar sin tocar la moneda: sigue siendo el movimiento de 100 $
+        r2, j2 = _post_mov(cliente, id=m["id"])
+        assert r2.status_code == 200, r2.get_data(as_text=True)
+        m2 = j2["item"]
+        assert m2["importeOriginal"] == pytest.approx(100.0)
+        assert m2["monedaOriginal"] == "USD"
+        assert len(s.lee_json(ruta)["movimientos"]) == 1
+
+        # Pasarlo a euros: queda en euros puro, sin importe original
+        r3, j3 = _post_mov(cliente, id=m["id"], moneda="EUR", importe="92", comision="4,6")
+        assert r3.status_code == 200, r3.get_data(as_text=True)
+        m3 = j3["item"]
+        assert m3["importe"] == pytest.approx(92.0)
+        assert "monedaOriginal" not in m3 and "tipoCambio" not in m3
+        assert len(s.lee_json(ruta)["movimientos"]) == 1
+
+        # Y si se vuelve a poner en dólares, se anota de nuevo con su cambio
+        r4, j4 = _post_mov(cliente, id=m["id"])
+        assert r4.status_code == 200, r4.get_data(as_text=True)
+        m4 = j4["item"]
+        assert m4["importeOriginal"] == pytest.approx(100.0)
+        assert m4["monedaOriginal"] == "USD"
+        assert m4["importe"] == pytest.approx(92.0)
+    finally:
+        _restaura_estados(ruta, cartera_antes, calc, calc_antes)
+
+
+def test_no_se_puede_anotar_en_dolares_sin_cambio_conocido(cliente, monkeypatch):
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda mon, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    try:
+        s.escribe_json(ruta, _cartera_dolares())
+        r, j = _post_mov(cliente)
+        assert r.status_code == 400, r.get_data(as_text=True)
+        assert "No encuentro el cambio de USD" in j["errores"][0]
+        assert not s.lee_json(ruta)["movimientos"]   # no se guarda nada a medias
+    finally:
+        _restaura_estados(ruta, cartera_antes, calc, calc_antes)

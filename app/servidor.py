@@ -301,7 +301,7 @@ def _actualiza_en_hilo():
             motor.PROGRESO["texto"] = "Referencias y cambio de divisa"
             motor.AVISOS.clear()
             _pon_cache_en_marcha()
-            for sim in sorted({s for r in motor.REFERENCIAS.values() for s, _ in r["piezas"]} | {"EURUSD=X"}):
+            for sim in sorted({s for r in motor.REFERENCIAS.values() for s, _ in r["piezas"]} | {"USDEUR=X"}):
                 motor.descargar_serie(sim)
             # Productos sin cotización con una URL de fuente: se lee el precio de ahí.
             hechos, fallidos = _actualiza_urls(cartera())
@@ -943,6 +943,57 @@ AVISO_DEMO = ("Estás viendo la cartera de ejemplo. Pulsa «Empezar con mis dato
               "para crear la tuya y poder guardar cambios.")
 
 
+def _tc_eur(moneda, fecha):
+    """Cuántos euros cuesta 1 `moneda` en `fecha` (cambio diario, con su cache).
+    None si no hay cambio conocido ni de fallback."""
+    serie = motor.serie_cambio(moneda, DATOS)
+    t = motor.valor_en(serie, fecha, 6) if serie else None
+    if t:
+        return float(t)
+    if moneda == "USD":
+        # Para los dólares casi siempre está guardado el par EURUSD: sirve de respaldo.
+        inv = motor.valor_en(motor.descargar_serie("EURUSD=X"), fecha, 6)
+        if inv:
+            return 1.0 / float(inv)
+    return None
+
+
+def _importe_en_eur(datos):
+    """El formulario manda el importe (y la comisión) en la moneda elegida: aquí se
+    pasan a euros con el cambio del DÍA DEL MOVIMIENTO y se guarda también el importe
+    original en su moneda. Así lo anotado siempre es el dinero real de la operación y
+    las conversiones (para verlo en euros o en dólares) se aplican después."""
+    mon = str(datos.get("moneda") or "").strip().upper() or "EUR"
+    if mon == "EUR":
+        # En euros no hace falta nada: y si el movimiento traía otra moneda, se limpia.
+        datos["monedaOriginal"], datos["importeOriginal"], datos["tipoCambio"] = "", "", ""
+        return datos
+    try:
+        f = dt.date.fromisoformat(str(datos.get("fecha") or "")[:10])
+    except ValueError:
+        return datos                 # la fecha la validará almacen, con su mensaje
+    vacio = (None, "")
+    errores = []
+    imp = None if datos.get("importe") in vacio else almacen.numero(datos.get("importe"), "el importe", errores)
+    com = None if datos.get("comision") in vacio else almacen.numero(datos.get("comision"), "la comisión", errores,
+                                                                     obligatorio=False)
+    if errores or imp is None:
+        return datos                 # que sea almacen quien dé el error de validación
+    tc = _tc_eur(mon, f)
+    if not tc:
+        raise almacen.ErrorValidacion([
+            f"No encuentro el cambio de {mon} a euros del {almacen.fmt_fecha(f.isoformat())}: "
+            f"anota el importe en euros o vuelve a intentarlo con conexión."])
+    datos["importe"] = round(imp * tc, 2)
+    datos["importeOriginal"] = round(imp, 6)
+    datos["monedaOriginal"] = mon
+    datos["tipoCambio"] = round(tc, 8)
+    if com:
+        datos["comision"] = round(com * tc, 2)
+    return datos
+
+
+
 def cambia(fn):
     """Aplica un cambio a la cartera, la guarda (con copia automática) y recalcula."""
     if modo() == "demo":
@@ -966,6 +1017,8 @@ def api_guardar(coleccion):
     datos = request.get_json(silent=True) or {}
 
     def fn(cfg):
+        if coleccion == "movimientos":
+            return GUARDAR[coleccion](cfg, _importe_en_eur(datos))
         if coleccion != "productos":
             return GUARDAR[coleccion](cfg, datos)
         prod, cambio = almacen.guarda_producto(cfg, datos)

@@ -719,13 +719,19 @@ def construir(cfg, carpeta, descargar=True):
     print("\n=== 1. Precios ===" if descargar is True else "\n=== 1. Precios guardados ===")
     series = descarga_series(productos_cfg, contar=False)
     if cfg.get("movimientos"):
-        sims = {s for r in REFERENCIAS.values() for s, _ in r["piezas"]} | {"EURUSD=X"}
+        # UN solo par para los dólares: USDEUR=X (euros por dólar). Es el que usa todo
+        # el motor para pasar importes en dólares a euros, y el que el panel invierte
+        # para volver a dólares: con EURUSD=X aparte eran dos series de Yahoo distintas
+        # y la ida y la vuelta no cuadraban (céntimos de diferencia).
+        sims = {s for r in REFERENCIAS.values() for s, _ in r["piezas"]} | {"USDEUR=X"}
         for sim in sims:
             if sim not in series:
                 series[sim] = descargar_serie(sim)
         # Y el cambio de las monedas de las cuentas/productos (una cuenta en dólares
         # tiene que entrar en el panel en euros, con el cambio de cada día).
-        for mon in {(p.get("moneda") or "EUR").upper() for p in productos_cfg} - {"EUR"}:
+        monedas = {(p.get("moneda") or "EUR").upper() for p in productos_cfg}
+        monedas |= {(c.get("moneda") or "EUR").upper() for c in cfg.get("cuentas", [])}
+        for mon in monedas - {"EUR"}:
             sim = simbolo_fx(mon)[0]
             if sim and sim not in series:
                 series[sim] = descargar_serie(sim)
@@ -1546,21 +1552,33 @@ def construir(cfg, carpeta, descargar=True):
                             "propietario": c.get("propietario") or defecto_prop,
                             "saldo": round(saldo, 2),
                             "saldoEur": round(eur, 2) if eur is not None else None})
-    eurus = valor_en(series.get("EURUSD=X") or {}, fecha_extracto, 7)
-    fx_actual = {"EURUSD": round(1 / eurus, 6) if eurus else None,
-                 "USDEUR": round(eurus, 6) if eurus else None}
+    # Cambio de hoy y serie diaria salen del MISMO par que usa el motor para pasar
+    # dólares a euros: USDEUR=X (euros por dólar). El panel vuelve a dólares con el
+    # recíproco exacto de esa misma serie (dólares por euro), así que ida y vuelta
+    # cuadran al céntimo. El recíproco se guarda con más decimales que antes a
+    # propósito: redondearlo a 4 dejaba otra vez céntimos de error en importes altos.
+    usdeur_dia = series.get("USDEUR=X") or {}
+    if not usdeur_dia:
+        # Carteras antiguas con la cache en EURUSD: se invierte, para seguir teniendo
+        # UN solo origen. Solo pasa si el par nuevo no está disponible en ningún sitio.
+        viejo = series.get("EURUSD=X")
+        if viejo is None:
+            viejo = descargar_serie("EURUSD=X")
+        usdeur_dia = {k: 1.0 / v for k, v in (viejo or {}).items() if v}
+    usdeur_hoy = valor_en(usdeur_dia, fecha_extracto, 7)
+    fx_actual = {"USDEUR": round(usdeur_hoy, 6) if usdeur_hoy else None,
+                 "EURUSD": round(1 / usdeur_hoy, 6) if usdeur_hoy else None}
 
     # Serie diaria del cambio (dólares por euro) alineada con el eje de fechas.
     # El panel la usa para poder mostrar todas las cifras en dólares con el
     # cambio de CADA DÍA: es lo que hace que una inversión comprada en dólares
     # rinda distinto vista en euros (con el riesgo de cambio) que en dólares.
-    eurusd_dia = series.get("EURUSD=X") or {}
     fx_serie, cambio_ultimo = [], None
     for f in eje_iso:
-        t = valor_en(eurusd_dia, d(f), 7) if eurusd_dia else None
+        t = valor_en(usdeur_dia, d(f), 7) if usdeur_dia else None
         if t:
             cambio_ultimo = t
-        fx_serie.append(r4(cambio_ultimo) if cambio_ultimo else None)
+        fx_serie.append(round(1 / cambio_ultimo, 8) if cambio_ultimo else None)
     cambio_primero = next((x for x in fx_serie if x), None)
     if cambio_primero:
         for i, x in enumerate(fx_serie):

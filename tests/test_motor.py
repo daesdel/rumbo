@@ -342,6 +342,93 @@ def test_cuenta_en_dolares_entra_convertida_a_euros(tmp_path):
     assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
 
 
+def test_rentabilidad_en_euros_de_compra_en_dolares(tmp_path):
+    """Una compra en dólares se mide en euros con los euros que COSTÓ ese día (el
+    cambio de la fecha de la compra) y con los euros que VALE hoy (el cambio de
+    hoy): aunque la acción suba en dólares, si el euro se ha reforzado la rentabilidad
+    en euros recoge la pérdida por cambio."""
+    (tmp_path / "cache").mkdir()
+    # Precio en dólares: 100 al comprar, 110 al cerrar (+10 % en dólares)
+    (tmp_path / "cache" / "AAA.json").write_text(json.dumps(
+        {"2025-01-02": 100.0, "2025-05-30": 110.0}), encoding="utf-8")
+    # Cambio a euros: 0,92 €/$ al comprar, 0,80 €/$ hoy (el euro se ha reforzado)
+    (tmp_path / "cache" / "USDEUR_X.json").write_text(json.dumps(
+        {"2025-01-02": 0.92, "2025-05-30": 0.80}), encoding="utf-8")
+    # Y a propósito un par EURUSD de «otra casa» (serie aparte): el panel NO debe
+    # usarlo. La vista en dólares sale del recíproco del mismo USDEUR de arriba.
+    (tmp_path / "cache" / "EURUSD_X.json").write_text(json.dumps(
+        {"2025-01-02": 1.02, "2025-05-30": 1.30}), encoding="utf-8")
+
+    cfg = {
+        "titular": "Prueba",
+        "productos": [{"id": "acc", "nombre": "Acción", "corto": "Acción", "tipo": "accion",
+                       "fuente": "yahoo", "codigo": "AAA", "moneda": "USD"},
+                      {"id": "cta", "nombre": "Cuenta", "corto": "Cuenta",
+                       "tipo": "efectivo", "fuente": "manual"}],
+        # Comprada por 1.000 $ = 920 € al cambio del día (así se anota en la app)
+        "movimientos": [{"id": "m1", "fecha": "2025-01-02", "producto": "acc",
+                         "tipo": "compra", "unidades": 10, "importe": 920.0,
+                         "importeOriginal": 1000.0, "monedaOriginal": "USD",
+                         "tipoCambio": 0.92}],
+        "valoraciones": [{"id": "v1", "producto": "cta", "fecha": "2025-06-01", "valor": 500.0}],
+    }
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    p = next(x for x in datos["productos"] if x["id"] == "acc")
+    # Valor hoy: 110 $ × 0,80 = 880 € (el cambio de HOY)
+    assert p["valor"] == pytest.approx(880.0)
+    # Aportado: los 920 € que costó, al cambio del DÍA DE LA COMPRA
+    assert p["aportado"] == pytest.approx(920.0)
+    assert p["plusvalia"] == pytest.approx(-40.0)
+    # En dólares ganó (1.000 → 1.100); en euros pierde por el cambio
+    assert p["rentabilidad"] == pytest.approx(round(-40.0 / 920.0, 4))
+    # Y la vista en dólares devuelve las cifras nativas con el recíproco EXACTO del
+    # par del motor: 920 € × (1/0,92) = 1.000 $ y 880 € × (1/0,80) = 1.100 $.
+    fx = datos["fxSerie"]
+    assert fx[0] == pytest.approx(1 / 0.92, abs=1e-6)
+    assert fx[-1] == pytest.approx(1 / 0.80, abs=1e-6)
+    assert p["aportado"] * fx[0] == pytest.approx(1000.0, abs=0.01)
+    assert p["valor"] * fx[-1] == pytest.approx(1100.0, abs=0.01)
+    # El cambio de hoy también es uno solo (el mismo USDEUR), no el EURUSD de la cache.
+    assert datos["fx"]["USDEUR"] == pytest.approx(0.80, abs=1e-6)
+    assert datos["fx"]["EURUSD"] == pytest.approx(1 / 0.80, abs=1e-6)
+    # Y la identidad del panel sigue viva
+    t = datos["total"]
+    assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
+
+
+def test_vista_en_dolares_ida_y_vuelta_al_centimo(tmp_path):
+    """Un importe grande tiene que volver a sus dólares nativos sin perder céntimos:
+    la serie del panel es el recíproco del MISMO par que usa el motor para pasar a
+    euros (antes salía de otro par de Yahoo y quedaban céntimos de diferencia)."""
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "cache" / "AAA.json").write_text(json.dumps(
+        {"2025-01-02": 200.0, "2025-05-30": 210.0}), encoding="utf-8")
+    (tmp_path / "cache" / "USDEUR_X.json").write_text(json.dumps(
+        {"2025-01-02": 0.90, "2025-05-30": 0.95}), encoding="utf-8")
+    # Otro par, y muy distinto: si el panel lo usara, el error se vería a simple vista.
+    (tmp_path / "cache" / "EURUSD_X.json").write_text(json.dumps(
+        {"2025-01-02": 1.09, "2025-05-30": 1.07}), encoding="utf-8")
+
+    cfg = {
+        "titular": "Prueba",
+        "productos": [{"id": "acc", "nombre": "Acción", "corto": "Acción", "tipo": "accion",
+                       "fuente": "yahoo", "codigo": "AAA", "moneda": "USD"}],
+        # 500 títulos a 180 € cada uno = 90.000 €, que eran 100.000 $ al cambio del día.
+        "movimientos": [{"id": "m1", "fecha": "2025-01-02", "producto": "acc",
+                         "tipo": "compra", "unidades": 500, "importe": 90000.0}],
+        "valoraciones": [],
+    }
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    p = next(x for x in datos["productos"] if x["id"] == "acc")
+    # 500 títulos × 210 $ × 0,95 = 99.750 €, que son los 105.000 $ nativos.
+    assert p["valor"] == pytest.approx(500 * 210 * 0.95, abs=0.01)
+    assert p["valor"] * datos["fxSerie"][-1] == pytest.approx(105000.0, abs=0.01)
+    assert p["aportado"] * datos["fxSerie"][0] == pytest.approx(100000.0, abs=0.01)
+    # Y el cambio de hoy es el mismo par, no el EURUSD de la cache.
+    assert datos["fx"]["USDEUR"] == pytest.approx(0.95, abs=1e-6)
+    assert datos["fxSerie"][0] == pytest.approx(1 / 0.90, abs=1e-6)
+
+
 def test_construir_cartera_vacia_devuelve_none(tmp_path):
     cfg = {"titular": "Vacía", "productos": [], "movimientos": [], "valoraciones": []}
     assert motor.construir(cfg, str(tmp_path), descargar=False) is None
@@ -350,18 +437,35 @@ def test_construir_cartera_vacia_devuelve_none(tmp_path):
 def test_fxserie_alineada_con_el_eje_de_fechas(tmp_path):
     """fxSerie lleva el cambio diario en dólares por euro, alineado con el eje:
     es lo que permite mostrar el panel en dólares con el cambio de CADA día
-    (el cambio de hoy solo serviría para escalar, sin efecto real)."""
+    (el cambio de hoy solo serviría para escalar, sin efecto real). Y sale del par
+    del motor (USDEUR, euros por dólar) invertido, no de un par aparte."""
     (tmp_path / "cache").mkdir()
-    cambio = {"2024-12-31": 1.10, "2025-06-01": 1.15}
-    (tmp_path / "cache" / "EURUSD_X.json").write_text(json.dumps(cambio), encoding="utf-8")
+    # Euros por dólar, que es lo que guarda el par del motor.
+    cambio = {"2024-12-31": 0.90, "2025-06-01": 0.80}
+    (tmp_path / "cache" / "USDEUR_X.json").write_text(json.dumps(cambio), encoding="utf-8")
 
     cfg = _fondo_y_cuenta(saldo=100.0)
     datos = motor.construir(cfg, str(tmp_path), descargar=False)
     serie = datos["fxSerie"]
     assert len(serie) == len(datos["fechas"])          # alineada con el eje
     assert serie[0] is not None                        # días iniciales rellenados
-    assert serie[-1] == pytest.approx(1.15)            # último cambio conocido
+    assert serie[0] == pytest.approx(1 / 0.90, abs=1e-6)
+    assert serie[-1] == pytest.approx(1 / 0.80, abs=1e-6)   # último cambio conocido
     assert all(x is None or x > 0 for x in serie)
+
+
+def test_fxserie_tambien_sale_de_una_cache_con_el_par_antiguo(tmp_path):
+    """Carteras que ya tenían guardado el par EURUSD (el que se usaba antes): se
+    invierte para seguir teniendo UN solo origen, en vez de quedarse sin vista en
+    dólares hasta que se refresque la cache."""
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "cache" / "EURUSD_X.json").write_text(
+        json.dumps({"2024-12-31": 1.10, "2025-06-01": 1.25}), encoding="utf-8")
+
+    datos = motor.construir(_fondo_y_cuenta(saldo=100.0), str(tmp_path), descargar=False)
+    assert datos["fxSerie"][0] == pytest.approx(1.10)
+    assert datos["fxSerie"][-1] == pytest.approx(1.25)
+    assert datos["fx"]["USDEUR"] == pytest.approx(1 / 1.25, abs=1e-6)
 
 
 def test_construir_es_idempotente(tmp_path):

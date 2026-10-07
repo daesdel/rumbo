@@ -431,18 +431,20 @@ def guarda_movimiento(cfg, datos):
         previo = dict(existente)
         existente.clear()
         existente.update(id=datos["id"], **mov)
-        # Lo que el formulario no vuelve a mandar (importe original, moneda,
-        # contrapartida, origen…) se conserva: editar un movimiento no debe
-        # borrar los datos que vinieron de la importación.
+        # Lo que el formulario no vuelve a mandar (contrapartida, origen…) se
+        # conserva: editar un movimiento no debe borrar los datos que vinieron de
+        # la importación. Pero si manda la moneda (aunque sea vacía, para dejar el
+        # movimiento en euros), manda él: no se recupera lo anterior.
         for k in ("contrapartida", "importeOriginal", "monedaOriginal", "tipoCambio",
                   "impuestos", "origen", "fuente", "urlFuente", "propietario",
                   "productoOrigen"):
-            if k not in existente and previo.get(k) not in (None, ""):
+            if k not in existente and k not in datos and previo.get(k) not in (None, ""):
                 existente[k] = previo[k]
-        # Si cambia el importe en euros, se actualiza el de su moneda original
-        # para que la columna «importe original» siga siendo coherente.
+        # Si cambia el importe en euros y el formulario no ha vuelto a mandar la
+        # moneda, se actualiza el original para que la columna «importe original»
+        # siga siendo coherente. Si la manda, su conversión ya la ha hecho el servidor.
         tc = previo.get("tipoCambio")
-        if tc and mov.get("importe") is not None:
+        if tc and mov.get("importe") is not None and "monedaOriginal" not in datos:
             existente["importeOriginal"] = round(mov["importe"] / tc, 2)
         return existente
     mov = {"id": siguiente_id(lista, "m"), **mov}

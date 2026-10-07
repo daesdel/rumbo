@@ -72,9 +72,13 @@
 
   /* ----------------------------------------------------------------
      Moneda de visualización: todo se puede ver en euros (por defecto)
-     o en dólares. Las series se convierten con el cambio de CADA DÍA
-     (por eso una inversión comprada en dólares rinde distinto en una
-     moneda que en la otra) y las cifras puntuales con el cambio de hoy.
+     o en dólares. Cada cifra se convierte con el cambio del día al que
+     pertenece: lo de HOY con el cambio de hoy y lo que pasó en UN DÍA
+     (aportes, flujos) con el cambio de ese día. Así una compra en dólares
+     vista en euros muestra los euros que costó y los que vale hoy (con el
+     riesgo de cambio), y vista en dólares devuelve sus dólares exactos.
+     Al revés también: una compra en euros vista en dólares enseña lo que
+     ha ganado o perdido el cambio.
      ---------------------------------------------------------------- */
   const enUSD = () => estado.vis === "USD";
   const red2 = v => Math.round(v * 100) / 100;
@@ -92,55 +96,90 @@
     return i === undefined ? D.fechas.length - 1 : i;
   }
   /** Dólares por euro en el día i, con el cambio actual de respaldo.
-      (El motor guarda en fx.USDEUR lo que su nombre no dice: dólares por euro.) */
+      La serie del motor viene del par USDEUR (euros por dólar, el mismo que usa para
+      pasar dólares a euros): aquí se usa su recíproco exacto, así la ida y la vuelta
+      de cada importe cuadran al céntimo. fx.EURUSD es ese mismo cambio de hoy. */
   function fxEn(i) {
     if (!enUSD()) return 1;
     const s = D.fxSerie || [];
     let t = null;
     if (i >= 0) for (let k = Math.min(i, s.length - 1); k >= 0; k--) { if (s[k] != null) { t = s[k]; break; } }
     if (t == null) for (let k = 0; k < s.length; k++) { if (s[k] != null) { t = s[k]; break; } }
-    if (t == null) t = (D.fx && D.fx.USDEUR) || null;
+    if (t == null) t = (D.fx && D.fx.EURUSD) || null;
     return t || 1;
   }
   const fxHoy = () => fxEn(D.fechas.length - 1);
   const convAhora = v => (v == null || !enUSD()) ? v : red2(v * fxHoy());
-  /** Ver la cartera en otra divisa es SIEMPRE una traducción al cambio de hoy:
-      cada cifra en euros se multiplica por el cambio actual, ni más ni menos.
-      Así «en euros» y «en dólares» dan el mismo signo, el mismo porcentaje y la
-      misma rentabilidad. Si cada día se convirtiera con su cambio de ese día, el
-      movimiento del EUR/USD del periodo se colaría en la cifra y un +170 € de hoy
-      podía salir como −24 $: la ganancia no cambia de signo por mirarla en dólares. */
+  /** Dólares por euro del día en que ocurrió algo (aportes y flujos). */
+  function fxFecha(f) {
+    const i = idxFecha(f);
+    return fxEn(i >= 0 ? i : (f < D.fechas[0] ? 0 : D.fechas.length - 1));
+  }
+  /** Ver la cartera en otra divisa es una REEXPRESIÓN de toda la historia en esa
+      moneda: cada valor se convierte con el cambio de SU día y cada aporte con el
+      cambio del día en que se hizo. Así las cifras de las dos monedas cuadran: una
+      compra en dólares vale hoy los mismos dólares en la vista en dólares, y en la
+      vista en euros muestra los euros que costó y los que vale (riesgo de cambio). */
   function convSerie(arr) {
     if (!arr || !enUSD()) return arr;
-    const k = fxHoy();
-    return arr.map(v => v == null ? null : red2(v * k));
+    return arr.map((v, i) => v == null ? null : red2(v * fxEn(i)));
   }
+  /** El aportado es una suma de flujos: se convierte por INCREMENTOS (cada nuevo
+      aporte con el cambio de su día), no multiplicando el total entero, o el dinero
+      «metido» cambiaría de valor cada día sin que entre ni salga nada. */
   function convApSerie(arr) {
     if (!arr || !enUSD()) return arr;
-    const k = fxHoy();
-    return arr.map(v => v == null ? null : red2(v * k));
+    let ant = null, acc = null;
+    return arr.map((v, i) => {
+      if (v == null) return null;
+      acc = ant == null ? red2(v * fxEn(i)) : red2(acc + (v - ant) * fxEn(i));
+      ant = v;
+      return acc;
+    });
   }
-  /** Copia del producto con sus cifras en la moneda de visualización (cacheada). */
+  /** Factor para convertir un total de flujos (realizado, dividendos…): el cambio
+      medio de los flujos del producto ponderado por su importe. Así un producto en
+      dólares sigue enseñando sus dólares en la vista en dólares, y en euros pasa
+      por los euros que valían esos flujos cuando ocurrieron. */
+  function factorFlujos(p) {
+    if (!enUSD()) return 1;
+    let num = 0, den = 0;
+    (p.flujos || []).forEach(([f, v]) => {
+      const a = Math.abs(v || 0);
+      if (a) { num += a * fxFecha(f); den += a; }
+    });
+    return den ? num / den : fxHoy();
+  }
+
+  /** Copia del producto con sus cifras en la moneda de visualización (cacheada).
+      Criterio único: lo que vale HOY (valor, precio) con el cambio de hoy; lo que
+      pasó EN UN DÍA (aportes, flujos) con el cambio de ese día. */
   function baseConv(p) {
     if (!enUSD() || p._conv) return p;      // idempotente: no convertir dos veces
     let c = convUSD.get(p);
     if (c) return c;
     c = Object.assign({}, p, { _conv: true });
     c.valor = convAhora(p.valor);
-    ["aportado", "realizado", "dividendos", "intereses", "impuestosPagados",
-      "precioMedio", "precioActual", "nav"].forEach(k => { if (p[k] != null) c[k] = convAhora(p[k]); });
+    ["precioActual", "nav"].forEach(k => { if (p[k] != null) c[k] = convAhora(p[k]); });
+    const kf = factorFlujos(p);
+    ["realizado", "dividendos", "intereses", "impuestosPagados"]
+      .forEach(k => { if (p[k] != null) c[k] = red2(p[k] * kf); });
     if (p.serie) c.serie = convSerie(p.serie);
     if (p.serieAportado) c.serieAportado = convApSerie(p.serieAportado);
-    // El aportado total se toma de su curva ya convertida: así cada aporte va
-    // con el cambio del día en que se hizo (un depósito en dólares sigue siendo
-    // los dólares que metiste) y la rentabilidad en USD difiere de la de EUR.
-    if (p.aportado != null && c.serieAportado) {
-      const ap = c.serieAportado.reduce((a, v) => (v == null ? a : v), null);
-      if (ap != null) c.aportado = ap;
+    // El aportado sale de su curva ya convertida: así cada aporte va con el cambio
+    // del día en que se hizo (un depósito en dólares sigue siendo los dólares que
+    // metiste) y la rentabilidad en USD incluye el efecto del cambio, como la de EUR.
+    c.aportado = p.aportado;
+    if (p.aportado != null) {
+      const ap = c.serieAportado ? c.serieAportado.reduce((a, v) => (v == null ? a : v), null) : null;
+      c.aportado = ap != null ? ap : convAhora(p.aportado);
+      if (p.precioMedio != null && p.titulos) c.precioMedio = c.aportado / p.titulos;
+      else if (p.precioMedio != null) c.precioMedio = convAhora(p.precioMedio);
     }
-    if (p.flujos) c.flujos = p.flujos.map(([f, v]) => [f, red2(v * (enUSD() ? fxHoy() : 1))]);
+    // Un flujo (compra, venta, dividendo…) se convierte con el cambio de su día.
+    if (p.flujos) c.flujos = p.flujos.map(([f, v]) => [f, red2(v * fxFecha(f))]);
     if (p.aportaciones) c.aportaciones = p.aportaciones.map(a => Object.assign({}, a, {
-      importe: a.importe != null ? convAhora(a.importe) : null,
+      importe: a.importe != null ? red2(a.importe * fxFecha(a.fecha)) : null,
       valor: a.valor != null ? convAhora(a.valor) : null,
     }));
     if (p.tramos) {
@@ -362,18 +401,47 @@
     const pct = r.valor ? dif / r.valor : 0;
     const igual = Math.abs(pct) < 0.005;
     const nom = esc(r.nombre);   // nombre de la referencia (puede ser tuyo)
-    // Las tres series y las cajas se pasan a la moneda de visualización.
-    const apConv = convApSerie(C.aportado);
+    // Las tres series y las cajas se pasan a la moneda de visualización. El
+    // aportado se arma con las curvas de cada componente (igual que en la pestaña
+    // Patrimonio): si se convirtiera la curva ya sumada del motor, cada aporte no
+    // iría con el cambio de su día y las cifras no cuadrarían entre pestañas.
+    const nAp = D.fechas.length;
+    const curvaAp = new Array(nAp).fill(null);
+    crudos(D.productos).concat(crudos(D.otrosActivos || [])).forEach(p => {
+      const s = p.serieAportado;
+      // Sin coste registrado (una posición vendida del todo) se queda fuera, igual
+      // que en la pestaña Patrimonio: así el aportado cuadra entre las dos.
+      if (!s || p.aportado == null) return;
+      for (let i = 0; i < nAp; i++) if (s[i] != null) curvaAp[i] = (curvaAp[i] || 0) + s[i];
+    });
+    const apConv = convApSerie(curvaAp);
     const apHoy = apConv[apConv.length - 1];
     const tuV = convAhora(C.tuValor), refV = convAhora(r.valor);
+    // En dólares la TIR se recalcula: cada entrada de dinero con el cambio de su día
+    // y el valor final con el de hoy. En euros vale la del motor (o la del filtro).
+    const flujosTIR = (() => {
+      if (!enUSD()) return null;
+      const ap = C.aportado || [];
+      const fl = [];
+      for (let i = 0; i < ap.length; i++) {
+        const dA = (ap[i] || 0) - (i > 0 ? (ap[i - 1] || 0) : 0);
+        if (Math.abs(dA) >= 0.005) fl.push({ t: Date.parse(D.fechas[i]), v: -red2(dA * fxEn(i)) });
+      }
+      return fl;
+    })();
+    const tirDe = (base, fin) => {
+      if (!flujosTIR || !flujosTIR.length) return base;
+      const t = xirr(flujosTIR.concat([{ t: Date.parse(D.fechaExtracto), v: red2(fin * fxHoy()) }]));
+      return t != null ? t : base;
+    };
     const difM = tuV - refV;
     const veredicto = igual ? `Vas prácticamente igual que el ${nom}.`
       : dif > 0 ? `Vas ${G.fmtEur(Math.abs(difM))} por delante del ${nom} (${G.fmtPctSigno(pct, 1)}).`
       : `Con el ${nom} tendrías ${G.fmtEur(Math.abs(difM))} más (${G.fmtPctSigno(-dif / C.tuValor, 1)}).`;
     const caja = (et, v, extra, cls = "") => `<div class="compCaja ${cls}"><span>${et}</span><b>${v}</b>${extra ? `<small>${extra}</small>` : ""}</div>`;
     $("#compTitular").innerHTML =
-      caja("Tú tienes hoy", G.fmtEur(tuV), `TIR ${G.fmtPctSigno(C.tuTir, 1)}`) +
-      caja(`Con el ${nom} tendrías`, G.fmtEur(refV), `TIR ${G.fmtPctSigno(r.tir, 1)}`) +
+      caja("Tú tienes hoy", G.fmtEur(tuV), `TIR ${G.fmtPctSigno(tirDe(C.tuTir, C.tuValor), 1)}`) +
+      caja(`Con el ${nom} tendrías`, G.fmtEur(refV), `TIR ${G.fmtPctSigno(tirDe(r.tir, r.valor), 1)}`) +
       caja("Has puesto de tu bolsillo", G.fmtEur(apHoy), "compras menos ventas") +
       caja("Veredicto", veredicto, "", "veredicto");
     G.multiLinea($("#grafComparacion"), {
@@ -566,7 +634,7 @@
     const ids = new Set(lista.map(p => p.id));
     const porMes = am.meses.map((_, i) => Object.keys(am.porProducto)
       .reduce((a, id) => a + (ids.has(id) ? (am.porProducto[id][i] || 0) : 0), 0))
-      .map(v => convAhora(v));                              // en la divisa de vista
+      .map((v, i) => enUSD() ? red2(v * fxEn(ultimoIdxMes(am.meses[i]))) : v);  // en la divisa de vista
     const mesesConAp = am.meses.filter((m, i) => porMes[i] > 0);
     const ult12 = porMes.slice(-12);
     const ritmo = ult12.length ? ult12.reduce((a, b) => a + b, 0) / ult12.length : 0;
@@ -973,8 +1041,9 @@
     const series = visibles()
       .filter(p => (am.porProducto[p.id] || []).some(v => v))
       .map(p => ({ nombre: p.corto || p.nombre, color: color(p),
-                   valores: am.porProducto[p.id].slice(i0)
-                     .map(v => convAhora(v * (p._f || 1))) }));
+                   valores: am.porProducto[p.id].slice(i0).map((v, i) => enUSD()
+                     ? red2(v * (p._f || 1) * fxEn(ultimoIdxMes(meses[i])))
+                     : v * (p._f || 1)) }));
     G.barrasApiladas($("#grafBarras"), { categorias: meses, alto: 236, series });
     const suma = meses.reduce((a, _, i) => a + series.reduce((b, s) => b + (s.valores[i] || 0), 0), 0);
     $("#notaAport").textContent = meses.length
@@ -987,7 +1056,10 @@
     const serie = mVista.serie || [];
     $("#hitos").innerHTML = D.total.hitos.map(h => {
       const imp = convAhora(h.importe);          // hitos en la moneda de visualización
-      const i = serie.findIndex(v => v != null && v >= imp);
+      // El objetivo está en euros: cada día se cruza con lo que vale ese día en la
+      // moneda de vista, para que el cambio de hoy no descuadre el cruce.
+      const i = serie.findIndex((v, j) => v != null
+        && v >= (enUSD() ? red2(h.importe * fxEn(j)) : imp));
       const fecha = i >= 0 ? D.fechas[i] : null;
       const hecho = !!fecha;
       return `<div class="hito ${hecho ? "hecho" : ""}">
@@ -1110,30 +1182,57 @@
     if (!rm.length) { $("#mesCifra").textContent = "—"; return; }
     if (estado.mes == null || estado.mes < 0 || estado.mes >= rm.length) estado.mes = rm.length - 1;
     const r = rm[estado.mes];
-    // Cifras del mes en la moneda de visualización (cambio de hoy, como todo).
-    const cv = v => convAhora(v);
+    // Cifras del mes en la moneda de visualización: «al empezar» va con el cambio
+    // del primer día del mes y «al cerrar» (y lo aportado dentro del mes) con el
+    // del último, para que el riesgo de cambio entre en la cifra como en el resto.
+    const iIniMes = D.fechas.findIndex(x => x.slice(0, 7) === r.mes);
+    const iFinMes = ultimoIdxMes(r.mes);
+    const cvI = v => (v == null || !enUSD()) ? v : red2(v * fxEn(iIniMes));
+    const cvF = v => (v == null || !enUSD()) ? v : red2(v * fxEn(iFinMes));
 
     // Con los filtros globales encima, las cifras de este mes se vuelven a sumar.
     const filas = visibles().map(p => {
       const d = r.porProducto[p.id];
       if (!d) return null;
       const f = p._f || 1;
-      const esc = v => (v == null ? v : cv(v * f));
-      return { p, d: { inicio: esc(d.inicio), aportado: esc(d.aportado),
-                       mercado: esc(d.mercado), fin: esc(d.fin), nuevo: esc(d.nuevo) } };
+      const ini = cvI(d.inicio * f), ap = cvF(d.aportado * f),
+            fin = cvF(d.fin * f), nue = cvF((d.nuevo || 0) * f);
+      // El mercado es lo que sobra: así «de A a B» cuadra con aportado + mercado
+      // también cuando cada cifra lleva el cambio de su propio día.
+      return { p, d: { inicio: ini, aportado: ap, fin, nuevo: nue,
+                       mercado: fin - ini - ap - nue } };
     }).filter(Boolean);
     const T = filtrando()
       ? filas.reduce((a, x) => ({ inicio: a.inicio + x.d.inicio, aportado: a.aportado + x.d.aportado,
           mercado: a.mercado + x.d.mercado, fin: a.fin + x.d.fin, nuevo: a.nuevo + (x.d.nuevo || 0) }),
           { inicio: 0, aportado: 0, mercado: 0, fin: 0, nuevo: 0 })
-      : r;
-    const rentMes = T === r ? r.rentabilidad
-      : (T.inicio > 0 ? T.mercado / T.inicio : null);
-    // Para pintar: en modo filtrado las filas ya están convertidas arriba;
-    // sin filtros se convierte el resumen del mes tal cual.
-    const Tm = filtrando() ? T
-      : { inicio: cv(T.inicio), fin: cv(T.fin), aportado: cv(T.aportado),
-          mercado: cv(T.mercado), nuevo: cv(T.nuevo) };
+      : { inicio: cvI(r.inicio), aportado: cvF(r.aportado), fin: cvF(r.fin),
+          mercado: cvF(r.fin) - cvI(r.inicio) - cvF(r.aportado) - cvF(r.nuevo),
+          nuevo: cvF(r.nuevo) };
+    // La rentabilidad del mes se calcula con la misma fórmula que el motor (índice
+    // encadenado, limpio de cuándo entra el dinero) pero sobre las cifras de la
+    // vista: así el porcentaje en euros y en dólares es el mismo tipo de número y
+    // en euros sin filtros sale el del motor.
+    const rentMes = (() => {
+      // Igual que el motor: índice encadenado de los productos con cotización
+      // (que no cuente cuándo metiste el dinero), pero con las cifras de la vista.
+      const lista = visibles().filter(p => p.origen === "csv" || p.origen === "ordenes");
+      const n = D.fechas.length;
+      const serie = new Array(n).fill(0), fl = new Array(n).fill(0);
+      let hay = false;
+      lista.forEach(p => {
+        const s = p.serie || [];
+        for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] += s[i]; hay = true; }
+        (p.flujos || []).forEach(([f, v]) => { const i = idxFecha(f); if (i >= 0) fl[i] -= v; });
+      });
+      const idx = hay ? indiceTWR(serie, fl) : null;
+      const b = idx && iIniMes > 0 ? idx[iIniMes - 1] : (idx ? 100 : null);
+      const v = (b && idx[iFinMes] != null) ? idx[iFinMes] / b - 1 : null;
+      if (v != null) return v;
+      return (!filtrando() && !enUSD()) ? r.rentabilidad
+                                        : (T.inicio > 0 ? T.mercado / T.inicio : null);
+    })();
+    const Tm = T;
 
     const sel = $("#mesSel");
     if (sel.options.length !== rm.length) {
@@ -1206,13 +1305,21 @@
 
     // histórico de esfuerzo vs mercado (con los filtros, mes a mes)
     const mesDe = x => {
-      if (!filtrando()) return x;
-      let a = 0, m = 0;
+      const iIni = D.fechas.findIndex(s => s.slice(0, 7) === x.mes);
+      const iFin = ultimoIdxMes(x.mes);
+      const cI = v => (v == null || !enUSD()) ? v || 0 : red2(v * fxEn(iIni));
+      const cF = v => (v == null || !enUSD()) ? v || 0 : red2(v * fxEn(iFin));
+      if (!filtrando()) {
+        const ini = cI(x.inicio), fin = cF(x.fin), ap = cF(x.aportado), nue = cF(x.nuevo);
+        return { mes: x.mes, aportado: ap, mercado: fin - ini - ap - nue };
+      }
+      let ini = 0, ap = 0, fin = 0, nue = 0;
       visibles().forEach(p => {
         const d = (x.porProducto || {})[p.id];
-        if (d) { const f = p._f || 1; a += d.aportado * f; m += d.mercado * f; }
+        if (d) { const f = p._f || 1;
+          ini += d.inicio * f; ap += d.aportado * f; fin += d.fin * f; nue += (d.nuevo || 0) * f; }
       });
-      return { mes: x.mes, aportado: convAhora(a), mercado: convAhora(m) };
+      return { mes: x.mes, aportado: cF(ap), mercado: cF(fin) - cI(ini) - cF(ap) - cF(nue) };
     };
     const ult = rm.slice(-18).map(mesDe);
     G.barrasAgrupadas($("#grafMesHist"), {
@@ -1552,10 +1659,11 @@
       juntos.forEach(x => {
         const f = factorDe(x);
         if (f <= 1e-9) return;
-        val += convAhora((x.valor || 0) * f);
-        if (x.aportado != null) { ap += x.aportado * f; hayAp = true; }
+        const xc = baseConv(x);   // aportado con el cambio del día de cada aporte
+        val += (xc.valor || 0) * f;
+        if (xc.aportado != null) { ap += xc.aportado * f; hayAp = true; }
       });
-      const rent = hayAp && ap > 0 ? (val - convAhora(ap)) / convAhora(ap) : null;
+      const rent = hayAp && ap > 0 ? (val - ap) / ap : null;
       const nmRel = rel.map(x => x.corto || x.nombre).join(" y ");
       res.push([`Juntos con ${nmRel}`,
         `${G.fmtEur(val)} · ${rent == null ? "sin coste registrado" : G.fmtPctSigno(rent, 1)}`]);
