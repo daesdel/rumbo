@@ -47,6 +47,10 @@
   const estado = {
     tab: "patrimonio",
     rango: "todo",
+    rangoFondo: "todo",
+    rangoAnual: "todo",
+    rangoCompara: "todo",
+    rangoComp: "todo",
     vista: "apilado",
     dist: "clase",
     fondo: null,
@@ -444,16 +448,17 @@
       caja(`Con el ${nom} tendrías`, G.fmtEur(refV), `TIR ${G.fmtPctSigno(tirDe(r.tir, r.valor), 1)}`) +
       caja("Has puesto de tu bolsillo", G.fmtEur(apHoy), "compras menos ventas") +
       caja("Veredicto", veredicto, "", "veredicto");
+    const i0c = desdeIdxDe(estado.rangoCompara);
     G.multiLinea($("#grafComparacion"), {
-      fechas: D.fechas, alto: 300,
+      fechas: D.fechas.slice(i0c), alto: 300,
       series: [
-        { nombre: "Tu cartera", valores: convSerie(C.tuya), color: G.css("--s1"), destacado: true },
-        { nombre: "Con el " + r.nombre, valores: convSerie(r.serie), color: G.css("--s2") },
-        { nombre: "Tu dinero puesto", valores: apConv, color: G.css("--tinta3") },
+        { nombre: "Tu cartera", valores: convSerie(C.tuya).slice(i0c), color: G.css("--s1"), destacado: true },
+        { nombre: "Con el " + r.nombre, valores: convSerie(r.serie).slice(i0c), color: G.css("--s2") },
+        { nombre: "Tu dinero puesto", valores: apConv.slice(i0c), color: G.css("--tinta3") },
       ],
       formatoY: v => G.fmtEurCorto(v),
       formatoValor: v => G.fmtEur(v, 0),
-      desdeCero: true,
+      desdeCero: estado.rangoCompara === "todo",
     });
     const ley = (c, t) => `<span class="leyItem"><i style="background:${G.css(c)}"></i>${esc(t)}</span>`;
     $("#compNota").innerHTML = `<span class="leyComp">${ley("--s1", "Tu cartera")}${ley("--s2", "Con el " + r.nombre)}${ley("--tinta3", "Tu dinero puesto")}</span>
@@ -677,15 +682,21 @@
     return [...acc.values()].filter(g => g.valor > 0).sort((a, b) => b.valor - a.valor);
   }
 
-  /* ---------------------------------------------- rango temporal */
+  /* ---------------------------------------------- rango temporal (zoom) */
   const RANGOS = [
     { id: "1m", et: "1M", dias: 30 }, { id: "3m", et: "3M", dias: 91 },
     { id: "6m", et: "6M", dias: 182 }, { id: "ytd", et: "YTD", dias: null },
     { id: "1a", et: "1A", dias: 365 }, { id: "todo", et: "Todo", dias: null },
   ];
-  function desdeIdx() {
+  // Para las barras por año natural el zoom se mide en años, no en días.
+  const RANGOS_ANOS = [
+    { id: "5a", et: "5 años", anos: 5 }, { id: "10a", et: "10 años", anos: 10 },
+    { id: "todo", et: "Todo", anos: 0 },
+  ];
+  /** Índice en el que empieza la ventana de un rango (0 = todo el histórico). */
+  function desdeIdxDe(rangoId) {
     const n = D.fechas.length;
-    const r = RANGOS.find(x => x.id === estado.rango);
+    const r = RANGOS.find(x => x.id === rangoId);
     if (!r || r.id === "todo") return 0;
     if (r.id === "ytd") {
       const ini = D.fechaExtracto.slice(0, 4) + "-01-01";
@@ -694,7 +705,21 @@
     }
     return Math.max(0, n - 1 - r.dias);
   }
+  const desdeIdx = () => desdeIdxDe(estado.rango);
   const corta = arr => (arr || []).slice(desdeIdx());
+  /** El zoom es cosa de cada gráfico: `cortaDe` es el de un rango concreto. */
+  const cortaDe = (arr, rangoId) => (arr || []).slice(desdeIdxDe(rangoId));
+  /** Cuántos años enseña el gráfico de barras anuales (0 = todos). */
+  const anosDeRango = rangoId => (RANGOS_ANOS.find(x => x.id === rangoId) || {}).anos || 0;
+  /** El zoom de los gráficos NO se recuerda: al cambiar de sección cada uno
+      vuelve a su periodo habitual. */
+  function reiniciaZoom() {
+    estado.rango = "todo";          // Evolución del patrimonio
+    estado.rangoFondo = "todo";     // ficha de un producto
+    estado.rangoAnual = "todo";     // barras por año natural
+    estado.rangoCompara = "todo";   // tú contra el indexado
+    estado.rangoComp = "todo";      // volatilidad, Sharpe y caídas
+  }
 
   function pintaSegm(cont, opciones, activo, alPulsar) {
     if (!cont) return;
@@ -922,6 +947,9 @@
       G.lineaConEventos(cont, {
         fechas, valores: corta(m.serie), color: G.css("--s1"), alto: 330,
         overlay: { nombre: "Aportado", valores: corta(m.serieAportado) },
+        // Con el zoom puesto el eje se ajusta a lo que se ve: desde cero, un mes
+        // o un año salen como una raya plana arriba y no se distingue nada.
+        desdeCero: estado.rango === "todo",
       });
     } else if (estado.vista === "dinero") {
       // Lo que pusiste tú contra lo que ha puesto el mercado.
@@ -1303,6 +1331,17 @@
     $("#mesTablaNota").textContent = Tm.nuevo
       ? `Incluye ${G.fmtEur(Tm.nuevo)} que entran al seguimiento este mes.` : "";
 
+    // El gráfico del mes enseña SOLO el mes que estás viendo: aquí no tiene
+    // sentido arrastrar todo el histórico (para eso está la pestaña Patrimonio).
+    const i0Mes = Math.max(0, iIniMes);
+    const mMes = metricas(visibles());
+    G.lineaConEventos($("#grafMesDia"), {
+      fechas: D.fechas.slice(i0Mes, iFinMes + 1),
+      valores: mMes.serie.slice(i0Mes, iFinMes + 1),
+      color: G.css("--s1"), alto: 260, desdeCero: false,
+      overlay: { nombre: "Aportado", valores: mMes.serieAportado.slice(i0Mes, iFinMes + 1) },
+    });
+
     // histórico de esfuerzo vs mercado (con los filtros, mes a mes)
     const mesDe = x => {
       const iIni = D.fechas.findIndex(s => s.slice(0, 7) === x.mes);
@@ -1321,7 +1360,15 @@
       });
       return { mes: x.mes, aportado: cF(ap), mercado: cF(fin) - cI(ini) - cF(ap) - cF(nue) };
     };
-    const ult = rm.slice(-18).map(mesDe);
+    // ...y la comparativa mes a mes también se ancla al mes que estás viendo:
+    // los 18 meses que acaban en él, no los 18 últimos del histórico.
+    const desdeMes = Math.max(0, estado.mes - 17);
+    const ult = rm.slice(desdeMes, estado.mes + 1).map(mesDe);
+    if ($("#mesHistNota")) {
+      $("#mesHistNota").textContent = ult.length > 1
+        ? `De ${G.fmtMes(ult[0].mes)} a ${G.fmtMes(ult[ult.length - 1].mes)}: lo que aportaste tú y, encima, lo que puso o quitó el mercado.`
+        : "Lo que aportaste tú, y encima lo que puso o quitó el mercado.";
+    }
     G.barrasAgrupadas($("#grafMesHist"), {
       categorias: ult.map(x => x.mes), alto: 250,
       formatoCat: G.fmtMes,
@@ -1538,7 +1585,7 @@
     G.lineaConEventos($("#grafPeriodo"), {
       fechas: D.fechas.slice(i0, iFin + 1),
       valores: m.serie.slice(i0, iFin + 1),
-      color: G.css("--s1"), alto: 260,
+      color: G.css("--s1"), alto: 260, desdeCero: false,
       overlay: { nombre: "Aportado", valores: m.serieAportado.slice(i0, iFin + 1) },
     });
   }
@@ -1604,7 +1651,8 @@
       <header>
         <h2><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${color(p)};margin-right:9px"></span>${esc(p.nombre)}</h2>
         <div class="sep"></div>
-        ${hayVL ? '<div class="segm" id="segSerie"></div>' : ""}
+        <div class="segm" id="segRangoFondo"></div>
+        ${hayVL ? '<div class="sep"></div><div class="segm" id="segSerie"></div>' : ""}
         ${puedeAct ? '<button class="btn" id="btnActPrecio" title="Baja solo el precio de este producto, sin tocar los demás">↻ Actualizar precio</button>' : ""}
       </header>
       ${p.papel ? `<div class="papel">${esc(p.papel)}</div>` : ""}
@@ -1684,6 +1732,10 @@
     }
     $("#ventanas").innerHTML = html;
 
+    // Zoom propio de esta ficha: se puede mirar el producto en un periodo concreto
+    // sin que eso cambie el gráfico de la pestaña Patrimonio.
+    pintaSegm($("#segRangoFondo"), RANGOS, estado.rangoFondo,
+      id => { estado.rangoFondo = id; pintaFichaFondo(p); });
     if (hayVL) {
       pintaSegm($("#segSerie"),
         [{ id: "posicion", et: "Mi posición" }, { id: "vl", et: etqVL }],
@@ -1692,7 +1744,8 @@
 
     const verVL = hayVL && estado.serieDetalle === "vl";
     const paleta = tonos(color(p));
-    const fechas = corta(D.fechas);
+    const rangoFondo = estado.rangoFondo;
+    const fechas = cortaDe(D.fechas, rangoFondo);
     const eventos = (p.aportaciones || []).filter(a => a.importe).map(a => {
       const niv = a.nivel == null ? 1 : a.nivel;
       return {
@@ -1702,10 +1755,10 @@
     });
     G.lineaConEventos($("#grafFondo"), {
       fechas,
-      valores: corta(verVL ? p.navSerie : p.serie),
+      valores: cortaDe(verVL ? p.navSerie : p.serie, rangoFondo),
       color: color(p), alto: 280, eventos, desdeCero: !verVL,
       overlay: verVL ? null : ((p.serieAportado || []).some(v => v)
-        ? { nombre: "Aportado", valores: corta(p.serieAportado) } : null),
+        ? { nombre: "Aportado", valores: cortaDe(p.serieAportado, rangoFondo) } : null),
       formatoY: verVL ? (v => G.fmtEur(v, v > 500 ? 0 : 2)) : null,
       referencia: (verVL && p.precioMedio)
         ? { valor: p.precioMedio, etiqueta: "tu precio medio · " + G.fmtEur(p.precioMedio) } : null,
@@ -1794,20 +1847,31 @@
      PESTAÑA 4 · RENDIMIENTO
      ================================================================ */
   function pintaRendimiento() {
+    // Zoom de cada gráfico de la pestaña: cada uno el suyo y ninguno se recuerda.
+    pintaSegm($("#segRangoAnual"), RANGOS_ANOS, estado.rangoAnual,
+      id => { estado.rangoAnual = id; pintaRendimiento(); });
+    pintaSegm($("#segRangoCompara"), RANGOS, estado.rangoCompara,
+      id => { estado.rangoCompara = id; pintaRendimiento(); });
+    pintaSegm($("#segRangoComp"), RANGOS, estado.rangoComp,
+      id => { estado.rangoComp = id; pintaRendimiento(); });
     const ra = D.rentabilidadAnual;
     if (ra && ra.anos.length) {
       // Con filtros encima, la rentabilidad de TU cartera se recalcula aquí.
       const idx = idxCartera();
       const cartera = filtrando() ? rentAnualDe(idx, ra.anos) : ra.cartera;
+      // El zoom de este gráfico cuenta años: la tabla de abajo sigue con todos.
+      const anos = anosDeRango(estado.rangoAnual);
+      const i0 = anos ? Math.max(0, ra.anos.length - anos) : 0;
+      const queAnos = i0 ? ` Enseña los últimos ${ra.anos.length - i0} años.` : "";
       if (cartera) {
         G.barrasSimples($("#grafAnual"), {
-          categorias: ra.anos.map((a, i) => a + (ra.parcial[i] ? " *" : "")),
-          valores: cartera, alto: 240,
+          categorias: ra.anos.slice(i0).map((a, i) => a + (ra.parcial[i0 + i] ? " *" : "")),
+          valores: cartera.slice(i0), alto: 240,
           color: G.css("--s1"),
-          colores: cartera.map(v => v >= 0 ? G.css("--s1") : G.css("--s2")),
+          colores: cartera.slice(i0).map(v => v >= 0 ? G.css("--s1") : G.css("--s2")),
         });
         $("#notaAnual").textContent = `${filtrando() ? "Tu cartera con los filtros puestos" : "Tu cartera completa"},
-          limpia del efecto de cuándo metiste el dinero. * año incompleto.`.replace(/\s+/g, " ");
+          limpia del efecto de cuándo metiste el dinero.${queAnos} * año incompleto.`.replace(/\s+/g, " ");
       } else {
         $("#grafAnual").innerHTML = "";
         $("#notaAnual").textContent =
@@ -1873,13 +1937,36 @@
         nombre: c.nombre, valores: c.indice, destacado: c.real,
         color: c.real ? G.css("--tinta") : paleta[(i + 1) % paleta.length],
       }));
+      // Con el zoom puesto, la base 100 se recalcula en el primer día que se ve:
+      // al mirar solo seis meses, si no, todas las curvas salen aplastadas arriba.
+      let iComp = desdeIdxDe(estado.rangoComp), fechaBase = met0.desde, sComp;
+      const primeraConDato = arr => {
+        for (let k = iComp; k < arr.length; k++) if (arr[k] != null) return k;
+        return -1;
+      };
+      const jBase = primeraConDato(series[0].valores || []);
+      if (jBase >= 0) {
+        iComp = jBase;
+        fechaBase = D.fechas[jBase];
+        sComp = series.map(s => {
+          const vals = s.valores || [];
+          const base = vals[jBase];
+          // Se recorta Y se re-basa a la vez: si solo se recortaran las fechas,
+          // las curvas seguirían empezando en el primer día del histórico.
+          return Object.assign({}, s, {
+            valores: vals.slice(jBase).map(v => (v == null || !base) ? null : v / base * 100),
+          });
+        });
+      } else {
+        sComp = series.map(s => Object.assign({}, s, { valores: (s.valores || []).slice(iComp) }));
+      }
       G.multiLinea($("#grafComparador"), {
-        fechas: D.fechas, series, alto: 320,
+        fechas: D.fechas.slice(iComp), series: sComp, alto: 320,
         formatoY: v => Math.round(v),
         formatoValor: v => v.toFixed(1),
       });
       $("#notaComparador").textContent =
-        `Base 100 desde el ${G.fmtFecha(met0.desde)}. Las alternativas son comprar y mantener con pesos fijos.`;
+        `Base 100 desde el ${G.fmtFecha(fechaBase)}. Las alternativas son comprar y mantener con pesos fijos.`;
       $("#tablaComparador").innerHTML =
         `<thead><tr><th>Cartera</th><th>Rentabilidad</th><th>Anualizada</th>
           <th>Volatilidad</th><th>Sharpe</th><th>Máx. caída</th></tr></thead>
@@ -1994,6 +2081,9 @@
       location.reload();
       return;
     }
+    // Cada vez que se entra en una sección, sus gráficos vuelven al periodo
+    // habitual: el zoom se elige para mirar algo concreto, no se arrastra.
+    reiniciaZoom();
     estado.tab = tab;
     document.querySelectorAll("#tabs button").forEach(b =>
       b.setAttribute("aria-selected", String(b.dataset.tab === tab)));

@@ -778,12 +778,20 @@ body.video .tarjetaCanal{display:none}
   <div class="mesTarjetas" id="mesTarjetas"></div>
 
   <section class="tarjeta">
+    <header>
+      <h2>El mes, día a día</h2>
+      <span class="subt">La cartera dentro del mes que estás viendo, sin salirse de él</span>
+    </header>
+    <div class="envGraf" id="grafMesDia"></div>
+  </section>
+
+  <section class="tarjeta">
     <header><h2>Qué ha hecho cada componente</h2><span class="subt" id="mesTablaNota"></span></header>
     <div class="tablaEnv"><table class="dt" id="mesTabla"></table></div>
   </section>    <section class="tarjeta">
       <header>
         <h2>Tu esfuerzo y el del mercado, mes a mes</h2>
-        <span class="subt">Lo que aportaste tú, y encima lo que puso o quitó el mercado.</span>
+        <span class="subt" id="mesHistNota">Lo que aportaste tú, y encima lo que puso o quitó el mercado.</span>
       </header>
       <div class="envGraf" id="grafMesHist"></div>
     </section>
@@ -832,7 +840,9 @@ body.video .tarjetaCanal{display:none}
 <!-- ==================================================== RENDIMIENTO -->
 <div class="panel" id="tab-rendimiento" role="tabpanel" hidden>
   <section class="tarjeta" style="margin-top:24px">
-    <header><h2>Rentabilidad por año natural</h2><span class="subt" id="notaAnual"></span></header>
+    <header><h2>Rentabilidad por año natural</h2><span class="subt" id="notaAnual"></span>
+      <div class="sep"></div>
+      <div class="segm" id="segRangoAnual"></div></header>
     <div class="envGraf" id="grafAnual"></div>
     <div class="filaTabla">
       <span class="subt" id="notaTablaAnual"></span>
@@ -845,6 +855,8 @@ body.video .tarjetaCanal{display:none}
       <h2>¿Y si lo hubieras metido todo en un indexado?</h2>
       <span class="subt">Las mismas compras y ventas que tú, en las mismas fechas, pero en otra cartera</span>
       <span class="sp"></span>
+      <div class="segm" id="segRangoCompara"></div>
+      <div class="sep"></div>
       <div class="segm" id="compRef"></div>
     </header>
     <div class="compTitular" id="compTitular"></div>
@@ -852,6 +864,7 @@ body.video .tarjetaCanal{display:none}
     <p class="subt" id="compNota" style="margin:10px 0 0"></p>
     <details class="compDetalles" id="compDetalles">
       <summary>Ver más detalles: volatilidad, Sharpe y caídas</summary>
+      <div class="segm" id="segRangoComp" style="margin-top:12px"></div>
       <p class="subt" id="notaComparador" style="margin:12px 0 0"></p>
       <div class="envGraf" id="grafComparador"></div>
       <div class="tablaEnv" style="margin-top:16px"><table class="dt" id="tablaComparador"></table></div>
