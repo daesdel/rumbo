@@ -401,8 +401,9 @@
         <td class="subt">${original}</td>
         <td>${precio ? num(precio) + " €" : "—"}</td>
         <td class="nota" title="${esc(m.nota)}">${esc(m.nota || "")}</td>
-        <td class="acc"><button data-acc="editarMov" data-id="${esc(m.id)}">Editar</button>
-          <button data-acc="borrarMov" data-id="${esc(m.id)}">Borrar</button></td></tr>`;
+        <td class="acc"><button data-acc="editarMov" data-id="${esc(m.id)}" title="Cambiar este movimiento">Editar</button>
+          <button data-acc="replicarMov" data-id="${esc(m.id)}" title="Anotar otro igual, sin tocar este">Replicar</button>
+          <button data-acc="borrarMov" data-id="${esc(m.id)}" title="Borrar este movimiento">Borrar</button></td></tr>`;
     }).join("");
     return `<section class="tarjeta"><header><h2>Movimientos</h2>
         <span class="subt">Compras, ventas, dividendos y comisiones</span><span class="sp"></span>
@@ -454,11 +455,26 @@
     cambio_divisa: "la cuenta en su moneda",
   };
 
-  function formMovimiento(m, productoId) {
+  /** Replicar: el mismo formulario con los datos copiados, pero como movimiento
+      NUEVO (el original no se toca). La fecha viene con la de hoy y no con la del
+      original: una copia con la fecha vieja sería un duplicado silencioso de un
+      apunte que ya existe, y se anotaría sin querer. */
+  function replicarMov(id) {
+    const m = E.cfg.movimientos.find(x => x.id === id);
+    if (!m) return;
+    formMovimiento(m, null, true);
+  }
+
+  /** `trasGuardar`, si viene, sustituye al final de siempre (dejar la vista en
+      «Movimientos»): así la ficha del producto puede recargar el panel en vez de
+      cambiar de pestaña. */
+  function formMovimiento(m, productoId, copia, trasGuardar) {
     const cotizables = E.cfg.productos.filter(p => !soloSaldo(p));
     if (!cotizables.length) { alert("Primero añade un producto en «Productos»."); return; }
-    const nuevo = !m;
-    m = m || { fecha: hoy(), tipo: "compra", producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) };
+    const nuevo = !m || !!copia;
+    // Con la copia se trabaja sobre una copia del original: rellenar no lo toca.
+    m = m ? (copia ? Object.assign({}, m) : m)
+          : { fecha: hoy(), tipo: "compra", producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) };
     const props = E.cfg.propietarios || [];
     // Cuenta y propietario por defecto: los del producto, y si no, los de la cuenta.
     const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
@@ -475,7 +491,10 @@
     const tcMov = m.monedaOriginal && m.monedaOriginal !== "EUR" && m.tipoCambio ? m.tipoCambio : 1;
     const pildoras = Object.entries(E.tiposMov).map(([k, v]) =>
       `<label><input type="radio" name="tipo" value="${esc(k)}"><span>${esc(k === "dividendo" ? "Dividendo" : v)}</span></label>`).join("");
-    const f = abreModal(nuevo ? "Añadir movimiento" : "Editar movimiento", `
+    const f = abreModal(copia ? "Replicar movimiento" : nuevo ? "Añadir movimiento" : "Editar movimiento", `
+      ${copia ? `<p class="subt" style="margin:0 0 14px">Copia del movimiento del
+        ${fecha(m.fecha)}. Le he puesto la fecha de hoy: cámbiala si lo quieres anotar en otro día.
+        Hasta que pulses «Guardar movimiento» no se guarda nada, y el original no se toca.</p>` : ""}
       <div class="pildoras">${pildoras}</div>
       <div class="rejilla" style="margin-top:18px">
         ${campo("Producto", `<select name="producto"><option value="">— Ninguno: es un movimiento de cuenta —</option>${cotizables.map(p =>
@@ -512,6 +531,7 @@
           "sus próximos movimientos la usarán solos."
         : null;
       await guarda("movimientos", d);
+      if (trasGuardar) return trasGuardar;
       E.vista = "movimientos";
       recuerda.guarda("patrimonio.editor", "movimientos");
       return avisoVinc ? () => avisa([avisoVinc]) : null;
@@ -519,13 +539,14 @@
     rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
       contrapartida: m.contrapartida || "", productoOrigen: m.productoOrigen || "",
       moneda: monPorDef,
+      fecha: copia ? hoy() : m.fecha,
       unidades: decimal(m.unidades || ""),
       importe: decimal(tcMov !== 1 && m.importeOriginal != null ? m.importeOriginal : m.importe),
       comision: decimal(m.comision != null && m.comision !== ""
         ? (tcMov !== 1 ? Math.round((m.comision / tcMov) * 100) / 100 : m.comision) : m.comision) });
     // La moneda sigue a la cuenta/producto salvo que el usuario la cambie (o salvo
-    // que estemos editando un movimiento que ya tiene la suya anotada).
-    let monToque = !nuevo;
+    // que estemos editando o copiando un movimiento que ya trae la suya anotada).
+    let monToque = !nuevo || !!copia;
     f.elements.moneda.addEventListener("change", () => { monToque = true; });
     let vinMostrado = false;
     const ajusta = () => {
@@ -1186,6 +1207,7 @@
     borrarProducto: soloPropio(borrarProducto),
     nuevoMov: soloPropio(() => formMovimiento(null)),
     editarMov: soloPropio(id => formMovimiento(E.cfg.movimientos.find(m => m.id === id))),
+    replicarMov: soloPropio(replicarMov),
     borrarMov: soloPropio(borrarMov),
     nuevoValor: soloPropio(id => formValor(null, id)),
     editarValor: soloPropio(id => formValor(E.cfg.valoraciones.find(v => v.id === id))),
@@ -1269,7 +1291,13 @@
     }, 6000);
   })();
 
-  window.Editor = { mostrar: pinta };
+  window.Editor = {
+    mostrar: pinta,
+    /** Abre el formulario de movimiento con este producto ya elegido. Lo usa el
+        botón de la ficha del producto (pestaña Productos): al guardar recarga el
+        panel, porque las cifras de esa pestaña ya no son las mismas. */
+    movimiento: soloPropio(id => formMovimiento(null, id, false, () => location.reload())),
+  };
   carga().then(pinta).catch(x => {
     const cont = $("#editor");
     if (cont) cont.innerHTML = `<div class="av"><span>⚠</span><span>${esc(x.message)}</span></div>`;

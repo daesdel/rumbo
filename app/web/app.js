@@ -1646,6 +1646,9 @@
     const etqVL = p.etqPrecio || "Valor liquidativo";
     const pocos = (p.serie || []).filter(v => v != null).length < 5;
     const puedeAct = p.fuente !== "manual" || !!p.urlFuente;
+    // El formulario de movimientos no lista las cuentas de efectivo ni las deudas
+    // (esas se anotan como saldo), así que ahí no tiene sentido el botón.
+    const puedeMov = !["efectivo", "deuda"].includes(p.tipoClave);
 
     sec.innerHTML = `
       <header>
@@ -1653,6 +1656,7 @@
         <div class="sep"></div>
         <div class="segm" id="segRangoFondo"></div>
         ${hayVL ? '<div class="sep"></div><div class="segm" id="segSerie"></div>' : ""}
+        ${puedeMov ? '<button class="btn prim" id="btnMovFicha" title="Abre el formulario de siempre con este producto ya elegido">+ Anotar movimiento</button>' : ""}
         ${puedeAct ? '<button class="btn" id="btnActPrecio" title="Baja solo el precio de este producto, sin tocar los demás">↻ Actualizar precio</button>' : ""}
       </header>
       ${p.papel ? `<div class="papel">${esc(p.papel)}</div>` : ""}
@@ -1662,6 +1666,14 @@
       ${pocos ? '<p class="subt" style="margin:0 0 12px">Solo hay un valor anotado, así que aún no hay curva. Anota más en «Mis datos → Saldos y valores».</p>' : ""}
       <div class="envGraf" id="grafFondo"></div>
       <div class="tramos" id="tramosLey"></div>`;
+
+    // Movimiento rápido de este producto: el mismo formulario de «Mis datos»
+    // (aquí el módulo del editor puede no haber cargado todavía, así que se mira
+    // en el momento de pulsar).
+    const bMov = $("#btnMovFicha");
+    if (bMov) bMov.onclick = () => {
+      if (window.Editor && window.Editor.movimiento) window.Editor.movimiento(p.id);
+    };
 
     // Precio de UN solo producto: lo baja y repinta el panel sin tocar los demás.
     const bAct = $("#btnActPrecio");
