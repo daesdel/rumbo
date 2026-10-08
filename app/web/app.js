@@ -990,10 +990,16 @@
     $("#evolNota").textContent = nota;
   }
 
+  /** Vendido del todo (0 participaciones): ya no forma parte del patrimonio, así
+      que no sale en «Componentes de la cartera». Su histórico no se toca (sigue en
+      el gráfico y en las métricas) y su ficha sigue en la pestaña Productos. */
+  const vendido = p => p.participaciones != null && Math.abs(p.participaciones) < 1e-9;
+
   function pintaChips() {
     const cont = $("#chips");
     cont.innerHTML = "";
     TODOS().forEach(p => {
+      if (vendido(p)) return;
       const oculto = estado.ocultos.has(p.id);
       const b = document.createElement("button");
       b.className = "chip" + (oculto ? " apagado" : "");

@@ -522,8 +522,9 @@
       if (!nuevo) d.id = m.id;
       const hayVinculo = !f.querySelector(".siVincula").hidden && f.elements.vincular.checked;
       d.vincular = hayVinculo ? "1" : "";
-      // Una entrega entrante no toca dinero: ni cuenta, ni contrapartida, ni comisión.
-      if (d.tipo === "entrega") { d.cuenta = ""; d.contrapartida = ""; d.comision = ""; }
+      // Una entrega entrante no toca dinero: ni cuenta, ni comisión. La contrapartida
+      // no se borra, solo se deja de mandar: el servidor conserva la que estuviera.
+      if (d.tipo === "entrega") { d.cuenta = ""; d.comision = ""; delete d.contrapartida; }
       else d.productoOrigen = "";
       const pv = prod(d.producto);
       const avisoVinc = hayVinculo && pv && d.cuenta
@@ -571,10 +572,13 @@
       f.elements.cuenta.options[0].textContent = ETQ_CUENTA[t] || "— Sin cuenta —";
       const emC = f.querySelector(".cuentaCampo .et em");
       if (emC) emC.textContent = PISTA_CUENTA[t] || "de qué cuenta sale o entra";
-      // La contrapartida solo tiene sentido en los movimientos de una cuenta.
-      const hayCp = MOV_CONTRAPARTIDA.includes(t);
+      // La contrapartida solo tiene sentido en los movimientos de una cuenta…
+      // …pero si el movimiento ya trae una guardada (la trae la importación) se
+      // enseña igual: el usuario tiene que verla, y guardar nunca la puede perder.
+      // En una entrega no se enseña: no mueve dinero (y no se manda al guardar).
+      const hayCp = MOV_CONTRAPARTIDA.includes(t)
+        || (t !== "entrega" && !!f.elements.contrapartida.value);
       f.querySelector(".siContra").hidden = !hayCp;
-      if (!hayCp) f.elements.contrapartida.value = "";
       // Vincular producto ↔ cuenta al anotar una compra, venta o dividendo.
       const cid = f.elements.cuenta.value;
       const conVin = ["compra", "venta", "dividendo"].includes(t) && p && cid && p.cuenta !== cid;
@@ -620,8 +624,9 @@
       const conAportado = !soloSaldo(p);
       const filas = vals.map(v => `<tr><td>${fecha(v.fecha)}</td><td>${eur(v.valor)}</td>
         ${conAportado ? `<td>${v.aportado != null ? eur(v.aportado) : "—"}</td>` : ""}
-        <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}">Editar</button>
-          <button data-acc="borrarValor" data-id="${esc(v.id)}">Borrar</button></td></tr>`).join("");
+        <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}" title="Cambiar este valor">Editar</button>
+          <button data-acc="replicarValor" data-id="${esc(v.id)}" title="Anotar otro igual, sin tocar este">Replicar</button>
+          <button data-acc="borrarValor" data-id="${esc(v.id)}" title="Borrar este valor">Borrar</button></td></tr>`).join("");
       return `<section class="tarjeta saldo"><header><h2><i class="pt" style="background:var(--s${p.slot || 1})"></i>${esc(nombre(p))}</h2>
           <span class="subt">${esc(E.tipos[p.tipo] || "")}${p.entidad ? " · " + esc(p.entidad) : ""}</span><span class="sp"></span>
           <button class="btn" data-acc="nuevoValor" data-id="${esc(p.id)}">+ Anotar</button></header>
@@ -846,11 +851,25 @@
     };
   }
 
-  function formValor(v, productoId) {
-    const nuevo = !v;
+  /** Replicar una anotación: el mismo formulario con los datos copiados, pero como
+      valor NUEVO (el original no se toca). La fecha viene con la de hoy y no con la
+      del original, para no sustituir sin querer el valor ya anotado en esa fecha. */
+  function replicarValor(id) {
+    const v = E.cfg.valoraciones.find(x => x.id === id);
+    if (v) formValor(v, null, true);
+  }
+
+  function formValor(v, productoId, copia) {
+    const nuevo = !v || !!copia;
+    // Con la copia se trabaja sobre una copia del original: rellenar no lo toca.
+    if (v && copia) v = Object.assign({}, v);
     const p = prod(v ? v.producto : productoId);
     const conAportado = !soloSaldo(p);
-    const f = abreModal(`${nuevo ? "Anotar" : "Editar"} ${etiquetaValor(p).toLowerCase()} · ${esc(nombre(p))}`, `
+    const f = abreModal(`${copia ? "Replicar" : nuevo ? "Anotar" : "Editar"} ${etiquetaValor(p).toLowerCase()} · ${esc(nombre(p))}`, `
+      ${copia ? `<p class="subt" style="margin:0 0 14px">Copia del valor del
+        ${fecha(v.fecha)}. Le he puesto la fecha de hoy: cámbiala si lo quieres anotar en otro día.
+        ${conAportado && v.aportado != null ? "El «aportado» es el de esa fecha: ajústalo si desde entonces has metido dinero. " : ""}
+        Hasta que pulses «Guardar valor» no se guarda nada, y el original no se toca.</p>` : ""}
       <div class="rejilla">
         ${campo("Fecha", `<input type="date" name="fecha" max="${hoy()}">`)}
         ${campo(etiquetaValor(p), '<div class="conSufijo"><input name="valor" inputmode="decimal" placeholder="0,00"><span>€</span></div>')}
@@ -866,8 +885,11 @@
       E.vista = "saldos";
       recuerda.guarda("patrimonio.editor", "saldos");
       return null;
-    });
-    rellena(f, v ? { ...v, valor: decimal(v.valor), aportado: decimal(v.aportado) } : { fecha: hoy() });
+    }, copia ? "Guardar valor" : "Guardar");
+    rellena(f, v
+      ? { ...v, valor: decimal(v.valor), aportado: decimal(v.aportado),
+          fecha: copia ? hoy() : v.fecha }
+      : { fecha: hoy() });
     f.elements.valor.focus();
   }
 
@@ -1211,6 +1233,7 @@
     borrarMov: soloPropio(borrarMov),
     nuevoValor: soloPropio(id => formValor(null, id)),
     editarValor: soloPropio(id => formValor(E.cfg.valoraciones.find(v => v.id === id))),
+    replicarValor: soloPropio(replicarValor),
     borrarValor: soloPropio(borrarValor),
     todosValores: soloPropio(todosValores),
     cargarPlantilla: soloPropio(() => { const i = $("#plantArchivo"); if (i) i.click(); }),
