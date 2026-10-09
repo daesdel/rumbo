@@ -67,10 +67,22 @@
     E.cfg = j.cartera;
     COP.lista = null;
     window.EDITOR_SUCIO = true;
+    avisa(j.avisos);
   }
+  /** Avisos que llegan del servidor al guardar o borrar. Se quedan pendientes
+      cuando aún no hay sitio para ellos: `pinta()` regenera la barra de avisos y
+      los re-pinta al terminar, que es justo cuando se ven (si no, se escribían
+      antes de repintar y `pinta()` los borraba sin que el usuario llegara a
+      verlos). */
+  let AVISOS_PEND = [];
   function avisa(avisos) {
+    AVISOS_PEND = (avisos || []).filter(Boolean);
+    pintaAvisos();
+  }
+  function pintaAvisos() {
     const el = $("#edAvisos");
-    if (el) el.innerHTML = (avisos || []).map(a => `<div class="av"><span>⚠</span><span>${esc(a)}</span></div>`).join("");
+    if (!el) return;                     // la vista aún no está montada: al repintar
+    el.innerHTML = AVISOS_PEND.map(a => `<div class="av"><span>⚠</span><span>${esc(a)}</span></div>`).join("");
   }
 
   /* ---------------------------------------------- ventana modal */
@@ -185,6 +197,9 @@
     if (E.vista === "saldos") conectaSaldos();
     const filtro = $("#edFiltro");
     if (filtro) filtro.onchange = e => { E.filtro = e.target.value; pinta(); };
+    // Los avisos que traía el guardado anterior: aquí es donde ya se ven.
+    pintaAvisos();
+    AVISOS_PEND = [];
   }
 
   /* ---------------------------------------------- productos */
@@ -392,12 +407,15 @@
       const original = m.monedaOriginal && m.monedaOriginal !== "EUR" && m.importeOriginal != null
         ? `${num(m.importeOriginal, 2)} ${esc(m.monedaOriginal)}` : "—";
       const etqCuenta = `${c ? c.nombre : "—"}${cp ? ` ⇄ ${cp.nombre}` : ""}`;
+      // Lo retenido y lo cobrado aparte, para poder consultarlo sin abrir el movimiento.
+      const aparte = [m.impuestos ? `Impuestos ${eur(m.impuestos)}` : "",
+                      m.comision ? `Comisión ${eur(m.comision)}` : ""].filter(Boolean).join(" · ");
       return `<tr><td>${fecha(m.fecha)}</td><td style="text-align:left">${p ? `<i class="pt" style="background:var(--s${p.slot || 1})"></i>` : ""}${esc(nombre(p))}</td>
         <td style="text-align:left">${esc(E.tiposMov[m.tipo] || m.tipo)}</td>
         <td style="text-align:left" class="subt" title="${esc(etqCuenta)}">${esc(etqCuenta)}</td>
         <td style="text-align:left">${esc(pr ? pr.nombre : (m.propietario || "—"))}</td>
         <td>${m.unidades ? num(m.unidades) : "—"}</td>
-        <td class="${m.tipo === "compra" || m.tipo === "comision" ? "" : "pos"}">${eur(m.importe)}</td>
+        <td class="${m.tipo === "compra" || m.tipo === "comision" ? "" : "pos"}"${aparte ? ` title="${esc(aparte)}"` : ""}>${eur(m.importe)}</td>
         <td class="subt">${original}</td>
         <td>${precio ? num(precio) + " €" : "—"}</td>
         <td class="nota" title="${esc(m.nota)}">${esc(m.nota || "")}</td>
@@ -425,7 +443,8 @@
     compra: "Lo que salió de tu cuenta, con las comisiones incluidas.",
     venta: "Lo que te ingresaron, ya descontadas las comisiones.",
     entrega: "Coste asignado a los títulos que entran (escisión o entrega). Si ha sido gratis, déjalo en 0.",
-    dividendo: "Lo que te ingresaron por el dividendo o el cupón.",
+    dividendo: "Lo que te ingresaron por el dividendo o el cupón, con la retención y las comisiones ya descontadas: es lo que llega a tu cuenta.",
+    interes: "Lo que te ingresaron por el interés, con la retención (si la hubo) ya descontada: es lo que llega a tu cuenta.",
     comision: "Comisiones sueltas, como la de custodia. Las de compra y venta ya van dentro de su importe.",
   };
   // Movimientos de una cuenta: pueden llevar contrapartida (la otra cuenta).
@@ -443,7 +462,7 @@
     cambio_divisa: "— Cuenta que cambia de divisa —",
     apertura: "— Cuenta que se abre —",
     saldo: "— Elige la cuenta —",
-    interes: "— Sin cuenta —", impuesto: "— Sin cuenta —", comision: "— Sin cuenta —",
+    interes: "— Elige la cuenta —", impuesto: "— Sin cuenta —", comision: "— Sin cuenta —",
   };
   const PISTA_CUENTA = {
     compra: "de qué cuenta sale el dinero",
@@ -453,6 +472,7 @@
     retirada: "cuenta de la que sale",
     transferencia: "de dónde sale", traspaso: "de dónde sale",
     cambio_divisa: "la cuenta en su moneda",
+    interes: "en qué cuenta has cobrado el interés",
   };
 
   /** Replicar: el mismo formulario con los datos copiados, pero como movimiento
@@ -507,6 +527,7 @@
         ${campo("Unidades", '<input name="unidades" inputmode="decimal" placeholder="0">', "participaciones, acciones…", "siUnid")}
         ${campo("Moneda", `<select name="moneda">${monedas.map(k => `<option value="${k}">${k}</option>`).join("")}</select>`, "del importe")}
         ${campo("Importe total", '<div class="conSufijo"><input name="importe" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "en la moneda elegida")}
+        ${campo("Impuestos retenidos", '<div class="conSufijo"><input name="impuestos" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "lo que retuvieron: el importe ya es lo que llega", "siImp")}
         ${campo("Coste salido de", `<select name="productoOrigen"><option value="">— Ninguno: es coste nuevo —</option>${cotizables.map(p =>
           `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`,
           "escisión: de qué activo se resta el coste", "ancho siEntrega")}
@@ -541,6 +562,7 @@
       contrapartida: m.contrapartida || "", productoOrigen: m.productoOrigen || "",
       moneda: monPorDef,
       fecha: copia ? hoy() : m.fecha,
+      impuestos: m.impuestos != null ? decimal(m.impuestos) : "",
       unidades: decimal(m.unidades || ""),
       importe: decimal(tcMov !== 1 && m.importeOriginal != null ? m.importeOriginal : m.importe),
       comision: decimal(m.comision != null && m.comision !== ""
@@ -564,7 +586,11 @@
       f.querySelectorAll(".conSufijo span").forEach(s => { s.textContent = suf; });
       const conUnid = t === "compra" || t === "venta" || t === "entrega";
       f.querySelector(".siUnid").hidden = !conUnid;
-      f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta");
+      // Impuestos y comisión en lo que los puede traer: compras, ventas,
+      // dividendos e intereses (en un dividendo o un interés, si los hay).
+      const esRenta = t === "dividendo" || t === "interes";
+      f.querySelector(".siImp").hidden = !esRenta;
+      f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta" || esRenta);
       // Una entrega entrante (escisión) no mueve dinero de ninguna cuenta.
       f.querySelector(".cuentaCampo").hidden = t === "entrega";
       f.querySelector(".siEntrega").hidden = t !== "entrega";
@@ -591,7 +617,8 @@
       vinMostrado = !!conVin;
       // Con la caja de unidades oculta, la del importe ocupa su hueco sin descuadrar la rejilla.
       $("#mAyuda").textContent = AYUDA_IMPORTE[t] + (p && manual(p) && t === "compra"
-        ? " Como este producto se valora a mano, las unidades son opcionales." : "");
+        ? " Como este producto se valora a mano, las unidades son opcionales." : "")
+        + (esRenta && cid ? ` El dinero entra en «${nombre(cuentaDe(cid))}»: su saldo sube en ese importe.` : "");
       const u = leeNum(f.elements.unidades.value), imp = leeNum(f.elements.importe.value);
       const com = leeNum(f.elements.comision.value) || 0;
       $("#mPrecio").textContent = t === "entrega" && u > 0
@@ -622,7 +649,7 @@
     const tarjetas = lista.map(p => {
       const vals = E.cfg.valoraciones.filter(v => v.producto === p.id).sort((a, b) => a.fecha < b.fecha ? 1 : -1);
       const conAportado = !soloSaldo(p);
-      const filas = vals.map(v => `<tr><td>${fecha(v.fecha)}</td><td>${eur(v.valor)}</td>
+      const filas = vals.map(v => `<tr><td>${fecha(v.fecha)}${v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo cobrado ese día en dividendos e intereses. Cámbialo o bórralo si tu banco dice otra cosa."> · calculado</span>` : ""}</td><td>${eur(v.valor)}</td>
         ${conAportado ? `<td>${v.aportado != null ? eur(v.aportado) : "—"}</td>` : ""}
         <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}" title="Cambiar este valor">Editar</button>
           <button data-acc="replicarValor" data-id="${esc(v.id)}" title="Anotar otro igual, sin tocar este">Replicar</button>

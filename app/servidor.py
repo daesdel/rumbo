@@ -994,8 +994,10 @@ def _importe_en_eur(datos):
 
 
 
-def cambia(fn):
-    """Aplica un cambio a la cartera, la guarda (con copia automática) y recalcula."""
+def cambia(fn, avisos_extra=None):
+    """Aplica un cambio a la cartera, la guarda (con copia automática) y recalcula.
+    `avisos_extra` es una lista que `fn` puede ir llenando para contarle algo al
+    usuario (p. ej. que una cuenta no tiene saldo de efectivo)."""
     if modo() == "demo":
         return jsonify(ok=False, errores=[AVISO_DEMO]), 403
     with cerrojo:
@@ -1007,7 +1009,94 @@ def cambia(fn):
             return jsonify(ok=False, errores=e.errores), 400
         almacen.guarda(ruta, cfg)
         datos = recalcula(descargar="faltan")
-    return jsonify(ok=True, item=item, cartera=cfg, avisos=(datos or {}).get("avisos", []))
+    return jsonify(ok=True, item=item, cartera=cfg,
+                   avisos=[*(datos or {}).get("avisos", []), *(avisos_extra or [])])
+
+
+# ---------------------------------------------------------------- efectivo de la cuenta
+# Un dividendo o un interés es dinero que ENTRA en la cuenta anotada: su saldo no
+# lo calcula el motor, se anota a mano en «Saldos y valores» (es el valor del
+# producto de efectivo vinculado a la cuenta), así que aquí hay que subirlo con lo
+# cobrado. El saldo escrito se marca con «auto» para distinguirlo de uno anotado a
+# mano, que manda siempre: es el real del banco y casi siempre ya incluye lo cobrado.
+TIPOS_QUE_ENTRAN = ("dividendo", "interes")
+
+
+def _importe_en_producto(cfg, mov):
+    """El dinero que este movimiento mete en su cuenta, en la moneda del producto
+    de efectivo de esa cuenta (ahí se guarda el saldo, en la moneda del producto)."""
+    p = almacen.producto_efectivo_de(cfg, mov.get("cuenta"))
+    if not p:
+        return None
+    mon = (p.get("moneda") or "EUR").upper()
+    eur = mov.get("importe")
+    if eur is None:
+        return None
+    if (mov.get("monedaOriginal") or "EUR").upper() == mon and mov.get("importeOriginal") is not None:
+        return float(mov["importeOriginal"])        # anotado en la moneda de la cuenta
+    if mon == "EUR":
+        return float(eur)                            # el importe guardado ya está en euros
+    tc = _tc_eur(mon, str(mov.get("fecha") or ""))
+    return round(float(eur) / tc, 6) if tc else None
+
+
+def refresca_efectivo(cfg, mov, avisos=None):
+    """Recalcula el saldo del día de un dividendo o un interés: suma lo cobrado
+    ese día por TODOS los dividendos e intereses de la cuenta, sobre el último
+    saldo anotado anterior. Como recalcula el día entero, corregir o borrar un
+    movimiento deja el saldo derecho. Devuelve True si ha tocado el saldo."""
+    tipo, cid, f = (mov or {}).get("tipo"), (mov or {}).get("cuenta"), (mov or {}).get("fecha")
+    if tipo not in TIPOS_QUE_ENTRAN or not cid or not f:
+        return False
+    p = almacen.producto_efectivo_de(cfg, cid)
+    if not p:
+        if avisos is not None:
+            c = almacen.cuenta(cfg, cid) or {}
+            avisos.append(f"«{c.get('nombre') or cid}» no tiene saldo de efectivo, así que este "
+                          "dinero no sube ningún saldo. Si quieres seguirlo, crea su cuenta de "
+                          "efectivo en «Productos».")
+        return False
+    vals = sorted((v for v in cfg.get("valoraciones", []) if v.get("producto") == p["id"]),
+                  key=lambda v: v["fecha"])
+    actual = next((v for v in vals if v["fecha"] == f), None)
+    if actual is not None and not actual.get("auto"):
+        # Saldo anotado a mano: es el real del banco (y casi siempre ya incluye lo
+        # cobrado ese día), así que no se toca… pero se avisa, para que no parezca
+        # que el movimiento no ha hecho nada.
+        if avisos is not None:
+            avisos.append(f"«{p.get('corto') or p.get('nombre')}» ya tiene un saldo anotado a mano "
+                          f"para el {almacen.fmt_fecha(f)}: no lo he tocado (es el real del banco "
+                          "y casi siempre ya incluye lo cobrado ese día).")
+        return False
+    movs = [m for m in cfg.get("movimientos", [])
+            if m.get("tipo") in TIPOS_QUE_ENTRAN and m.get("cuenta") == cid and m.get("fecha") == f]
+    suma, sin_cambio = 0.0, False
+    for m in movs:
+        x = _importe_en_producto(cfg, m)
+        if x is None:
+            sin_cambio = True
+        else:
+            suma += x
+    suma = round(suma, 2)
+    if suma <= 0:                       # no queda ninguno: el saldo auto se retira
+        if actual is not None:
+            almacen.borra_valoracion(cfg, actual["id"])
+        return True
+    # Un saldo anotado a mano DESPUÉS de esta fecha es posterior a lo cobrado y ya
+    # lo recoge (los movimientos se anotan cuando llega el extracto, a menudo con
+    # días de retraso): no se sube nada, para no meter en el histórico un punto
+    # calculado que ese saldo real contradice después.
+    if any(v["fecha"] > f and not v.get("auto") for v in vals):
+        return False
+    previo = next((v for v in reversed(vals) if v["fecha"] < f), None)
+    val = almacen.guarda_valoracion(cfg, {"producto": p["id"], "fecha": f,
+                                          "valor": round((float(previo["valor"]) if previo else 0.0) + suma, 2)})
+    val["auto"] = True
+    if sin_cambio and avisos is not None:
+        avisos.append(f"No encuentro el cambio a {p.get('moneda')} del "
+                      f"{almacen.fmt_fecha(f)}: el saldo de «{p.get('corto') or p.get('nombre')}» "
+                      "no se ha actualizado. Anótalo tú en «Saldos y valores».")
+    return True
 
 
 @app.post("/api/<coleccion>")
@@ -1015,10 +1104,27 @@ def api_guardar(coleccion):
     if coleccion not in GUARDAR:
         return jsonify(ok=False, errores=["No sé guardar eso."]), 404
     datos = request.get_json(silent=True) or {}
+    avisos = []
 
     def fn(cfg):
         if coleccion == "movimientos":
-            return GUARDAR[coleccion](cfg, _importe_en_eur(datos))
+            # Al corregir un dividendo o un interés puede cambiar su cuenta o su
+            # fecha: hay que refrescar el día nuevo y también el de antes. Se copia
+            # el movimiento ANTES de guardarlo: guarda_movimiento() modifica el mismo
+            # dict, y con la referencia lo «anterior» resultaría ser lo nuevo.
+            previo = None
+            if datos.get("id"):
+                m0 = next((m for m in cfg.get("movimientos", [])
+                           if m.get("id") == datos.get("id")), None)
+                previo = dict(m0) if m0 else None
+            mov = GUARDAR[coleccion](cfg, _importe_en_eur(datos))
+            # Primero el día que queda atrás (el movimiento ya no cuenta en él, así
+            # que su saldo se rehace sin él) y después el nuevo: al revés, el nuevo
+            # se apoyaría en un saldo que aún llevaba este movimiento y lo duplicaría.
+            if previo and (previo.get("cuenta"), previo.get("fecha")) != (mov.get("cuenta"), mov.get("fecha")):
+                refresca_efectivo(cfg, previo, avisos)
+            refresca_efectivo(cfg, mov, avisos)
+            return mov
         if coleccion != "productos":
             return GUARDAR[coleccion](cfg, datos)
         prod, cambio = almacen.guarda_producto(cfg, datos)
@@ -1028,14 +1134,24 @@ def api_guardar(coleccion):
                 f"No encuentro precio para «{prod['codigo']}» en {motor.FUENTES[prod['fuente']]}. "
                 "Revisa el código con el buscador o elige «a mano» y anota tú su valor."])
         return prod
-    return cambia(fn)
+    return cambia(fn, avisos)
 
 
 @app.delete("/api/<coleccion>/<ident>")
 def api_borrar(coleccion, ident):
     if coleccion not in BORRAR:
         return jsonify(ok=False, errores=["No sé borrar eso."]), 404
-    return cambia(lambda cfg: BORRAR[coleccion](cfg, ident))
+    avisos = []
+
+    def fn(cfg):
+        mov = None
+        if coleccion == "movimientos":
+            mov = next((m for m in cfg.get("movimientos", []) if m.get("id") == ident), None)
+        item = BORRAR[coleccion](cfg, ident)
+        # Borrado un dividendo o un interés, el dinero deja de estar en la cuenta.
+        refresca_efectivo(cfg, mov, avisos)
+        return item
+    return cambia(fn, avisos)
 
 
 @app.post("/api/repartir-colores")

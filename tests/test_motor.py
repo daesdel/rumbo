@@ -571,3 +571,59 @@ def test_comparacion_cuadra_con_el_patrimonio(tmp_path):
     assert c["tuValor"] == pytest.approx(datos["total"]["patrimonio"])
     ap = [x for x in c["aportado"] if x is not None]
     assert ap[-1] == pytest.approx(datos["total"]["aportado"])
+
+
+# ------------------- dividendos e intereses: retención y comisión en los KPI
+
+def test_interes_con_retencion_y_comision_se_cuenta_completo(tmp_path):
+    """Un interés anotado EN LA CUENTA (sin producto) entra neto en el saldo, pero
+    los KPI cuentan lo bruto: neto + retención + comisión. La declaración se mira
+    en «impuestos» y las comisiones en su propio contador."""
+    cfg = _fondo_y_cuenta(saldo=1045.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-01-01", "tipo": "deposito", "importe": 1000.0, "cuenta": "c1"},
+        {"id": "m3", "fecha": "2025-05-01", "tipo": "interes", "importe": 45.0, "cuenta": "c1",
+         "impuestos": 5.0, "comision": 1.0},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    assert datos["total"]["intereses"] == pytest.approx(51.0)      # 45 + 5 + 1
+    assert datos["total"]["impuestos"] == pytest.approx(5.0)
+    assert datos["comisiones"]["compraventaPagada"] == pytest.approx(1.0)
+    cuenta = datos["otrosActivos"][0]
+    assert cuenta["valor"] == pytest.approx(1045.0)      # el saldo sube solo lo neto
+    assert cuenta["aportado"] == pytest.approx(1000.0)   # 1.045 − 45 rendidos
+
+
+def test_dividendo_en_cuenta_sin_producto_entra_en_los_kpi(tmp_path):
+    """Lo mismo para un dividendo anotado solo en la cuenta: su retención y su
+    comisión no se pierden ni del KPI de dividendos ni del de impuestos."""
+    cfg = _fondo_y_cuenta(saldo=1012.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-01-01", "tipo": "deposito", "importe": 1000.0, "cuenta": "c1"},
+        {"id": "m3", "fecha": "2025-04-01", "tipo": "dividendo", "importe": 12.0, "cuenta": "c1",
+         "impuestos": 3.0, "comision": 0.5},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    assert datos["total"]["dividendos"] == pytest.approx(15.5)      # 12 + 3 + 0,5
+    assert datos["total"]["impuestos"] == pytest.approx(3.0)
+    assert datos["comisiones"]["compraventaPagada"] == pytest.approx(0.5)
+    cuenta = datos["otrosActivos"][0]
+    assert cuenta["valor"] == pytest.approx(1012.0)
+    assert cuenta["aportado"] == pytest.approx(1000.0)             # 1.012 − 12 rendidos
+
+
+def test_dividendo_de_un_producto_suma_el_bruto(tmp_path):
+    """El dividendo de un producto ya sumaba bruto (neto + retención + comisión);
+    se comprueba que sigue siendo así con todos los campos anotados."""
+    cfg = _fondo_y_cuenta(saldo=0.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-05-01", "tipo": "dividendo", "producto": "fondo",
+         "cuenta": "c1", "importe": 12.0, "impuestos": 3.0, "comision": 0.5},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    p = next(x for x in datos["productos"] if x["id"] == "fondo")
+    assert p["dividendos"] == pytest.approx(15.5)
+    assert p["impuestosPagados"] == pytest.approx(3.0)
+    assert datos["comisiones"]["compraventaPagada"] == pytest.approx(0.5)
+    assert datos["total"]["dividendos"] == pytest.approx(15.5)
+    assert datos["total"]["impuestos"] == pytest.approx(3.0)

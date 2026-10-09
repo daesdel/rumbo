@@ -554,9 +554,13 @@ def aplicar_movimientos(p, movs):
             comisiones += float(m.get("comision") or 0)
             impuestos_tot += ret
         elif t == "interes":
-            realizado += imp + ret
-            intereses += imp + ret
+            # Igual que el dividendo: lo anotado es lo NETO que llegó a la cuenta
+            # y lo que rindió (bruto) es neto + retención + comisión.
+            bruto = imp + ret + float(m.get("comision") or 0)
+            realizado += bruto
+            intereses += bruto
             flujos.append((f, imp))
+            comisiones += float(m.get("comision") or 0)
             impuestos_tot += ret
         elif t == "impuesto":
             realizado -= imp
@@ -1142,23 +1146,32 @@ def construir(cfg, carpeta, descargar=True):
     tir_total = r4(xirr(flujos_globales))
     realizado_total = round(sum(p.get("realizado") or 0 for p in productos), 2)
     dividendos_total = round(sum(p.get("dividendos") or 0 for p in productos), 2)
-    # Intereses, impuestos y comisiones anotados en una CUENTA y no en un producto
-    # (así los apunta Portfolio Performance: los de Trade Republic, MyInvestor, el
-    # monetario de Revolut…). Sin esto los KPI no cuadran con los de PP.
-    intereses_cuenta = impuestos_cuenta = comisiones_cuenta = 0.0
+    # Intereses, dividendos, impuestos y comisiones anotados en una CUENTA y no en
+    # un producto (así los apunta Portfolio Performance: los de Trade Republic,
+    # MyInvestor, el monetario de Revolut…). Sin esto los KPI no cuadran con PP.
+    intereses_cuenta = dividendos_cuenta = impuestos_cuenta = comisiones_cuenta = 0.0
     for m in cfg.get("movimientos", []):
         if m.get("producto"):
             continue                  # esos ya están contados en su producto
         t, imp = m.get("tipo"), float(m.get("importe") or 0)
         ret = float(m.get("impuestos") or 0)
-        if t == "interes":
-            intereses_cuenta += imp + ret
+        com = float(m.get("comision") or 0)
+        if t in ("interes", "dividendo"):
+            # El importe es lo neto que entró en la cuenta; lo bruto (lo que
+            # rindió) suma también la retención y la comisión que le quitaron.
+            bruto = imp + ret + com
+            if t == "interes":
+                intereses_cuenta += bruto
+            else:
+                dividendos_cuenta += bruto
             impuestos_cuenta += ret
+            comisiones_cuenta += com
         elif t == "impuesto":
             impuestos_cuenta += imp
         elif t == "comision":
             comisiones_cuenta += imp
     intereses_total = round(sum(p.get("intereses") or 0 for p in productos) + intereses_cuenta, 2)
+    dividendos_total = round(dividendos_total + dividendos_cuenta, 2)
     impuestos_total = round(sum(p.get("impuestosPagados") or 0 for p in productos) + impuestos_cuenta, 2)
 
     for p in productos + ser_otros + ser_pasivos:

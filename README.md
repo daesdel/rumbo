@@ -145,15 +145,40 @@ Todo está en la pestaña **Mis datos**.
 
 ¿No aparece o no tiene precio en internet (un plan de pensiones, un depósito, oro físico, un piso)? Créalo igual y elige **«Valor anotado a mano»** como fuente del precio.
 
-### Movimientos: compras, ventas, dividendos y comisiones
+### Movimientos: compras, ventas, dividendos, intereses y comisiones
 
 **Movimientos → «+ Añadir movimiento»**. Para cada operación:
 
-- **Unidades**: participaciones, acciones, onzas…
-- **Importe total en euros**: en una compra, **lo que salió de tu cuenta con las comisiones incluidas**; en una venta o un dividendo, lo que te ingresaron.
+- **Unidades**: participaciones, acciones, onzas… (no las llevan los movimientos de cuenta).
+- **Importe total**: en una compra, **lo que salió de tu cuenta con las comisiones incluidas**; en una venta, un dividendo o un interés, lo que te ingresaron (**ya con la retención y las comisiones descontadas: es lo que llega a tu cuenta**).
 - **Comisión** (opcional): solo informativa, porque ya va dentro del importe.
 
 Las ventas descuentan el coste por **FIFO** (primero lo más antiguo), como hace Hacienda.
+
+#### Dividendos
+
+- **Impuestos retenidos** y **Comisión** (los dos opcionales): van guardados aparte en
+  el movimiento, campo a campo, para que puedas consultar luego la retención de cada
+  año (declaración de la renta) sin tener que recalcular nada.
+- El panel suma el **bruto** = importe cobrado + retención + comisión, que es lo que
+  rindió de verdad; la retención aparece en «Impuestos» y la comisión en «Comisiones».
+- **Cuenta**: la que recibe el dinero. **El saldo de esa cuenta sube en lo cobrado**
+  si esa cuenta tiene su producto de **«Cuenta / efectivo»**.
+
+#### Intereses
+
+- **No hace falta producto**: el interés es sobre el capital que hay en la cuenta,
+  no sobre un activo. Basta con elegir **Cuenta** (y si no eliges ninguna, no hay
+  dónde cobrarlo).
+- También puede llevar **Impuestos retenidos** y, rara vez, **Comisión**, guardados en
+  sus propios campos igual que en un dividendo.
+- **El saldo de la cuenta sube en lo cobrado**, igual que con un dividendo.
+
+> **Saldo ya anotado a mano**: si para ese día ya tienes un saldo escrito en
+> «Saldos y valores», manda ese (es el real del banco y casi siempre ya incluye lo
+> cobrado): la app no lo suma dos veces y te lo dice. Y si hay un saldo anotado a mano
+> de un día posterior, el histórico tampoco cambia, porque ese saldo ya recoge lo que
+> llegó después.
 
 ### Cuentas, planes de pensiones, pisos… (valores anotados a mano)
 
@@ -190,11 +215,12 @@ Descarga la plantilla desde la app (**Excel** o **CSV**). Trae desplegables, una
 | `identificador` | Casi siempre | ISIN o ticker. Vacío solo en cuentas y cosas sin precio en internet. |
 | `nombre` | Si no hay identificador | Nombre del producto o de la cuenta. |
 | `tipo_producto` | No | `fondo`, `etf`, `accion`, `cripto`, `commodity`, `bono`, `pension`, `efectivo`, `inmueble`, `deuda` u `otro`. |
-| `tipo_movimiento` | Sí | `compra`, `venta`, `dividendo`, `comision` o `saldo` (el saldo de una cuenta en esa fecha). |
+| `tipo_movimiento` | Sí | `compra`, `venta`, `dividendo`, `interes`, `impuesto`, `comision` o `saldo` (el saldo de una cuenta en esa fecha). |
 | `unidades` | Recomendado | Si lo dejas vacío, se calculan con el precio de ese día. |
-| `importe` | Sí | Dinero total. Compra: lo que salió de tu cuenta, con comisiones. Venta o dividendo: lo que entró. |
+| `importe` | Sí | Dinero total. Compra: lo que salió de tu cuenta, con comisiones. Venta, dividendo o interés: lo que entró. |
 | `moneda` | No | Moneda del importe. Si no es EUR, se convierte con el cambio de ese día. |
 | `comision` | No | Comisión de la operación, ya incluida en el importe. |
+| `impuestos` | No | Retención de un dividendo o de un interés, ya descontada del importe. |
 | `nota` | No | Lo que quieras. |
 
 ### Con ayuda de una IA (cualquier extracto)

@@ -402,3 +402,58 @@ def test_tras_una_entrega_se_puede_vender_lo_recibido():
         "producto": "vylr", "fecha": "2025-10-01", "tipo": "venta",
         "unidades": 20, "importe": 500.0})
     assert m["tipo"] == "venta"
+
+
+# ------------------------------- dividendos e intereses: retención y comisión
+
+def test_un_dividendo_guarda_sus_impuestos_y_su_comision():
+    """El formulario puede indicar retención y comisión en un dividendo: se guardan
+    aparte, como números, porque el importe ya es lo que llega a la cuenta."""
+    cfg = _cfg_cuentas()
+    m = almacen.guarda_movimiento(cfg, {"fecha": "2025-04-01", "tipo": "dividendo",
+                                        "producto": "f", "cuenta": "efectivo",
+                                        "importe": 100, "impuestos": "19,5", "comision": 0.5})
+    assert m["impuestos"] == pytest.approx(19.5)
+    assert m["comision"] == pytest.approx(0.5)
+    assert m["importe"] == pytest.approx(100)      # el importe no se toca
+    # vaciando los campos se borran: no se queda el valor viejo
+    m2 = almacen.guarda_movimiento(cfg, {"id": m["id"], "fecha": "2025-04-01", "tipo": "dividendo",
+                                         "producto": "f", "cuenta": "efectivo",
+                                         "importe": 100, "impuestos": "", "comision": ""})
+    assert "impuestos" not in m2 and "comision" not in m2
+
+
+def test_los_impuestos_no_validos_no_se_guardan():
+    cfg = _cfg_cuentas()
+    for malo in ("abc", -5):
+        with pytest.raises(almacen.ErrorValidacion):
+            almacen.guarda_movimiento(cfg, {"fecha": "2025-04-01", "tipo": "interes",
+                                            "cuenta": "efectivo", "importe": 10,
+                                            "impuestos": malo})
+    assert not cfg["movimientos"]
+
+
+def test_un_interes_no_necesita_producto_si_tiene_cuenta():
+    """El interés es sobre el capital que hay en la cuenta: sin producto se anota,
+    y sin cuenta y sin producto no hay dónde cobrarlo."""
+    cfg = _cfg_cuentas()
+    m = almacen.guarda_movimiento(cfg, {"fecha": "2025-04-01", "tipo": "interes",
+                                        "cuenta": "efectivo", "importe": 12.5, "impuestos": 3})
+    assert "producto" not in m and m["cuenta"] == "efectivo"
+    assert m["impuestos"] == pytest.approx(3)
+    with pytest.raises(almacen.ErrorValidacion):
+        almacen.guarda_movimiento(cfg, {"fecha": "2025-04-02", "tipo": "interes", "importe": 3})
+
+
+def test_producto_efectivo_de_encuentra_el_saldo_de_la_cuenta():
+    cfg = _cfg_cuentas()
+    assert almacen.producto_efectivo_de(cfg, "efectivo") is None
+    assert almacen.producto_efectivo_de(cfg, "que_no_existe") is None
+    assert almacen.producto_efectivo_de(cfg, None) is None
+    cfg["productos"].append({"id": "cash", "nombre": "Caja", "corto": "Caja", "tipo": "efectivo",
+                             "fuente": "manual", "moneda": "EUR", "cuenta": "efectivo"})
+    assert almacen.producto_efectivo_de(cfg, "efectivo")["id"] == "cash"
+    # una deuda (pasivo) no es el efectivo de la cuenta
+    cfg["productos"].append({"id": "debe", "nombre": "Deuda", "corto": "Deuda", "tipo": "deuda",
+                             "fuente": "manual", "moneda": "EUR", "cuenta": "efectivo"})
+    assert almacen.producto_efectivo_de(cfg, "efectivo")["id"] == "cash"

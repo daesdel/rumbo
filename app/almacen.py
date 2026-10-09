@@ -394,6 +394,10 @@ def guarda_movimiento(cfg, datos):
     comision = numero(datos.get("comision"), "la comisión", errores, obligatorio=False, minimo=0)
     if comision and importe and comision >= importe:
         errores.append("La comisión no puede ser mayor que el importe total.")
+    # Lo que retuvieron por impuestos (retención de un dividendo, del interés…).
+    # Va aparte del importe: el importe ya es lo que LLEGA a tu cuenta, y de este
+    # campo se sirve el motor para contar la rentabilidad bruta y lo pagado.
+    impuestos = numero(datos.get("impuestos"), "los impuestos", errores, obligatorio=False, minimo=0)
     if not errores and tipo == "venta" and cotiza and unidades:
         tenias = unidades_a(cfg, p["id"], f, excluir=datos.get("id"))
         if unidades > tenias + 1e-6:
@@ -414,7 +418,7 @@ def guarda_movimiento(cfg, datos):
     if cid:
         mov["cuenta"] = cid
     for k in CAMPOS_MOV_EXTRA:
-        if k in ("cuenta", "producto", "contrapartida"):
+        if k in ("cuenta", "producto", "contrapartida", "impuestos"):
             continue
         v = origen if k == "productoOrigen" else datos.get(k)
         if v not in (None, ""):
@@ -423,6 +427,8 @@ def guarda_movimiento(cfg, datos):
         mov["contrapartida"] = cp
     if comision:
         mov["comision"] = round(comision, 2)
+    if impuestos:
+        mov["impuestos"] = round(impuestos, 2)
     if texto(datos.get("nota")):
         mov["nota"] = texto(datos.get("nota"))
     lista = cfg.setdefault("movimientos", [])
@@ -456,6 +462,15 @@ def guarda_movimiento(cfg, datos):
 CAMPOS_MOV_EXTRA = ("cuenta", "contrapartida", "propietario", "importeOriginal",
                     "monedaOriginal", "tipoCambio", "impuestos", "origen", "fuente", "urlFuente",
                     "productoOrigen")
+
+
+def producto_efectivo_de(cfg, cid):
+    """El producto de efectivo cuyo valor ES el saldo de una cuenta (los que se
+    anotan a mano en «Saldos y valores»). None si esa cuenta no lleva saldo."""
+    if not cid:
+        return None
+    return next((p for p in cfg.get("productos", [])
+                 if p.get("tipo") == "efectivo" and p.get("cuenta") == cid), None)
 
 
 def borra_movimiento(cfg, mid):

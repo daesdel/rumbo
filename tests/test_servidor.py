@@ -582,3 +582,190 @@ def test_no_se_puede_anotar_en_dolares_sin_cambio_conocido(cliente, monkeypatch)
         assert not s.lee_json(ruta)["movimientos"]   # no se guarda nada a medias
     finally:
         _restaura_estados(ruta, cartera_antes, calc, calc_antes)
+
+
+# ------------------------- dividendos e intereses: el efectivo de la cuenta sube
+
+def _cartera_efectivo():
+    """Una cuenta con su producto de efectivo (ahí se guarda su saldo) y un fondo."""
+    return {
+        "titular": "Prueba",
+        "cuentas": [{"id": "c1", "nombre": "Banco", "moneda": "EUR"}],
+        "productos": [{"id": "f1", "nombre": "Fondo", "corto": "Fondo", "tipo": "fondo",
+                       "fuente": "manual", "moneda": "EUR"},
+                      {"id": "cash", "nombre": "Banco", "corto": "Banco", "tipo": "efectivo",
+                       "fuente": "manual", "moneda": "EUR", "cuenta": "c1"}],
+        "movimientos": [],
+        "valoraciones": [{"id": "v1", "producto": "cash", "fecha": "2025-06-01", "valor": 1000.0}],
+    }
+
+
+def _valor_de(cfg, fecha):
+    v = next((x for x in cfg["valoraciones"] if x["fecha"] == fecha), None)
+    return (v["valor"], v.get("auto")) if v else (None, None)
+
+
+def test_un_dividendo_sube_el_efectivo_de_la_cuenta():
+    cfg = _cartera_efectivo()
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "producto": "f1",
+           "cuenta": "c1", "importe": 25.0}
+    cfg["movimientos"].append(mov)
+    avisos = []
+    assert s.refresca_efectivo(cfg, mov, avisos) is True
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1025.0), True)
+    assert avisos == []
+
+
+def test_un_interes_sin_producto_tambien_sube_el_efectivo():
+    """El interés es sobre el capital de la cuenta: no hace falta producto y el
+    saldo de esa cuenta sube en lo cobrado."""
+    cfg = _cartera_efectivo()
+    mov = {"id": "m1", "fecha": "2025-06-20", "tipo": "interes", "cuenta": "c1", "importe": 7.5}
+    cfg["movimientos"].append(mov)
+    assert s.refresca_efectivo(cfg, mov) is True
+    assert _valor_de(cfg, "2025-06-20") == (pytest.approx(1007.5), True)
+
+
+def test_varios_del_mismo_dia_y_borrado_dejan_el_saldo_derecho():
+    cfg = _cartera_efectivo()
+    m1 = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c1", "importe": 10.0}
+    m2 = {"id": "m2", "fecha": "2025-06-10", "tipo": "interes", "cuenta": "c1", "importe": 5.0}
+    cfg["movimientos"] += [m1, m2]
+    s.refresca_efectivo(cfg, m1)
+    s.refresca_efectivo(cfg, m2)                # recalcula el día entero: sin duplicar
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1015.0), True)
+
+    cfg["movimientos"] = [m1]                   # borrado uno, el día se rehace solo
+    s.refresca_efectivo(cfg, m2)
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1010.0), True)
+
+    cfg["movimientos"] = []                     # sin ninguno, el saldo auto se retira
+    s.refresca_efectivo(cfg, m1)
+    assert _valor_de(cfg, "2025-06-10") == (None, None)
+
+
+def test_no_toca_un_saldo_anotado_a_mano():
+    """Si ese día ya hay un saldo escrito a mano es el real del banco: no se le
+    suma nada (casi siempre ya incluye lo cobrado), pero se avisa."""
+    cfg = _cartera_efectivo()
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash", "fecha": "2025-06-10", "valor": 1003.0})
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c1", "importe": 25.0}
+    cfg["movimientos"].append(mov)
+    avisos = []
+    assert s.refresca_efectivo(cfg, mov, avisos) is False
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1003.0), None)
+    assert avisos and "anotado a mano" in avisos[0]
+
+
+def test_un_saldo_manual_posterior_deja_el_historico_como_esta():
+    """Un movimiento antiguo no sube nada si después hay un saldo anotado a mano:
+    ese saldo real ya recoge lo cobrado (los movimientos llegan con el extracto) y
+    meter un punto calculado dejaría el histórico contradiciéndose."""
+    cfg = _cartera_efectivo()
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash", "fecha": "2025-06-20", "valor": 1040.0})
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c1", "importe": 25.0}
+    cfg["movimientos"].append(mov)
+    avisos = []
+    assert s.refresca_efectivo(cfg, mov, avisos) is False
+    assert not any(v["fecha"] == "2025-06-10" for v in cfg["valoraciones"])
+    assert avisos == []                      # es lo normal: no hay nada que avisar
+
+
+def test_un_dividendo_se_apoya_en_el_ultimo_saldo_anotado():
+    """El flujo normal: hay un saldo anotado a mano más reciente y después entra
+    un dividendo → el nuevo saldo sale de ese más lo cobrado, sin tocar los otros."""
+    cfg = _cartera_efectivo()
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash", "fecha": "2025-06-08", "valor": 1010.0})
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c1", "importe": 25.0}
+    cfg["movimientos"].append(mov)
+    assert s.refresca_efectivo(cfg, mov) is True
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1035.0), True)   # 1.010 + 25
+    assert _valor_de(cfg, "2025-06-08") == (pytest.approx(1010.0), None)   # el de antes, intacto
+
+
+def test_sin_producto_de_efectivo_no_sube_nada_y_lo_cuenta():
+    cfg = _cartera_efectivo()
+    cfg["cuentas"].append({"id": "c2", "nombre": "Revolut", "moneda": "USD"})
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c2", "importe": 3.0}
+    cfg["movimientos"].append(mov)
+    avisos = []
+    assert s.refresca_efectivo(cfg, mov, avisos) is False
+    assert len(cfg["valoraciones"]) == 1
+    assert avisos and "Revolut" in avisos[0] and "efectivo" in avisos[0]
+
+
+def test_el_importe_se_pasa_a_la_moneda_de_la_cuenta(monkeypatch):
+    cfg = _cartera_efectivo()
+    cfg["cuentas"].append({"id": "c2", "nombre": "Dólares", "moneda": "USD"})
+    cfg["productos"].append({"id": "cash_usd", "nombre": "Dólares", "corto": "Dólares",
+                             "tipo": "efectivo", "fuente": "manual", "moneda": "USD", "cuenta": "c2"})
+    # anotado en la moneda de la cuenta: se usa el importe original, sin convertir
+    en_usd = {"cuenta": "c2", "fecha": "2025-06-10", "importe": 92.0,
+              "monedaOriginal": "USD", "importeOriginal": 100.0}
+    assert s._importe_en_producto(cfg, en_usd) == pytest.approx(100.0)
+    # anotado en euros: se pasa con el cambio del día
+    monkeypatch.setattr(s, "_tc_eur", lambda mon, f: 1.10)
+    en_eur = {"cuenta": "c2", "fecha": "2025-06-10", "importe": 92.0}
+    assert s._importe_en_producto(cfg, en_eur) == pytest.approx(92.0 / 1.10)
+    # sin cambio conocido no se inventa nada
+    monkeypatch.setattr(s, "_tc_eur", lambda mon, f: None)
+    assert s._importe_en_producto(cfg, en_eur) is None
+
+
+def test_api_un_interes_sube_el_saldo_y_borrarlo_lo_quita(cliente, monkeypatch):
+    """De punta a punta: anotar un interés desde el formulario sube el saldo de la
+    cuenta (y se guarda su retención); borrar el movimiento retira ese saldo."""
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda mon, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    try:
+        s.escribe_json(ruta, _cartera_efectivo())
+        r, j = _post_mov(cliente, tipo="interes", producto="", cuenta="c1",
+                         importe="12", moneda="EUR", comision="", unidades="",
+                         impuestos="3,5")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        m = j["item"]
+        assert "producto" not in m and m["cuenta"] == "c1"
+        assert m["impuestos"] == pytest.approx(3.5)
+        assert _valor_de(j["cartera"], "2025-06-20") == (pytest.approx(1012.0), True)
+
+        r2 = cliente.delete(f"/api/movimientos/{m['id']}")
+        assert r2.status_code == 200, r2.get_data(as_text=True)
+        assert _valor_de(r2.get_json()["cartera"], "2025-06-20") == (None, None)
+        assert len(s.lee_json(ruta)["valoraciones"]) == 1
+    finally:
+        _restaura_estados(ruta, cartera_antes, calc, calc_antes)
+
+
+def test_api_al_mover_un_interes_el_dia_viejo_se_rehace(cliente, monkeypatch):
+    """Si al corregir un interés le cambias la fecha, el saldo del día anterior deja
+    de contarlo y el día nuevo lo recoge: no se queda ningún saldo huérfano."""
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda mon, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    try:
+        s.escribe_json(ruta, _cartera_efectivo())
+        r, j = _post_mov(cliente, tipo="interes", producto="", cuenta="c1",
+                         importe="25", moneda="EUR", comision="", unidades="")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert _valor_de(j["cartera"], "2025-06-20") == (pytest.approx(1025.0), True)
+
+        r2, j2 = _post_mov(cliente, id=j["item"]["id"], tipo="interes", producto="",
+                           cuenta="c1", importe="25", moneda="EUR", fecha="2025-06-22",
+                           comision="", unidades="")
+        assert r2.status_code == 200, r2.get_data(as_text=True)
+        vals = {v["fecha"]: v for v in j2["cartera"]["valoraciones"] if v["producto"] == "cash"}
+        assert "2025-06-20" not in vals                 # el día que quedó vacío se retira
+        assert vals["2025-06-22"]["valor"] == pytest.approx(1025.0)   # y el nuevo sube
+    finally:
+        _restaura_estados(ruta, cartera_antes, calc, calc_antes)
