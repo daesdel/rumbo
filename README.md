@@ -178,9 +178,14 @@ Las ventas descuentan el coste por **FIFO** (primero lo más antiguo), como hace
 #### El efectivo de una cuenta
 
 - **Lo que mueve dinero en una cuenta** —dividendo, interés, **depósito** (entra),
-  **retirada** (sale) y **transferencia** entre tus cuentas (sale de una y entra en la
-  otra)— recalcula el saldo de ese día: último saldo anotado anterior + lo que entró
-  y lo que salió. Al corregir o borrar el movimiento, el día se rehace entero.
+  **retirada** (sale), **transferencia** entre tus cuentas (sale de una y entra en la
+  otra) y también **compra** (sale: la cuenta que paga), **venta** (entra),
+  **comisión** e **impuesto** (salen)— recalcula el saldo de ese día: último saldo
+  anotado anterior + lo que entró y lo que salió. Al corregir o borrar el movimiento,
+  el día se rehace entero. En una compra o una venta con **cuenta contrapartida**, el
+  dinero lo mueve solo la contrapartida (es la que desembolsa o cobra).
+  Las cuentas creadas antes de este modelo tenían su saldo sin preparar: al arrancar
+  se le crea a cada cuenta su producto de efectivo, sin tocar ningún total.
 - **Saldo anotado a mano para ese día**: manda el tuyo (es el real del banco y casi
   siempre ya incluye ese dinero), así que **no se le suma ni se le quita nada**, pero
   tampoco se esconde: la app te avisa con **las dos cifras** (lo anotado ese día y a
@@ -191,6 +196,27 @@ Las ventas descuentan el coste por **FIFO** (primero lo más antiguo), como hace
 - **Cuentas sin saldo anotado**: la tabla **Cuentas** enseña «—» mientras no haya
   nada anotado (no «0,00», que diría que está vacía); en cuanto anotas un movimiento
   de dinero, se crea su saldo y empieza a subir y a bajar.
+
+### Cuentas: dónde está tu dinero
+
+**Mis datos → Cuentas** es la casa de tus cuentas. La lista enseña cada una con su
+**saldo** (y el día del último saldo anotado, con lo que ese día no está sumado en él),
+su moneda, su propietario y sus **últimos movimientos**.
+
+- **«Abrir ficha»** abre la cuenta entera: su **serie de saldos**, **todos sus
+  movimientos** con el dinero que mueven (columna **«Dinero»**: con «+» entra en esa
+  cuenta, con «−» sale y «—» es que no la toca: p. ej. una compra pagada desde otra
+  cuenta), y los botones para **anotar un saldo** o **anotar un movimiento** con esa
+  cuenta ya elegida.
+- Desde la tabla **Cuentas** del panel, **pulsa el nombre de una cuenta** y te lleva
+  directo a su ficha (así REVOLUT_EUR y demás dejan de estar escondidas).
+- En **Movimientos**, el desplegable **«Todas las cuentas»** filtra por cuenta.
+- **«+ Añadir cuenta»** crea una cuenta (nombre, tipo, moneda, entidad, propietario);
+  al guardar se le hace su saldo de efectivo, que es donde se anota su dinero.
+- Cada cuenta de efectivo tiene **exactamente un producto de «Cuenta / efectivo»**
+  vinculado: la cuenta guarda la identidad y el producto guarda la serie de saldos.
+  Los avisos de «Mis datos» se quedan en pantalla hasta que los cierras con su «×»
+  —o con **«Cerrar los N avisos»** cuando hay varios— o cambias de pestaña.
 
 ### Cuentas, planes de pensiones, pisos… (valores anotados a mano)
 

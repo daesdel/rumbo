@@ -25,7 +25,9 @@ TIPOS_MOV = {"compra": "Compra", "venta": "Venta", "entrega": "Entrega entrante"
 MOV_SIN_PRODUCTO = ("deposito", "retirada", "transferencia", "traspaso", "saldo",
                     "cambio_divisa", "apertura", "interes", "impuesto", "comision")
 SOLO_SALDO = ("efectivo", "deuda")   # tipos que se siguen solo con saldos anotados
-TIPOS_CUENTA = ("efectivo", "banco", "broker", "fondo", "pension", "cripto", "otro")
+TIPOS_CUENTA = {"efectivo": "Efectivo", "banco": "Banco", "broker": "Bróker",
+                "fondo": "Fondo / gestión", "pension": "Plan de pensiones",
+                "cripto": "Cripto", "otro": "Otro"}
 PROPIETARIOS_BASE = [{"id": "david", "nombre": "David"},
                      {"id": "gina", "nombre": "Gina"},
                      {"id": "compartido", "nombre": "Compartido"}]
@@ -270,12 +272,19 @@ def guarda_cuenta(cfg, datos):
              "entidad": texto(datos.get("entidad"))}
     if prop:
         nuevo["propietario"] = prop
+    # Invariante del modelo cuentas/valores: una CUENTA es un contenedor de dinero
+    # y su dinero vive en su producto de efectivo vinculado (1:1), que es donde se
+    # anota y donde sube. Sin él la cuenta existe pero su saldo no aparece en ningún
+    # sitio, que era justo el problema de REVOLUT_EUR y otras. Al crearla (y al
+    # actualizar una que no lo tuviera) se le hace su producto.
     if existente:
         existente.update(nuevo)
+        crea_producto_efectivo(cfg, existente["id"])
         return existente
     destino = {"id": slug(nombre, {c["id"] for c in cfg.get("cuentas", [])})}
     destino.update(nuevo)
     cfg.setdefault("cuentas", []).append(destino)
+    crea_producto_efectivo(cfg, destino["id"])
     return destino
 
 
@@ -491,6 +500,23 @@ def crea_producto_efectivo(cfg, cid):
         "entidad": c.get("entidad") or "", "propietario": c.get("propietario") or "",
         "largoPlazo": True})
     return prod
+
+
+def migra_efectivo(cfg):
+    """Invariante al cargar: TODA cuenta de efectivo tiene su producto de efectivo
+    vinculado (1:1), creado al crear la cuenta. Las carteras hechas antes de este
+    modelo se quedan sin él (10 de las 17 cuentas de producción no lo tenían) y su
+    dinero no aparecía ni podía subir. Idempotente: solo crea los que faltan y no
+    toca saldos ni movimientos, así que los totales no cambian.
+    Devuelve la lista de productos creados."""
+    creados = []
+    for c in cfg.get("cuentas", []):
+        if producto_efectivo_de(cfg, c.get("id")):
+            continue
+        p = crea_producto_efectivo(cfg, c.get("id"))
+        if p:
+            creados.append(p["id"])
+    return creados
 
 
 def borra_movimiento(cfg, mid):

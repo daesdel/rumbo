@@ -925,7 +925,7 @@ def api_producto_actualizar(pid):
 @app.get("/api/cartera")
 def api_cartera():
     return jsonify(modo=modo(), cartera=cartera(), tipos=motor.TIPOS, fuentes=motor.FUENTES,
-                   tiposMovimiento=almacen.TIPOS_MOV)
+                   tiposCuenta=almacen.TIPOS_CUENTA, tiposMovimiento=almacen.TIPOS_MOV)
 
 
 @app.get("/api/buscar")
@@ -936,7 +936,7 @@ def api_buscar():
 
 
 GUARDAR = {"productos": almacen.guarda_producto, "movimientos": almacen.guarda_movimiento,
-           "valoraciones": almacen.guarda_valoracion}
+           "valoraciones": almacen.guarda_valoracion, "cuentas": almacen.guarda_cuenta}
 BORRAR = {"productos": almacen.borra_producto, "movimientos": almacen.borra_movimiento,
           "valoraciones": almacen.borra_valoracion}
 AVISO_DEMO = ("Estás viendo la cartera de ejemplo. Pulsa «Empezar con mis datos» "
@@ -1003,6 +1003,9 @@ def cambia(fn, avisos_extra=None):
     with cerrojo:
         ruta = os.path.join(DATOS, "cartera.json")
         cfg = almacen.carga(ruta)
+        # Invariante cuentas/valores: cada cuenta con su producto de efectivo (1:1).
+        # Se aplica también aquí para que cualquier cambio lo deje cumplido.
+        almacen.migra_efectivo(cfg)
         try:
             item = fn(cfg)
         except almacen.ErrorValidacion as e:
@@ -1107,7 +1110,7 @@ def _refresca_cuenta(cfg, cid, f, avisos=None):
                 f"{_dinero(actual['valor'])} {mon}. No lo he tocado (es el real del banco y casi "
                 "siempre ya incluye ese dinero), pero no lo escondo: ese día tienes "
                 f"{'un movimiento' if uno else f'{q} movimientos'} de dinero ({tipos}) que "
-                f"{'no está' if uno else 'no están'} sumado{'s' if uno else ''} en ese saldo: "
+                f"{'no está' if uno else 'no están'} sumado{'' if uno else 's'} en ese saldo: "
                 f"{cifra} {mon}. Si tu saldo era anterior, "
                 f"{'súbelo' if neto >= 0 else 'bájalo'} a {nuevo} {mon} en «Saldos y valores».")
         return False
@@ -1640,6 +1643,21 @@ def main():
 
     # Datos con permisos de solo-dueño (los de antes de esta versión incluidos).
     protege_datos()
+
+    # Modelo cuentas/valores: si la cartera es de antes, se le crea a cada cuenta su
+    # producto de efectivo (1:1) y se guarda. Solo añade productos vacíos, así que
+    # los totales del panel no cambian; sin esto, el dinero de esas cuentas no
+    # aparecía en ningún sitio ni podía subir al anotarle un movimiento.
+    if modo() == "propio":
+        try:
+            ruta = os.path.join(DATOS, "cartera.json")
+            cfg = almacen.carga(ruta)
+            creados = almacen.migra_efectivo(cfg)
+            if creados:
+                almacen.guarda(ruta, cfg)
+                print(f"  Cuentas con saldo nuevo preparado: {len(creados)} productos de efectivo creados.")
+        except Exception as e:
+            print(f"  [!] No he podido preparar el efectivo de las cuentas: {e}")
 
     # Si la app ya está abierta (otra ventana), basta con enseñarla.
     if ya_abierta(PUERTO):

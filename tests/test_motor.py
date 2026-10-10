@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from app import motor
+from app import almacen, motor
 
 
 # ---------------------------------------------------------------- números
@@ -340,6 +340,21 @@ def test_el_panel_ensena_lo_anotado_que_el_saldo_a_mano_no_suma(tmp_path):
     assert datos["cuentas"][0]["pendiente"] is None
 
 
+def test_el_panel_ensena_la_compra_que_el_saldo_a_mano_no_suma(tmp_path):
+    """El mismo criterio que con los intereses vale para las compras, ventas,
+    comisiones e impuestos: si el último saldo está anotado a mano y ese día has
+    comprado, ese dinero no está en él y sale al lado, no desaparece."""
+    cfg = _fondo_y_cuenta(saldo=600.0)
+    cfg["movimientos"].append({"id": "m4", "fecha": "2025-06-01", "producto": "fondo",
+                               "tipo": "compra", "unidades": 1, "importe": 500.0,
+                               "cuenta": "c1"})
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    c = datos["cuentas"][0]
+    assert c["saldo"] == pytest.approx(600.0)               # manda el saldo a mano
+    assert c["pendiente"]
+    assert c["pendiente"]["importe"] == pytest.approx(-500.0)   # dinero que salió
+
+
 def test_cuenta_sin_saldo_anotado_se_ensena_desconocida(tmp_path):
     """Una cuenta cuyo saldo no se ha anotado nunca no lleva «0,00» (eso diría que
     está vacía): se enseña «—», que es la verdad."""
@@ -642,6 +657,28 @@ def test_dividendo_en_cuenta_sin_producto_entra_en_los_kpi(tmp_path):
     cuenta = datos["otrosActivos"][0]
     assert cuenta["valor"] == pytest.approx(1012.0)
     assert cuenta["aportado"] == pytest.approx(1000.0)             # 1.012 − 12 rendidos
+
+
+def test_migrar_las_cuentas_no_cambia_los_totales(tmp_path):
+    """La migración del modelo cuentas/valores (cada cuenta con su producto de
+    efectivo) solo añade productos vacíos: patrimonio, aportado y ganancia no se
+    mueven, y una cuenta sin saldo anotado sigue enseñando «—» (no «0,00»)."""
+    cfg = _fondo_y_cuenta(saldo=1050.0)
+    cfg["cuentas"] += [{"id": "c2", "nombre": "Revolut", "moneda": "USD"},
+                       {"id": "c3", "nombre": "Plan 2040", "tipo": "pension", "moneda": "EUR"}]
+    antes = motor.construir(copy.deepcopy(cfg), str(tmp_path), descargar=False)
+
+    creados = almacen.migra_efectivo(cfg)
+    assert len(creados) == 2 and almacen.migra_efectivo(cfg) == []      # solo los que faltaban
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+
+    for k in ("patrimonio", "aportado", "plusvalia"):
+        assert datos["total"][k] == pytest.approx(antes["total"][k])
+    assert datos["total"]["dividendos"] == pytest.approx(antes["total"]["dividendos"])
+    por_id = {c["id"]: c for c in datos["cuentas"]}
+    assert por_id["c2"]["saldo"] is None and por_id["c3"]["saldo"] is None
+    assert por_id["c1"]["saldo"] == pytest.approx(1050.0)
+    assert datos["avisos"] == antes["avisos"]
 
 
 def test_dividendo_de_un_producto_suma_el_bruto(tmp_path):

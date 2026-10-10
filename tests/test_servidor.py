@@ -705,6 +705,76 @@ def test_una_transferencia_mueve_las_dos_cuentas():
     assert valor("cash2", "2025-06-01") == (pytest.approx(300.0), None)
 
 
+def test_una_compra_baja_el_efectivo_de_la_cuenta_que_la_paga():
+    """Compras, ventas, comisiones e impuestos también mueven dinero: el modelo
+    ancla + libro antes solo miraba intereses, dividendos, depósitos y retiradas,
+    y era el hueco principal (comprar no bajaba el saldo de nadie)."""
+    cfg = _cartera_efectivo()
+    comp = {"id": "m1", "fecha": "2025-06-10", "tipo": "compra", "producto": "f1",
+            "cuenta": "c1", "unidades": 1, "importe": 500.0}
+    cfg["movimientos"].append(comp)
+    assert s.refresca_efectivo(cfg, comp) is True
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(500.0), True)   # 1.000 − 500
+
+    # Borrada, el día se rehace entero y el saldo vuelve a estar como estaba.
+    cfg["movimientos"] = []
+    s.refresca_efectivo(cfg, comp)
+    assert not any(v["fecha"] == "2025-06-10" for v in cfg["valoraciones"])
+
+
+def test_en_una_compra_con_contrapartida_el_dinero_lo_saca_la_que_paga():
+    """Si la compra trae contrapartida, el dinero lo desembolsa esa cuenta (es la
+    cuenta corriente que paga; «cuenta» es donde guardas el activo): solo baja su
+    saldo, no el de las dos."""
+    cfg = _cartera_efectivo()
+    cfg["cuentas"].append({"id": "c2", "nombre": "Ahorro", "moneda": "EUR"})
+    cfg["productos"].append({"id": "cash2", "nombre": "Ahorro", "corto": "Ahorro",
+                             "tipo": "efectivo", "fuente": "manual", "moneda": "EUR", "cuenta": "c2"})
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash2", "fecha": "2025-06-01", "valor": 300.0})
+    comp = {"id": "m1", "fecha": "2025-06-10", "tipo": "compra", "producto": "f1",
+            "cuenta": "c1", "contrapartida": "c2", "unidades": 1, "importe": 150.0}
+    cfg["movimientos"].append(comp)
+    s.refresca_efectivo(cfg, comp)
+
+    def valor(pid, f):
+        v = next((v for v in cfg["valoraciones"] if v["producto"] == pid and v["fecha"] == f), None)
+        return (v["valor"], v.get("auto")) if v else (None, None)
+
+    assert valor("cash2", "2025-06-10") == (pytest.approx(150.0), True)   #   300 − 150: paga ella
+    assert valor("cash", "2025-06-10") == (None, None)                    # la otra, ni se entera
+    assert valor("cash", "2025-06-01") == (pytest.approx(1000.0), None)   # su ancla, intacta
+
+
+def test_una_venta_sube_el_efectivo_y_comision_e_impuesto_lo_bajan():
+    cfg = _cartera_efectivo()
+    ven = {"id": "m1", "fecha": "2025-06-10", "tipo": "venta", "producto": "f1",
+           "cuenta": "c1", "unidades": 1, "importe": 700.0}
+    cfg["movimientos"].append(ven)
+    assert s.refresca_efectivo(cfg, ven) is True
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1700.0), True)  # 1.000 + 700
+
+    com = {"id": "m2", "fecha": "2025-06-12", "tipo": "comision", "cuenta": "c1", "importe": 2.5}
+    imp = {"id": "m3", "fecha": "2025-06-12", "tipo": "impuesto", "cuenta": "c1", "importe": 10.0}
+    cfg["movimientos"] += [com, imp]
+    s.refresca_efectivo(cfg, com)
+    s.refresca_efectivo(cfg, imp)
+    assert _valor_de(cfg, "2025-06-12") == (pytest.approx(1687.5), True)  # 1.700 − 2,5 − 10
+
+
+def test_una_compra_el_mismo_dia_de_un_saldo_a_mano_no_lo_pisa_y_lo_avisa():
+    """Misma regla que con los intereses: manda el saldo anotado a mano, pero el
+    dinero anotado ese día no se esconde —el aviso da las dos cifras—."""
+    cfg = _cartera_efectivo()
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash", "fecha": "2025-06-10", "valor": 600.0})
+    comp = {"id": "m1", "fecha": "2025-06-10", "tipo": "compra", "producto": "f1",
+            "cuenta": "c1", "unidades": 1, "importe": 500.0}
+    cfg["movimientos"].append(comp)
+    avisos = []
+    assert s.refresca_efectivo(cfg, comp, avisos) is False
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(600.0), None)   # intacto
+    assert avisos and "Compra" in avisos[0] and "500" in avisos[0] and "100" in avisos[0]
+
+
 def test_un_saldo_manual_posterior_deja_el_historico_como_esta():
     """Un movimiento antiguo no sube nada si después hay un saldo anotado a mano:
     ese saldo real ya recoge lo cobrado (los movimientos llegan con el extracto) y
@@ -823,5 +893,38 @@ def test_api_al_mover_un_interes_el_dia_viejo_se_rehace(cliente, monkeypatch):
         vals = {v["fecha"]: v for v in j2["cartera"]["valoraciones"] if v["producto"] == "cash"}
         assert "2025-06-20" not in vals                 # el día que quedó vacío se retira
         assert vals["2025-06-22"]["valor"] == pytest.approx(1025.0)   # y el nuevo sube
+    finally:
+        _restaura_estados(ruta, cartera_antes, calc, calc_antes)
+
+
+def test_api_al_crear_una_cuenta_se_le_crea_su_producto_de_efectivo(cliente, monkeypatch):
+    """Invariante del modelo cuentas/valores: al crear una cuenta se le crea su
+    producto de efectivo (1:1), que es donde se anota su saldo y donde sube. Sin
+    él la cuenta existía pero era invisible: REVOLUT_EUR no aparecía por ningún
+    sitio y su dinero no podía subir."""
+    import os
+
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    calc = os.path.join(s.DATOS, "calculado_propio.json")
+    cartera_antes = s.lee_json(ruta)
+    calc_antes = s.lee_json(calc, "ausente")
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda mon, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    try:
+        s.escribe_json(ruta, _cartera_efectivo())
+        r = cliente.post("/api/cuentas", json={"nombre": "REVOLUT_EUR", "tipo": "broker",
+                                               "moneda": "eur", "entidad": "Revolut"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        j = r.get_json()
+        cid = j["item"]["id"]
+        p = s.almacen.producto_efectivo_de(j["cartera"], cid)
+        assert p and p["tipo"] == "efectivo" and p["moneda"] == "EUR"
+        assert p["cuenta"] == cid and p["nombre"] == "REVOLUT_EUR"
+        # La migración deja TODAS las cuentas con su producto (la vieja c1 incluida).
+        assert all(s.almacen.producto_efectivo_de(j["cartera"], c["id"])
+                   for c in j["cartera"]["cuentas"])
+        # Y los tipos de cuenta llegan al formulario de «Mis datos → Cuentas».
+        tipos = cliente.get("/api/cartera").get_json()["tiposCuenta"]
+        assert tipos["broker"] == "Bróker" and "efectivo" in tipos
     finally:
         _restaura_estados(ruta, cartera_antes, calc, calc_antes)

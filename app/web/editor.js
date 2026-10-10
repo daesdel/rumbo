@@ -8,7 +8,8 @@
   const $ = s => document.querySelector(s);
   const D = window.DATOS;
   const SOLO_SALDO = ["efectivo", "deuda"];
-  const E = { cfg: null, modo: "demo", tipos: {}, fuentes: {}, tiposMov: {}, vista: "productos", filtro: "todos" };
+  const E = { cfg: null, modo: "demo", tipos: {}, fuentes: {}, tiposMov: {}, tiposCuenta: {}, vista: "productos",
+              filtro: "todos", filtroCuenta: "todos", cuenta: null };
 
   /* ---------------------------------------------- utilidades */
   const esc = window.escapar;   // escapado unificado (una sola copia, en graficos.js)
@@ -38,7 +39,9 @@
     lee(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     guarda(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* da igual */ } },
   };
-  E.vista = new URLSearchParams(location.search).get("vista") || recuerda.lee("patrimonio.editor") || "productos";
+  const Q = new URLSearchParams(location.search);
+  E.vista = Q.get("vista") || recuerda.lee("patrimonio.editor") || "productos";
+  E.cuenta = Q.get("cuenta") || null;    // ficha de cuenta abierta (enlace desde el panel)
 
   async function api(metodo, url, cuerpo) {
     const r = await fetch(url, {
@@ -52,7 +55,8 @@
   }
   async function carga() {
     const j = await api("GET", "api/cartera");
-    Object.assign(E, { cfg: j.cartera, modo: j.modo, tipos: j.tipos, fuentes: j.fuentes, tiposMov: j.tiposMovimiento });
+    Object.assign(E, { cfg: j.cartera, modo: j.modo, tipos: j.tipos, fuentes: j.fuentes,
+                       tiposMov: j.tiposMovimiento, tiposCuenta: j.tiposCuenta || {} });
   }
   async function guarda(coleccion, datos) {
     const j = await api("POST", "api/" + coleccion, datos);
@@ -74,15 +78,33 @@
       los re-pinta al terminar, que es justo cuando se ven (si no, se escribían
       antes de repintar y `pinta()` los borraba sin que el usuario llegara a
       verlos). */
-  let AVISOS_PEND = [];
+  /** Los avisos son PERSISTENTES: se quedan en pantalla hasta que el usuario los
+      cierra con su «×» o cambia de pestaña dentro de «Mis datos». Antes se perdían
+      al repintar (el guardado los escribía y `pinta()` los volvía a borrar), y
+      avisos como «tu saldo de hoy no recoge estos 5 €» son justo los que tienen
+      que estar a la vista sin prisa. */
+  let AVISOS = [];
   function avisa(avisos) {
-    AVISOS_PEND = (avisos || []).filter(Boolean);
+    // Los avisos GLOBALES del motor («REVOLUT_EUR: todavía no tiene ningún saldo
+    // anotado», precios sin conexión…) ya están a la vista en el pie del panel: aquí
+    // solo se quedan los que ha producido lo que acabas de hacer (p. ej. «ese día hay
+    // un saldo a mano y no lo he tocado»), que son los que hacen falta mientras
+    // decides qué hacer con ellos.
+    const globales = (D && D.avisos) || [];
+    for (const a of (avisos || [])) {
+      if (a && !AVISOS.includes(a) && !globales.includes(a)) AVISOS.push(a);
+    }
     pintaAvisos();
   }
+  function cierraAviso(i) { AVISOS.splice(Number(i), 1); pintaAvisos(); }
+  function limpiaAvisos() { AVISOS = []; pintaAvisos(); }
   function pintaAvisos() {
     const el = $("#edAvisos");
     if (!el) return;                     // la vista aún no está montada: al repintar
-    el.innerHTML = AVISOS_PEND.map(a => `<div class="av"><span>⚠</span><span>${esc(a)}</span></div>`).join("");
+    el.innerHTML = AVISOS.map((a, i) => `<div class="av"><span>⚠</span><span>${esc(a)}</span>
+      <button class="cierra" data-acc="cierraAviso" data-id="${i}" aria-label="Cerrar aviso">×</button></div>`).join("")
+      + (AVISOS.length > 1 ? `<div style="text-align:right"><button class="btn" data-acc="cierraTodosAvisos">
+          Cerrar los ${AVISOS.length} avisos</button></div>` : "");
   }
 
   /* ---------------------------------------------- ventana modal */
@@ -182,24 +204,33 @@
       <div id="edAvisos" class="avisos"></div><div id="edCuerpo"></div>`;
     cont.innerHTML = html;
 
-    const vistas = [["productos", "Productos"], ["movimientos", "Movimientos"], ["saldos", "Saldos y valores"], ["importar", "Importar"], ["copias", "Copias y web"]];
+    const vistas = [["productos", "Productos"], ["cuentas", "Cuentas"], ["movimientos", "Movimientos"],
+                    ["saldos", "Saldos y valores"], ["importar", "Importar"], ["copias", "Copias y web"]];
     const seg = $("#edVistas");
     vistas.forEach(([id, et]) => {
       const b = document.createElement("button");
       b.textContent = et;
       b.setAttribute("aria-pressed", String(id === E.vista));
-      b.onclick = () => { E.vista = id; recuerda.guarda("patrimonio.editor", id); pinta(); };
+      // Cambiar de pantalla cierra la ficha de cuenta y descarta los avisos.
+      b.onclick = () => { E.vista = id; E.cuenta = null; limpiaAvisos();
+                          recuerda.guarda("patrimonio.editor", id); pinta(); };
       seg.appendChild(b);
     });
-    $("#edCuerpo").innerHTML = ({ productos: vistaProductos, movimientos: vistaMovimientos, saldos: vistaSaldos,
+    $("#edCuerpo").innerHTML = ({ productos: vistaProductos, cuentas: vistaCuentas,
+      movimientos: vistaMovimientos, saldos: vistaSaldos,
       importar: vistaImportar, copias: vistaCopias }[E.vista] || vistaProductos)();
     if (E.vista === "importar" || E.vista === "copias") conectaImportar();
     if (E.vista === "saldos") conectaSaldos();
-    const filtro = $("#edFiltro");
-    if (filtro) filtro.onchange = e => { E.filtro = e.target.value; pinta(); };
-    // Los avisos que traía el guardado anterior: aquí es donde ya se ven.
+    ["#edFiltro", "#edFiltroCuenta"].forEach(sel => {
+      const el = $(sel);
+      if (!el) return;
+      el.onchange = e => {
+        if (sel === "#edFiltro") E.filtro = e.target.value; else E.filtroCuenta = e.target.value;
+        pinta();
+      };
+    });
+    // Los avisos se repintan aquí: `pinta()` regenera la barra entera.
     pintaAvisos();
-    AVISOS_PEND = [];
   }
 
   /* ---------------------------------------------- productos */
@@ -392,11 +423,189 @@
     try { await borra("productos", id); pinta(); } catch (x) { alert(x.message); }
   }
 
+  /* ---------------------------------------------- cuentas (efectivo) */
+  // Una CUENTA es un contenedor de dinero: nombre, entidad, moneda y propietario.
+  // Su dinero vive en SU producto de efectivo vinculado (1:1), que es donde se
+  // anotan los saldos y donde sube o baja con cada movimiento. Esta vista es la
+  // casa de las cuentas: aquí se encuentran, se mira su saldo, su último ancla y
+  // sus últimos movimientos, y se anota algo en ellas. Antes solo estaban la tabla
+  // del panel y el desplegable del formulario, y localizar REVOLUT_EUR era casi
+  // imposible.
+  const efectivoDe = cid => E.cfg.productos.find(p => p.tipo === "efectivo" && p.cuenta === cid);
+  const valsDe = pid => E.cfg.valoraciones
+    .filter(v => v.producto === pid).sort((a, b) => a.fecha < b.fecha ? 1 : -1);
+  const movsDe = cid => E.cfg.movimientos
+    .filter(m => m.cuenta === cid || m.contrapartida === cid)
+    .sort((a, b) => a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0);
+  const tiposCuenta = () => Object.keys(E.tiposCuenta || {}).length ? E.tiposCuenta
+    : { efectivo: "Efectivo", banco: "Banco", broker: "Bróker", fondo: "Fondo / gestión",
+        pension: "Plan de pensiones", cripto: "Cripto", otro: "Otro" };
+  const etqTipoCuenta = c => tiposCuenta()[c.tipo] || c.tipo || "Efectivo";
+  const enCuenta = (m, cid, mon) => {           // el dinero que este movimiento mueve
+    const s = efectoDe(m, cid);
+    const x = s ? importeEn(m, mon) : null;
+    return x == null ? null : Math.round(s * x * 100) / 100;
+  };
+  /** Lo anotado el mismo día de un saldo A MANO: ese dinero no está sumado en el
+      saldo (manda el banco), así que no puede quedarse sin verse. */
+  function pendienteDe(p, v) {
+    if (!v || v.auto || !p || !p.cuenta) return null;
+    const mon = (p.moneda || "EUR").toUpperCase();
+    let total = 0, n = 0;
+    for (const m of E.cfg.movimientos || []) {
+      if (m.fecha !== v.fecha) continue;
+      const x = enCuenta(m, p.cuenta, mon);
+      if (x == null) continue;
+      total += x;
+      n++;
+    }
+    if (!n || Math.abs(total) < 0.005) return null;
+    return { fecha: v.fecha, importe: Math.round(total * 100) / 100, n, mon,
+             saldo: v.valor, sugerido: Math.round((v.valor + total) * 100) / 100 };
+  }
+
+  function vistaCuentas() {
+    const cuentas = E.cfg.cuentas || [];
+    if (E.cuenta && cuentas.some(c => c.id === E.cuenta)) return fichaCuenta(cuentaDe(E.cuenta));
+    const filas = cuentas.map(c => {
+      const mon = (c.moneda || "EUR").toUpperCase();
+      const p = efectivoDe(c.id);
+      const u = p ? valsDe(p.id)[0] : null;
+      const ms = movsDe(c.id);
+      const pr = propDe(c.propietario);
+      const saldo = u
+        ? `<b>${num(u.valor, 2)} ${esc(mon)}</b><div class="subt">${fecha(u.fecha)}${
+            u.auto ? " · calculado" : " · anotado a mano"}${anotadoEseDia(p, u, true)}</div>`
+        : `<span class="neg" title="Todavía no has anotado el saldo de esta cuenta. Anótalo tú aquí o apunta un movimiento de dinero: a partir de ahí sube y baja solo.">sin saldo anotado</span>`;
+      const ult = ms.slice(0, 3).map(m => {
+        const x = enCuenta(m, c.id, mon);
+        return `<div class="subt">${fecha(m.fecha)} · ${esc(E.tiposMov[m.tipo] || m.tipo)}${
+          x == null ? "" : ` ${x > 0 ? "+" : "−"}${num(Math.abs(x), 2)} ${esc(mon)}`}</div>`;
+      }).join("") + (ms.length > 3 ? `<div class="subt">… y ${ms.length - 3} más</div>` : "");
+      return `<tr><td style="text-align:left"><b>${esc(c.nombre)}</b>
+          <div class="subt">${esc(c.entidad || "")}${pr ? " · " + esc(pr.nombre) : ""}</div></td>
+        <td class="subt">${esc(etqTipoCuenta(c))}</td>
+        <td class="subt">${esc(mon)}</td>
+        <td>${saldo}</td>
+        <td style="text-align:left">${ult || '<span class="subt">—</span>'}</td>
+        <td class="acc"><button data-acc="verCuenta" data-id="${esc(c.id)}">Abrir ficha</button>
+          <button data-acc="movsCuenta" data-id="${esc(c.id)}" title="Ver solo sus movimientos">Movimientos</button>
+          <button data-acc="editarCuenta" data-id="${esc(c.id)}">Editar</button></td></tr>`;
+    }).join("");
+    return `<section class="tarjeta"><header><h2>Cuentas</h2>
+        <span class="subt">Dónde está tu dinero: el saldo de cada cuenta, de quién es y lo último que ha hecho.</span>
+        <span class="sp"></span>
+        <button class="btn prim" data-acc="nuevaCuenta">+ Añadir cuenta</button></header>
+      ${filas ? `<div class="tablaEnv"><table class="dt"><thead><tr>
+        <th style="text-align:left">Cuenta</th><th>Tipo</th><th>Moneda</th><th>Saldo</th>
+        <th style="text-align:left">Últimos movimientos</th><th></th></tr></thead><tbody>${filas}</tbody></table></div>`
+        : '<p class="subt">Todavía no tienes ninguna cuenta. Añádela para anotar ahí sus saldos y sus movimientos.</p>'}
+      <p class="ayuda" style="margin-top:12px">Pulsa «Abrir ficha» para ver la serie de saldos y todos los
+      movimientos de una cuenta, y para anotar algo en ella.</p></section>`;
+  }
+
+  function fichaCuenta(c) {
+    const mon = (c.moneda || "EUR").toUpperCase();
+    const p = efectivoDe(c.id);
+    const vals = p ? valsDe(p.id) : [];
+    const u = vals[0];
+    const ms = movsDe(c.id);
+    const pr = propDe(c.propietario);
+    const pend = pendienteDe(p, u);
+    const filasVals = vals.map((v, i) => `<tr><td>${fecha(v.fecha)}${
+        v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo que entró y salió ese día. Puedes corregirlo o borrarlo si tu banco dice otra cosa."> · calculado</span>`
+               : anotadoEseDia(p, v, i === 0)}</td>
+        <td>${num(v.valor, 2)} ${esc(mon)}</td>
+        <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}">Editar</button>
+          <button data-acc="replicarValor" data-id="${esc(v.id)}">Replicar</button>
+          <button data-acc="borrarValor" data-id="${esc(v.id)}">Borrar</button></td></tr>`).join("");
+    const filasMovs = ms.map(m => {
+      const x = enCuenta(m, c.id, mon);
+      const otro = m.cuenta === c.id ? m.contrapartida : m.cuenta;
+      const o = otro ? cuentaDe(otro) : null;
+      return `<tr><td>${fecha(m.fecha)}</td>
+        <td style="text-align:left">${esc(E.tiposMov[m.tipo] || m.tipo)}</td>
+        <td style="text-align:left">${m.producto ? esc(nombre(prod(m.producto))) : "—"}</td>
+        <td style="text-align:left" class="subt">${o ? esc(o.nombre) : "—"}</td>
+        <td class="${x == null ? "" : x > 0 ? "pos" : "neg"}">${x == null
+          ? "—" : `${x > 0 ? "+" : "−"}${num(Math.abs(x), 2)} ${esc(mon)}`}</td>
+        <td class="acc"><button data-acc="editarMov" data-id="${esc(m.id)}">Editar</button>
+          <button data-acc="borrarMov" data-id="${esc(m.id)}">Borrar</button></td></tr>`;
+    }).join("");
+    return `<section class="tarjeta"><header>
+        <button class="btn" data-acc="volverCuentas">← Todas</button>
+        <h2>${esc(c.nombre)}</h2>
+        <span class="subt">${esc(etqTipoCuenta(c))}${c.entidad ? " · " + esc(c.entidad) : ""} · ${esc(mon)}${
+          pr ? " · " + esc(pr.nombre) : ""}</span><span class="sp"></span>
+        <button class="btn" data-acc="movsCuenta" data-id="${esc(c.id)}">Ver en Movimientos</button>
+        <button class="btn" data-acc="nuevoMovCuenta" data-id="${esc(c.id)}">+ Movimiento</button>
+        <button class="btn prim" data-acc="nuevoValorCuenta" data-id="${esc(p ? p.id : "")}"
+          ${p ? "" : "disabled title=\"Falta su producto de efectivo\""}>+ Anotar saldo</button></header>
+      <p class="ayuda"><b>Saldo:</b> ${u ? `${num(u.valor, 2)} ${esc(mon)} (anotado el ${fecha(u.fecha)}${u.auto ? ", calculado" : ""})`
+        : 'ninguno anotado todavía: pulsa «+ Anotar saldo» o apunta un movimiento de dinero.'}
+        · ${ms.length} ${ms.length === 1 ? "movimiento" : "movimientos"}</p>
+      ${pend ? `<div class="av"><span>⚠</span><span>${esc(
+        `Tu saldo del ${fecha(pend.fecha)} está anotado a mano y es el real de ese día, así que no lo he tocado: ` +
+        `${pend.n === 1 ? "este movimiento" : `estos ${pend.n} movimientos`} de ese día (${pend.importe > 0 ? "+" : "−"}${num(Math.abs(pend.importe), 2)} ${pend.mon}) ` +
+        `${pend.n === 1 ? "no está" : "no están"} sumado${pend.n === 1 ? "" : "s"} en él. Si tu saldo ya lo incluye, no hagas nada; ` +
+        `si lo anotaste antes, edítalo y pónlo a ${num(pend.sugerido, 2)} ${pend.mon}.`)}</span></div>` : ""}
+      </section>
+      <div class="saldos">
+        <section class="tarjeta saldo"><header><h2>Serie de saldos</h2>
+            <span class="subt">Lo anotado a mano manda; lo calculado se rehace con los movimientos.</span>
+            <span class="sp"></span>${p ? `<button class="btn" data-acc="nuevoValorCuenta" data-id="${esc(p.id)}">+ Anotar</button>` : ""}</header>
+          ${filasVals ? `<div class="tablaEnv"><table class="dt"><thead><tr><th>Fecha</th><th>Saldo</th><th></th></tr></thead>
+            <tbody>${filasVals}</tbody></table></div>`
+            : '<p class="neg">Todavía no tiene ningún saldo anotado.</p>'}</section>
+        <section class="tarjeta saldo"><header><h2>Movimientos de esta cuenta</h2>
+            <span class="subt">Cada movimiento de dinero sube o baja su saldo ese día.</span></header>
+          ${filasMovs ? `<div class="tablaEnv alto"><table class="dt"><thead><tr><th>Fecha</th>
+            <th style="text-align:left">Tipo</th><th style="text-align:left">Producto</th>
+            <th style="text-align:left">Otra cuenta</th>
+            <th title="Lo que este movimiento mueve en ESTA cuenta: con «+» entra, con «−» sale; «—» es que no toca su dinero (por ejemplo, una compra pagada desde otra cuenta).">Dinero</th><th></th></tr></thead>
+            <tbody>${filasMovs}</tbody></table></div>`
+            : '<p class="subt">Ningún movimiento anotado todavía en esta cuenta.</p>'}</section>
+      </div>`;
+  }
+
+  /** Crear o editar una cuenta (identidad: nombre, tipo, moneda, entidad,
+      propietario). Su saldo no vive aquí: vive en su producto de efectivo, que se
+      le crea al guardar (invariante 1:1 del modelo cuentas/valores). */
+  function formCuenta(c) {
+    const nuevo = !c;
+    const props = E.cfg.propietarios || [];
+    const tipos = tiposCuenta();
+    const f = abreModal(nuevo ? "Añadir cuenta" : `Editar cuenta · ${c.nombre}`, `
+      <div class="rejilla">
+        ${campo("Nombre", '<input name="nombre" maxlength="60" placeholder="REVOLUT_EUR">', "como la llamas tú", "ancho")}
+        ${campo("Tipo", `<select name="tipo">${Object.entries(tipos)
+          .map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select>`, "qué clase de cuenta es")}
+        ${campo("Moneda", '<input name="moneda" maxlength="3" placeholder="EUR">', "código de tres letras")}
+        ${campo("Entidad", '<input name="entidad" maxlength="60" placeholder="Revolut">', "opcional")}
+        ${campo("Propietario", `<select name="propietario"><option value="">${nuevo ? "— sin propietario —" : "— sin cambiar —"}</option>${
+          props.map(p => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join("")}</select>`, "de quién es")}
+      </div>
+      <div class="resumen"><span>Al guardar se le crea su <b>saldo de efectivo</b>, donde se anota su dinero y
+      que sube o baja con sus movimientos. El dinero ya anotado no se toca.</span></div>`,
+    async f2 => {
+      const d = campos(f2);
+      if (!nuevo) d.id = c.id;
+      if (!d.propietario) delete d.propietario;      // vacío: no se cambia
+      const guardada = await guarda("cuentas", d);
+      E.cuenta = guardada.id;                        // la abrimos: la cuenta es localizable
+      return null;
+    }, nuevo ? "Crear cuenta" : "Guardar cambios");
+    rellena(f, c ? { ...c, moneda: c.moneda || "EUR" }
+                 : { nombre: "", tipo: "efectivo", moneda: "EUR", entidad: "", propietario: "" });
+    f.elements.nombre.focus();
+  }
+
   /* ---------------------------------------------- movimientos */
   function vistaMovimientos() {
     const cotizables = E.cfg.productos.filter(p => !soloSaldo(p));
     const movs = E.cfg.movimientos
       .filter(m => E.filtro === "todos" || m.producto === E.filtro)
+      .filter(m => E.filtroCuenta === "todos" || m.cuenta === E.filtroCuenta || m.contrapartida === E.filtroCuenta)
       .sort((a, b) => a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0);
     const filas = movs.map(m => {
       const p = prod(m.producto);
@@ -425,6 +634,8 @@
     }).join("");
     return `<section class="tarjeta"><header><h2>Movimientos</h2>
         <span class="subt">Compras, ventas, dividendos y comisiones</span><span class="sp"></span>
+        <select id="edFiltroCuenta" aria-label="Filtrar por cuenta"><option value="todos">Todas las cuentas</option>
+          ${(E.cfg.cuentas || []).map(c => `<option value="${esc(c.id)}"${c.id === E.filtroCuenta ? " selected" : ""}>${esc(c.nombre)}</option>`).join("")}</select>
         <select id="edFiltro" aria-label="Filtrar por producto"><option value="todos">Todos los productos</option>
           ${cotizables.map(p => `<option value="${esc(p.id)}"${p.id === E.filtro ? " selected" : ""}>${esc(nombre(p))}</option>`).join("")}</select>
         <button class="btn prim" data-acc="nuevoMov">+ Añadir movimiento</button></header>
@@ -488,13 +699,16 @@
   /** `trasGuardar`, si viene, sustituye al final de siempre (dejar la vista en
       «Movimientos»): así la ficha del producto puede recargar el panel en vez de
       cambiar de pestaña. */
-  function formMovimiento(m, productoId, copia, trasGuardar) {
+  function formMovimiento(m, productoId, copia, trasGuardar, opcs) {
     const cotizables = E.cfg.productos.filter(p => !soloSaldo(p));
     if (!cotizables.length) { alert("Primero añade un producto en «Productos»."); return; }
     const nuevo = !m || !!copia;
     // Con la copia se trabaja sobre una copia del original: rellenar no lo toca.
     m = m ? (copia ? Object.assign({}, m) : m)
-          : { fecha: hoy(), tipo: "compra", producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) };
+          : { fecha: hoy(), tipo: "compra",
+              producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id),
+              // Cuenta ya elegida al abrirlo desde la ficha de una cuenta.
+              ...(opcs && opcs.cuenta ? { cuenta: opcs.cuenta } : {}) };
     const props = E.cfg.propietarios || [];
     // Cuenta y propietario por defecto: los del producto, y si no, los de la cuenta.
     const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
@@ -554,8 +768,10 @@
         : null;
       await guarda("movimientos", d);
       if (trasGuardar) return trasGuardar;
-      E.vista = "movimientos";
-      recuerda.guarda("patrimonio.editor", "movimientos");
+      // Vista a la que volver: la que tenía el formulario abierto (p. ej. la ficha
+      // de una cuenta), para que guardar no te saque de donde estabas.
+      E.vista = (opcs && opcs.vista) || E.vista || "movimientos";
+      recuerda.guarda("patrimonio.editor", E.vista);
       return avisoVinc ? () => avisa([avisoVinc]) : null;
     }, nuevo ? "Guardar movimiento" : "Guardar cambios");
     rellena(f, { ...m, producto: m.producto || "", cuenta: cuentaPorDef, propietario: propPorDef,
@@ -642,9 +858,15 @@
   // Mismo criterio que el servidor para refrescar el efectivo de una cuenta:
   // qué movimientos entran (+1) y cuáles salen (−1) según la cuenta que se mire.
   const EFECTO = { dividendo: [1, 0], interes: [1, 0], deposito: [1, -1],
-                   retirada: [-1, 1], transferencia: [-1, 1], traspaso: [-1, 1] };
+                   retirada: [-1, 1], transferencia: [-1, 1], traspaso: [-1, 1],
+                   comision: [-1, 0], impuesto: [-1, 0] };
+  // Una compra o una venta mueve UNA sola cuenta: la contrapartida si la hay (es
+  // la que desembolsa o cobra), si no, la propia cuenta.
+  const EFECTO_CV = { compra: -1, venta: 1 };
   const efectoDe = (m, cid) => {
-    if (!cid || !EFECTO[m.tipo]) return 0;
+    if (!cid) return 0;
+    if (EFECTO_CV[m.tipo]) return (m.contrapartida || m.cuenta) === cid ? EFECTO_CV[m.tipo] : 0;
+    if (!EFECTO[m.tipo]) return 0;
     if (m.cuenta === cid) return EFECTO[m.tipo][0];
     return m.contrapartida === cid ? EFECTO[m.tipo][1] : 0;
   };
@@ -660,24 +882,13 @@
       enseña el panel, y ese dinero no está sumado en él, así que no puede quedarse
       sin verse. Solo esa fila, o quedaría marcado medio histórico. */
   function anotadoEseDia(p, v, ultimo) {
-    if (!ultimo || v.auto || !p.cuenta) return "";
-    const mon = (p.moneda || "EUR").toUpperCase();
-    let total = 0, n = 0;
-    for (const m of E.cfg.movimientos || []) {
-      if (m.fecha !== v.fecha) continue;
-      const s = efectoDe(m, p.cuenta);
-      if (!s) continue;
-      const x = importeEn(m, mon);
-      if (x == null) continue;
-      total += s * x;
-      n++;
-    }
-    if (!n || Math.abs(total) < 0.005) return "";
-    const q = n === 1 ? "ese día" : `ese día (${n})`;
+    const q = ultimo ? pendienteDe(p, v) : null;
+    if (!q) return "";
     const ayuda = "Tu saldo de este día está anotado a mano y es el real de tu banco: estos " +
       "movimientos NO están sumados en él. Si tu saldo ya los incluye (lo normal), no hagas " +
       "nada; si lo anotaste antes de que entraran, edítalo y súbelo.";
-    return `<span class="subt" title="${esc(ayuda)}">· ${q} ${total > 0 ? "+" : ""}${eur(total)}</span>`;
+    const que = q.n === 1 ? "ese día" : `ese día (${q.n})`;
+    return `<span class="subt" title="${esc(ayuda)}">· ${que} ${q.importe > 0 ? "+" : ""}${eur(q.importe)}</span>`;
   }
 
   function vistaSaldos() {
@@ -927,7 +1138,7 @@
     if (v) formValor(v, null, true);
   }
 
-  function formValor(v, productoId, copia) {
+  function formValor(v, productoId, copia, vistaTras) {
     const nuevo = !v || !!copia;
     // Con la copia se trabaja sobre una copia del original: rellenar no lo toca.
     if (v && copia) v = Object.assign({}, v);
@@ -950,8 +1161,8 @@
       const d = { ...campos(f), producto: p.id };
       if (!nuevo) d.id = v.id;
       await guarda("valoraciones", d);
-      E.vista = "saldos";
-      recuerda.guarda("patrimonio.editor", "saldos");
+      E.vista = vistaTras || E.vista || "saldos";      // la vista desde la que se abrió
+      recuerda.guarda("patrimonio.editor", E.vista);
       return null;
     }, copia ? "Guardar valor" : "Guardar");
     rellena(f, v
@@ -1296,6 +1507,16 @@
     editarProducto: soloPropio(id => formProducto(prod(id))),
     borrarProducto: soloPropio(borrarProducto),
     nuevoMov: soloPropio(() => formMovimiento(null)),
+    nuevoMovCuenta: soloPropio(id => formMovimiento(null, null, false, null, { cuenta: id, vista: "cuentas" })),
+    nuevoValorCuenta: soloPropio(id => formValor(null, id, false, "cuentas")),
+    verCuenta(id) { E.cuenta = id; E.vista = "cuentas"; recuerda.guarda("patrimonio.editor", "cuentas"); pinta(); },
+    volverCuentas() { E.cuenta = null; pinta(); },
+    movsCuenta(id) { E.filtroCuenta = id; E.filtro = "todos"; E.vista = "movimientos";
+                     recuerda.guarda("patrimonio.editor", "movimientos"); pinta(); },
+    nuevaCuenta: soloPropio(() => formCuenta(null)),
+    editarCuenta: soloPropio(id => formCuenta(cuentaDe(id))),
+    cierraAviso,
+    cierraTodosAvisos: limpiaAvisos,
     editarMov: soloPropio(id => formMovimiento(E.cfg.movimientos.find(m => m.id === id))),
     replicarMov: soloPropio(replicarMov),
     borrarMov: soloPropio(borrarMov),
@@ -1384,6 +1605,10 @@
 
   window.Editor = {
     mostrar: pinta,
+    /** Abre la ficha de una cuenta en «Mis datos → Cuentas». Lo usa cada fila de la
+        tabla Cuentas del panel, para que una cuenta como REVOLUT_EUR sea
+        localizable: antes no había ninguna parte de la app donde verla. */
+    verCuenta(id) { E.cuenta = id; E.vista = "cuentas"; recuerda.guarda("patrimonio.editor", "cuentas"); pinta(); },
     /** Abre el formulario de movimiento con este producto ya elegido. Lo usa el
         botón de la ficha del producto (pestaña Productos): al guardar recarga el
         panel, porque las cifras de esa pestaña ya no son las mismas. */

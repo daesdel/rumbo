@@ -445,6 +445,52 @@ def test_un_interes_no_necesita_producto_si_tiene_cuenta():
         almacen.guarda_movimiento(cfg, {"fecha": "2025-04-02", "tipo": "interes", "importe": 3})
 
 
+def test_al_crear_una_cuenta_se_le_crea_su_producto_de_efectivo():
+    """Invariante del modelo cuentas/valores: una CUENTA guarda identidad (nombre,
+    entidad, moneda, propietario) y su dinero vive en SU producto de efectivo
+    vinculado (1:1). Al crear la cuenta se le crea; sin él su saldo no aparecía en
+    ningún sitio ni podía subir (era el caso de REVOLUT_EUR)."""
+    cfg = {"cuentas": [], "productos": [], "movimientos": [], "valoraciones": []}
+    c = almacen.guarda_cuenta(cfg, {"nombre": "REVOLUT_EUR", "tipo": "broker", "moneda": "EUR"})
+    p = almacen.producto_efectivo_de(cfg, c["id"])
+    assert p and p["tipo"] == "efectivo" and p["cuenta"] == c["id"]
+    assert p["moneda"] == "EUR" and p["nombre"] == "REVOLUT_EUR"
+    # …y al actualizar una cuenta antigua que no lo tenía, también.
+    cfg2 = {"cuentas": [{"id": "vieja", "nombre": "Banco viejo", "tipo": "banco", "moneda": "EUR"}],
+            "productos": [], "movimientos": [], "valoraciones": []}
+    assert almacen.producto_efectivo_de(cfg2, "vieja") is None
+    almacen.guarda_cuenta(cfg2, {"id": "vieja", "nombre": "Banco viejo", "tipo": "banco", "moneda": "EUR"})
+    assert almacen.producto_efectivo_de(cfg2, "vieja") is not None
+    # Idempotente: volver a crearla no duplica el producto.
+    n = len(cfg2["productos"])
+    almacen.guarda_cuenta(cfg2, {"id": "vieja", "nombre": "Banco viejo"})
+    assert len(cfg2["productos"]) == n
+
+
+def test_migra_efectivo_crea_solo_los_que_faltan_y_no_toca_nada():
+    """Las carteras antiguas (10 de las 17 cuentas de producción) se quedaron sin
+    producto de efectivo: la migración se los crea al cargar, una sola vez, sin
+    tocar saldos ni movimientos."""
+    cfg = {
+        "cuentas": [{"id": "con", "nombre": "Con saldo", "tipo": "efectivo", "moneda": "EUR"},
+                    {"id": "sin", "nombre": "Sin saldo", "tipo": "broker", "moneda": "USD"}],
+        "productos": [{"id": "cash", "nombre": "Con saldo", "corto": "Con saldo", "tipo": "efectivo",
+                       "fuente": "manual", "moneda": "EUR", "cuenta": "con"}],
+        "movimientos": [{"id": "m1", "fecha": "2025-03-01", "tipo": "deposito",
+                         "cuenta": "sin", "importe": 50}],
+        "valoraciones": [{"id": "v1", "producto": "cash", "fecha": "2025-03-01", "valor": 100.0}],
+    }
+    movs_antes, vals_antes = json.dumps(cfg["movimientos"]), json.dumps(cfg["valoraciones"])
+    creados = almacen.migra_efectivo(cfg)
+    assert creados == [almacen.producto_efectivo_de(cfg, "sin")["id"]]      # solo la que faltaba
+    p = almacen.producto_efectivo_de(cfg, "sin")
+    assert p["moneda"] == "USD" and p["nombre"] == "Sin saldo"
+    assert almacen.producto_efectivo_de(cfg, "con")["id"] == "cash"         # la otra, intacta
+    assert json.dumps(cfg["movimientos"]) == movs_antes          # no toca los movimientos
+    assert json.dumps(cfg["valoraciones"]) == vals_antes          # ni los saldos
+    assert almacen.migra_efectivo(cfg) == []                                 # segunda vez: no hace nada
+
+
 def test_producto_efectivo_de_encuentra_el_saldo_de_la_cuenta():
     cfg = _cfg_cuentas()
     assert almacen.producto_efectivo_de(cfg, "efectivo") is None

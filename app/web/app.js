@@ -1045,7 +1045,8 @@
       `<thead><tr><th>Cuenta</th><th>Entidad</th><th>Propietario</th><th>Moneda</th>
         <th>Saldo</th>${nat ? "" : `<th>En ${enUSD() ? "dólares" : "euros"}</th>`}</tr></thead>
        <tbody>${filas.map(c => `<tr>
-        <td>${esc(c.nombre)}</td>
+        <td><a class="cuentaLink" data-cuenta="${esc(c.id)}" href="?tab=datos&amp;vista=cuentas&amp;cuenta=${encodeURIComponent(c.id)}"
+          title="Abrir la ficha de esta cuenta en «Mis datos → Cuentas»">${esc(c.nombre)}</a></td>
         <td class="subt">${esc(c.entidad || "")}</td>
         <td>${esc(nom(c))}</td>
         <td class="subt">${esc(c.moneda)}</td>
@@ -1056,6 +1057,14 @@
       </tr>`).join("")}</tbody>
        <tfoot><tr><td colspan="4">${filas.length} ${filas.length === 1 ? "cuenta" : "cuentas"}</td>
         <td></td>${nat ? "" : `<td>${G.fmtEur(suma)}</td>`}</tr></tfoot>`;
+    // Cada cuenta es localizable: su fila abre su ficha en «Mis datos → Cuentas».
+    $("#tablaCuentas").querySelectorAll("a[data-cuenta]").forEach(a => {
+      a.onclick = e => {
+        e.preventDefault();
+        if (window.Editor && window.Editor.verCuenta) window.Editor.verCuenta(a.dataset.cuenta);
+        irA("datos");
+      };
+    });
   }
 
   function pintaDistribucion() {

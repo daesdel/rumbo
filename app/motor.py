@@ -705,14 +705,28 @@ def serie_cambio(moneda, carpeta):
 # cuenta implicada). El saldo de una cuenta se recalcula con ellos, y el panel usa
 # la misma regla para enseñar lo que queda sin reflejar en un saldo anotado a mano.
 EFECTO_EFECTIVO = {"dividendo": (1, 0), "interes": (1, 0), "deposito": (1, -1),
-                   "retirada": (-1, 1), "transferencia": (-1, 1), "traspaso": (-1, 1)}
+                   "retirada": (-1, 1), "transferencia": (-1, 1), "traspaso": (-1, 1),
+                   # Comisiones sueltas e impuestos pagados: dinero que SALE de la
+                   # cuenta. (Compra y venta no van aquí: su dinero lo mueve una
+                   # sola cuenta, ver EFECTO_COMPRA_VENTA.)
+                   "comision": (-1, 0), "impuesto": (-1, 0)}
+# Compra y venta: el dinero entra o sale de UNA sola cuenta. Si hay contrapartida
+# es esa la que paga o cobra (así lo importa Portfolio Performance: en una compra
+# la contrapartida es la cuenta corriente que desembolsa y «cuenta» es donde
+# guardas el activo); si no la hay, la propia cuenta (el formulario del producto
+# y su vínculo: «de qué cuenta sale el dinero»).
+EFECTO_COMPRA_VENTA = {"compra": -1, "venta": 1}
 
 
 def efecto_de(mov, cid):
     """+1 si el dinero entra en la cuenta `cid`, −1 si sale, 0 si no la toca."""
     if not cid:
         return 0
-    sc, cp = EFECTO_EFECTIVO.get(mov.get("tipo"), (0, 0))
+    t = mov.get("tipo")
+    if t in EFECTO_COMPRA_VENTA:
+        pagador = mov.get("contrapartida") or mov.get("cuenta")
+        return EFECTO_COMPRA_VENTA[t] if pagador == cid else 0
+    sc, cp = EFECTO_EFECTIVO.get(t, (0, 0))
     if mov.get("cuenta") == cid:
         return sc
     if mov.get("contrapartida") == cid:
