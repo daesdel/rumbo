@@ -100,6 +100,14 @@ def r4(x):
     return None if x is None else round(float(x), 4)
 
 
+def num_txt(x, dec=2):
+    """26797.18 → «26.797,18»: una cantidad de dinero en un texto para la persona
+    (formato castellano y el menos tipográfico de la app). `num_es` es lo contrario:
+    texto → número."""
+    s = f"{abs(float(x)):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return ("−" if float(x) < 0 else "") + s
+
+
 # ---------------------------------------------------------------- Yahoo
 
 def _cache_es_diaria(serie):
@@ -1650,11 +1658,29 @@ def construir(cfg, carpeta, descargar=True):
         else:
             t = valor_en(series.get(f"{mon}EUR=X") or {}, fecha_extracto, 7)
             eur = saldo * t if (saldo is not None and t) else None
+        # ¿El saldo lo ha calculado la app con los movimientos o lo has anotado tú?
+        # El panel lo usa para redactar el aviso de saldo negativo con la verdad.
+        p_ef = efectivo_por_cuenta.get(c["id"])
+        vals_cta = (sorted(vals_por.get(p_ef["id"], []), key=lambda v: v["fecha"])
+                    if p_ef else [])
         cuentas_out.append({**c, "moneda": mon,
                             "propietario": c.get("propietario") or defecto_prop,
                             "saldo": round(saldo, 2) if saldo is not None else None,
                             "saldoEur": round(eur, 2) if eur is not None else None,
+                            "saldoAuto": bool(vals_cta and vals_cta[-1].get("auto")),
                             "pendiente": pendiente_de(c, mon)})
+    # Un saldo negativo casi siempre es un apunte mal puesto (el dinero salió de OTRA
+    # cuenta, como pasó con una compra heredada de la cuenta del producto) o un saldo
+    # que falta. Con el modelo ancla + libro la app puede crear sola ese saldo al
+    # anotar un movimiento, así que no puede quedarse callada.
+    for c in cuentas_out:
+        s = c.get("saldo")
+        if s is None or s > -0.005:
+            continue
+        aviso(f"{c.get('nombre') or c['id']}: su saldo "
+              f"{'calculado' if c.get('saldoAuto') else 'anotado a mano'} es "
+              f"{num_txt(s)} {c['moneda']}. ¿Te falta anotar un saldo o el movimiento "
+              "salió de otra cuenta?")
     # Cambio de hoy y serie diaria salen del MISMO par que usa el motor para pasar
     # dólares a euros: USDEUR=X (euros por dólar). El panel vuelve a dólares con el
     # recíproco exacto de esa misma serie (dólares por euro), así que ida y vuelta

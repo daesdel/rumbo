@@ -367,6 +367,40 @@ def test_cuenta_sin_saldo_anotado_se_ensena_desconocida(tmp_path):
     assert por_id["c1"]["saldo"] == pytest.approx(1050.0)  # la anotada, sigue visible
 
 
+def test_saldo_negativo_de_una_cuenta_avisa(tmp_path):
+    """Con el modelo ancla + libro la app puede crear sola un saldo calculado en
+    negativo (un movimiento anotado en una cuenta sin saldo, o con el saldo en
+    otra). Casi siempre es un apunte mal puesto: el panel tiene que avisar, decir
+    de qué cuenta es y no dejarlo escondido."""
+    cfg = _fondo_y_cuenta(saldo=-1500.0)
+    cfg["valoraciones"][1]["auto"] = True          # saldo calculado con movimientos
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    c = datos["cuentas"][0]
+    assert c["saldo"] == pytest.approx(-1500.0)
+    assert c["saldoAuto"] is True
+    avisos = [a for a in datos["avisos"] if a.startswith("Cuenta:")]
+    assert len(avisos) == 1
+    assert "saldo calculado" in avisos[0]
+    assert "−1.500,00 EUR" in avisos[0]
+    assert "¿Te falta anotar un saldo o el movimiento salió de otra cuenta?" in avisos[0]
+
+
+def test_saldo_negativo_anotado_a_mano_tambien_avisa(tmp_path):
+    """Si el saldo en negativo lo anotó la persona (no lo calculó la app), el aviso
+    lo dice así: no se acusa a los movimientos de algo que no hicieron."""
+    cfg = _fondo_y_cuenta(saldo=-50.0)             # sin «auto»: anotado a mano
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    assert datos["cuentas"][0]["saldoAuto"] is False
+    assert any("saldo anotado a mano es −50,00 EUR" in a for a in datos["avisos"])
+
+
+def test_saldo_positivo_no_avisa_de_negativo(tmp_path):
+    cfg = _fondo_y_cuenta(saldo=1050.0)
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    assert datos["cuentas"][0]["saldoAuto"] is False
+    assert not any("¿Te falta anotar un saldo" in a for a in datos["avisos"])
+
+
 def test_cuenta_en_dolares_entra_convertida_a_euros(tmp_path):
     """El saldo anotado en la moneda de la cuenta (USD) entra en el panel en
     euros con el cambio de cada día: sin la serie de cambio, la cuenta sumaba

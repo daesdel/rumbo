@@ -1052,8 +1052,10 @@
         <td class="subt">${esc(c.moneda)}</td>
         <td>${c.saldo == null
           ? `<span class="subt" title="Todavía no tiene ningún saldo anotado: apunta un movimiento de dinero en esa cuenta o anota su saldo en «Saldos y valores».">—</span>`
-          : `${nato(c.saldo)} ${esc(c.moneda)}`}${pendiente(c)}</td>
-        ${nat ? "" : `<td>${enEur(c) == null ? "—" : G.fmtEur(enEur(c))}</td>`}
+          : `<span class="${c.saldo < 0 ? "neg" : ""}"${c.saldo < 0
+              ? ' title="Saldo negativo: en esta cuenta has apuntado más dinero del que tiene. Mira si te falta anotar un saldo o si algún movimiento salió en realidad de otra cuenta."'
+              : ""}>${nato(c.saldo)} ${esc(c.moneda)}</span>`}${pendiente(c)}</td>
+        ${nat ? "" : `<td class="${enEur(c) != null && enEur(c) < 0 ? "neg" : ""}">${enEur(c) == null ? "—" : G.fmtEur(enEur(c))}</td>`}
       </tr>`).join("")}</tbody>
        <tfoot><tr><td colspan="4">${filas.length} ${filas.length === 1 ? "cuenta" : "cuentas"}</td>
         <td></td>${nat ? "" : `<td>${G.fmtEur(suma)}</td>`}</tr></tfoot>`;
@@ -1654,6 +1656,9 @@
       ["Tipo", p.tipo], ["ISIN", p.isin], ["Índice que replica", p.indice],
       ["Comisión anual (TER)", p.ter != null ? G.fmtPct(p.ter, 2) : null],
       ["Entidad", p.entidad], ["Gestora", p.gestora],
+      // La cuenta vinculada: es la que cobra o ingresa sus movimientos (y de la que
+      // se hereda al pulsar «+ Anotar movimiento»), así que tiene que verse aquí.
+      ["Cuenta", p.cuentaNombre],
       ["Política", p.politica], ["Mercado", p.mercado],
       [p.origen ? "Primera aportación" : "Primer dato anotado", p.desde ? G.fmtFecha(p.desde) : null],
       [p.etqUnidades || "Participaciones",

@@ -474,7 +474,9 @@
       const ms = movsDe(c.id);
       const pr = propDe(c.propietario);
       const saldo = u
-        ? `<b>${num(u.valor, 2)} ${esc(mon)}</b><div class="subt">${fecha(u.fecha)}${
+        ? `<b class="${u.valor < 0 ? "neg" : ""}"${u.valor < 0
+            ? ' title="Saldo negativo: en esta cuenta has apuntado más dinero del que tiene. Mira si te falta anotar un saldo o si algún movimiento salió en realidad de otra cuenta."'
+            : ""}>${num(u.valor, 2)} ${esc(mon)}</b><div class="subt">${fecha(u.fecha)}${
             u.auto ? " · calculado" : " · anotado a mano"}${anotadoEseDia(p, u, true)}</div>`
         : `<span class="neg" title="Todavía no has anotado el saldo de esta cuenta. Anótalo tú aquí o apunta un movimiento de dinero: a partir de ahí sube y baja solo.">sin saldo anotado</span>`;
       const ult = ms.slice(0, 3).map(m => {
@@ -515,7 +517,7 @@
     const filasVals = vals.map((v, i) => `<tr><td>${fecha(v.fecha)}${
         v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo que entró y salió ese día. Puedes corregirlo o borrarlo si tu banco dice otra cosa."> · calculado</span>`
                : anotadoEseDia(p, v, i === 0)}</td>
-        <td>${num(v.valor, 2)} ${esc(mon)}</td>
+        <td class="${v.valor < 0 ? "neg" : ""}">${num(v.valor, 2)} ${esc(mon)}</td>
         <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}">Editar</button>
           <button data-acc="replicarValor" data-id="${esc(v.id)}">Replicar</button>
           <button data-acc="borrarValor" data-id="${esc(v.id)}">Borrar</button></td></tr>`).join("");
@@ -541,7 +543,7 @@
         <button class="btn" data-acc="nuevoMovCuenta" data-id="${esc(c.id)}">+ Movimiento</button>
         <button class="btn prim" data-acc="nuevoValorCuenta" data-id="${esc(p ? p.id : "")}"
           ${p ? "" : "disabled title=\"Falta su producto de efectivo\""}>+ Anotar saldo</button></header>
-      <p class="ayuda"><b>Saldo:</b> ${u ? `${num(u.valor, 2)} ${esc(mon)} (anotado el ${fecha(u.fecha)}${u.auto ? ", calculado" : ""})`
+      <p class="ayuda"><b>Saldo:</b> ${u ? `<span class="${u.valor < 0 ? "neg" : ""}">${num(u.valor, 2)} ${esc(mon)}</span> (anotado el ${fecha(u.fecha)}${u.auto ? ", calculado" : ""})`
         : 'ninguno anotado todavía: pulsa «+ Anotar saldo» o apunta un movimiento de dinero.'}
         · ${ms.length} ${ms.length === 1 ? "movimiento" : "movimientos"}</p>
       ${pend ? `<div class="av"><span>⚠</span><span>${esc(
@@ -549,6 +551,9 @@
         `${pend.n === 1 ? "este movimiento" : `estos ${pend.n} movimientos`} de ese día (${pend.importe > 0 ? "+" : "−"}${num(Math.abs(pend.importe), 2)} ${pend.mon}) ` +
         `${pend.n === 1 ? "no está" : "no están"} sumado${pend.n === 1 ? "" : "s"} en él. Si tu saldo ya lo incluye, no hagas nada; ` +
         `si lo anotaste antes, edítalo y pónlo a ${num(pend.sugerido, 2)} ${pend.mon}.`)}</span></div>` : ""}
+      ${u && u.valor < -0.005 ? `<div class="av"><span>⚠</span><span>${esc(
+        `El saldo de esta cuenta está en negativo (${num(u.valor, 2)} ${mon}): mira si te falta anotar un saldo ` +
+        "o si algún movimiento salió en realidad de otra cuenta.")}</span></div>` : ""}
       </section>
       <div class="saldos">
         <section class="tarjeta saldo"><header><h2>Serie de saldos</h2>
@@ -751,7 +756,7 @@
       <label class="interruptor siVincula" hidden><input type="checkbox" name="vincular"><span class="pista"></span>
         <span><b>Vincular «<span id="mVincNombre"></span>» a esta cuenta</b>
           <small>Sus próximas compras, ventas y dividendos usarán esta cuenta automáticamente.</small></span></label>
-      <div class="resumen"><span id="mAyuda"></span><b id="mPrecio"></b></div>`,
+      <div class="resumen"><div><div id="mCuentaMov" class="movCta"></div><span id="mAyuda"></span></div><b id="mPrecio"></b></div>`,
     async f => {
       const d = campos(f);
       if (!nuevo) d.id = m.id;
@@ -835,6 +840,24 @@
       $("#mAyuda").textContent = AYUDA_IMPORTE[t] + (p && manual(p) && t === "compra"
         ? " Como este producto se valora a mano, las unidades son opcionales." : "")
         + (esRenta && cid ? ` El dinero entra en «${nombre(cuentaDe(cid))}»: su saldo sube en ese importe.` : "");
+      // De qué cuenta sale o entra el dinero, en texto y no solo en el desplegable: en
+      // una compra o una venta ese campo decide a quién se le cobra, y era fácil no
+      // verlo (una compra se anotó en REVOLUT_EUR creyendo que era TRADE REPUBLIC).
+      const mCta = $("#mCuentaMov");
+      if (mCta) {
+        const nomCta = cid ? nombre(cuentaDe(cid)) : "";
+        if (t === "compra") {
+          mCta.textContent = nomCta
+            ? `El dinero sale de «${nomCta}».`
+            : "Sin cuenta: es una aportación de dinero nuevo, no sale de ninguna cuenta.";
+        } else if (t === "venta") {
+          mCta.textContent = nomCta
+            ? `El dinero entra en «${nomCta}».`
+            : "Sin cuenta: el dinero sale de la app, no entra en ninguna cuenta.";
+        } else {
+          mCta.textContent = "";
+        }
+      }
       const u = leeNum(f.elements.unidades.value), imp = leeNum(f.elements.importe.value);
       const com = leeNum(f.elements.comision.value) || 0;
       $("#mPrecio").textContent = t === "entrega" && u > 0
