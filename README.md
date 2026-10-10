@@ -162,8 +162,9 @@ Las ventas descuentan el coste por **FIFO** (primero lo más antiguo), como hace
   año (declaración de la renta) sin tener que recalcular nada.
 - El panel suma el **bruto** = importe cobrado + retención + comisión, que es lo que
   rindió de verdad; la retención aparece en «Impuestos» y la comisión en «Comisiones».
-- **Cuenta**: la que recibe el dinero. **El saldo de esa cuenta sube en lo cobrado**
-  si esa cuenta tiene su producto de **«Cuenta / efectivo»**.
+- **Cuenta**: la que recibe el dinero. **El saldo de esa cuenta sube en lo cobrado**.
+  Si esa cuenta todavía no tenía producto de «Cuenta / efectivo», se le crea solo al
+  anotar el movimiento, para que su dinero se vea en el panel y en «Saldos y valores».
 
 #### Intereses
 
@@ -174,11 +175,22 @@ Las ventas descuentan el coste por **FIFO** (primero lo más antiguo), como hace
   sus propios campos igual que en un dividendo.
 - **El saldo de la cuenta sube en lo cobrado**, igual que con un dividendo.
 
-> **Saldo ya anotado a mano**: si para ese día ya tienes un saldo escrito en
-> «Saldos y valores», manda ese (es el real del banco y casi siempre ya incluye lo
-> cobrado): la app no lo suma dos veces y te lo dice. Y si hay un saldo anotado a mano
-> de un día posterior, el histórico tampoco cambia, porque ese saldo ya recoge lo que
-> llegó después.
+#### El efectivo de una cuenta
+
+- **Lo que mueve dinero en una cuenta** —dividendo, interés, **depósito** (entra),
+  **retirada** (sale) y **transferencia** entre tus cuentas (sale de una y entra en la
+  otra)— recalcula el saldo de ese día: último saldo anotado anterior + lo que entró
+  y lo que salió. Al corregir o borrar el movimiento, el día se rehace entero.
+- **Saldo anotado a mano para ese día**: manda el tuyo (es el real del banco y casi
+  siempre ya incluye ese dinero), así que **no se le suma ni se le quita nada**, pero
+  tampoco se esconde: la app te avisa con **las dos cifras** (lo anotado ese día y a
+  cuánto quedaría tu saldo si fuera anterior) y, en la tabla **Cuentas** del panel,
+  verás al lado del saldo «8 oct 2026 · +5,00 EUR anotados ese día».
+- **Saldo anotado a mano de un día posterior**: el histórico no cambia, porque ese
+  saldo real ya recoge lo que llegó después.
+- **Cuentas sin saldo anotado**: la tabla **Cuentas** enseña «—» mientras no haya
+  nada anotado (no «0,00», que diría que está vacía); en cuanto anotas un movimiento
+  de dinero, se crea su saldo y empieza a subir y a bajar.
 
 ### Cuentas, planes de pensiones, pisos… (valores anotados a mano)
 

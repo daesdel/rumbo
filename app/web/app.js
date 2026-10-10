@@ -1033,6 +1033,14 @@
     const nat = estado.mon !== "global";
     const nato = v => Number(v == null ? 0 : v).toLocaleString("es-ES",
       { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // Lo anotado el mismo día del último saldo a mano: no está sumado en él (manda
+    // el banco), pero tampoco se esconde. Puede ser negativo (una retirada).
+    const pendiente = c => {
+      const p = c.pendiente;
+      if (!p) return "";
+      const t = `${G.fmtFecha(p.fecha)} · ${p.importe >= 0 ? "+" : ""}${nato(p.importe)} ${c.moneda} anotados ese día`;
+      return `<div class="subt" title="Tu saldo de ese día está anotado a mano y es el real de tu banco: estos movimientos NO están sumados en él (casi siempre ya los incluye, pero si anotaste un saldo anterior, súbelo en «Saldos y valores»).">${esc(t)}</div>`;
+    };
     $("#tablaCuentas").innerHTML =
       `<thead><tr><th>Cuenta</th><th>Entidad</th><th>Propietario</th><th>Moneda</th>
         <th>Saldo</th>${nat ? "" : `<th>En ${enUSD() ? "dólares" : "euros"}</th>`}</tr></thead>
@@ -1041,7 +1049,9 @@
         <td class="subt">${esc(c.entidad || "")}</td>
         <td>${esc(nom(c))}</td>
         <td class="subt">${esc(c.moneda)}</td>
-        <td>${nato(c.saldo)} ${esc(c.moneda)}</td>
+        <td>${c.saldo == null
+          ? `<span class="subt" title="Todavía no tiene ningún saldo anotado: apunta un movimiento de dinero en esa cuenta o anota su saldo en «Saldos y valores».">—</span>`
+          : `${nato(c.saldo)} ${esc(c.moneda)}`}${pendiente(c)}</td>
         ${nat ? "" : `<td>${enEur(c) == null ? "—" : G.fmtEur(enEur(c))}</td>`}
       </tr>`).join("")}</tbody>
        <tfoot><tr><td colspan="4">${filas.length} ${filas.length === 1 ? "cuenta" : "cuentas"}</td>

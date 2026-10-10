@@ -473,6 +473,26 @@ def producto_efectivo_de(cfg, cid):
                  if p.get("tipo") == "efectivo" and p.get("cuenta") == cid), None)
 
 
+def crea_producto_efectivo(cfg, cid):
+    """Crea (si todavía no existe) el producto de efectivo donde se guarda el saldo
+    de una cuenta. Sin él el dinero de la cuenta no aparece en ningún sitio ni puede
+    subir: es lo que hace que una cuenta sea visible y que sus movimientos se reflejen.
+    Devuelve el producto, o None si la cuenta no existe."""
+    existente = producto_efectivo_de(cfg, cid)
+    if existente:
+        return existente
+    c = cuenta(cfg, cid)
+    if not c:
+        return None
+    nombre = c.get("nombre") or cid
+    prod, _ = guarda_producto(cfg, {
+        "nombre": nombre, "corto": nombre[:24], "tipo": "efectivo", "fuente": "manual",
+        "moneda": c.get("moneda") or "EUR", "cuenta": cid,
+        "entidad": c.get("entidad") or "", "propietario": c.get("propietario") or "",
+        "largoPlazo": True})
+    return prod
+
+
 def borra_movimiento(cfg, mid):
     antes = len(cfg.get("movimientos", []))
     cfg["movimientos"] = [m for m in cfg.get("movimientos", []) if m.get("id") != mid]

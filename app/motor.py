@@ -699,6 +699,42 @@ def serie_cambio(moneda, carpeta):
     return descargar_serie(sim) if sim else {}
 
 
+# --------------------------------------------- efectivo de las cuentas
+# Qué movimientos mueven el dinero de una cuenta y con qué signo, según la cuenta
+# que se mire: `cuenta` (la principal del movimiento) y `contrapartida` (la otra
+# cuenta implicada). El saldo de una cuenta se recalcula con ellos, y el panel usa
+# la misma regla para enseñar lo que queda sin reflejar en un saldo anotado a mano.
+EFECTO_EFECTIVO = {"dividendo": (1, 0), "interes": (1, 0), "deposito": (1, -1),
+                   "retirada": (-1, 1), "transferencia": (-1, 1), "traspaso": (-1, 1)}
+
+
+def efecto_de(mov, cid):
+    """+1 si el dinero entra en la cuenta `cid`, −1 si sale, 0 si no la toca."""
+    if not cid:
+        return 0
+    sc, cp = EFECTO_EFECTIVO.get(mov.get("tipo"), (0, 0))
+    if mov.get("cuenta") == cid:
+        return sc
+    if mov.get("contrapartida") == cid:
+        return cp
+    return 0
+
+
+def importe_en_cuenta(mov, mon, tc=None):
+    """El importe de un movimiento expresado en la moneda `mon` de su cuenta (ahí
+    vive el saldo). `tc` es una función fecha → euros por unidad de `mon`; si hace
+    falta un cambio y no lo hay, devuelve None: no se inventa ninguna cifra."""
+    eur = mov.get("importe")
+    if eur is None:
+        return None
+    if (mov.get("monedaOriginal") or "EUR").upper() == mon and mov.get("importeOriginal") is not None:
+        return float(mov["importeOriginal"])        # anotado en la moneda de la cuenta
+    if mon == "EUR":
+        return float(eur)                           # el importe guardado ya está en euros
+    t = tc(str(mov.get("fecha") or "")) if tc else None
+    return round(float(eur) / t, 6) if t else None
+
+
 # ---------------------------------------------------------------- construccion
 
 def construir(cfg, carpeta, descargar=True):
@@ -1548,23 +1584,63 @@ def construir(cfg, carpeta, descargar=True):
 
     # ---- cuentas, propietarios y cambio actual (para los filtros del panel) ----
     saldos_por_cuenta = {e.get("cuenta"): e for e in ser_otros}
+    # El producto de efectivo de cada cuenta y los movimientos que la tocan, para
+    # enseñar junto al saldo lo anotado ese día que ese saldo NO recoge.
+    efectivo_por_cuenta = {p.get("cuenta"): p for p in cfg.get("productos", [])
+                           if p.get("tipo") == "efectivo" and p.get("cuenta")}
+    movs_cuentas = defaultdict(list)
+    for m in cfg.get("movimientos", []):
+        for cid in {m.get("cuenta"), m.get("contrapartida")} - {None, ""}:
+            movs_cuentas[cid].append(m)
+
+    def pendiente_de(c, mon):
+        """Lo anotado el mismo día del último saldo de la cuenta ANOTADO A MANO:
+        ese dinero no está sumado en ese saldo (manda el real del banco) y no
+        puede quedarse sin verse. None si no hay nada que enseñar."""
+        p = efectivo_por_cuenta.get(c["id"])
+        if not p:
+            return None
+        vals = sorted(vals_por.get(p["id"], []), key=lambda v: v["fecha"])
+        if not vals or vals[-1].get("auto"):
+            return None                      # un saldo calculado ya los recoge
+        f = vals[-1]["fecha"]
+        movs = [m for m in movs_cuentas.get(c["id"], [])
+                if m.get("fecha") == f and efecto_de(m, c["id"])]
+        if not movs:
+            return None
+        tc = (lambda x: valor_en(series.get(f"{mon}EUR=X") or {}, x, 7)) if mon != "EUR" else None
+        total, vale = 0.0, True
+        for m in movs:
+            x = importe_en_cuenta(m, mon, tc)
+            if x is None:
+                vale = False
+                break
+            total += efecto_de(m, c["id"]) * x
+        if not vale or abs(total) < 0.005:
+            return None
+        return {"fecha": f, "importe": round(total, 2),
+                "saldo": round(float(vals[-1]["valor"]), 2)}
+
     cuentas_out = []
     for c in cfg.get("cuentas", []):
         e = saldos_por_cuenta.get(c["id"])
-        saldo = 0.0
+        mon = (c.get("moneda") or "EUR").upper()
+        # Sin saldo anotado no se inventa ninguno: se enseña «—». Un 0,00 diría que
+        # la cuenta está vacía cuando solo falta haber anotado su saldo.
+        saldo = None
         if e:
             saldo = float(e.get("valorNat") if e.get("valorNat") is not None
                           else e.get("valor") or 0)
-        mon = (c.get("moneda") or "EUR").upper()
         if mon == "EUR":
             eur = saldo
         else:
             t = valor_en(series.get(f"{mon}EUR=X") or {}, fecha_extracto, 7)
-            eur = saldo * t if t else None
+            eur = saldo * t if (saldo is not None and t) else None
         cuentas_out.append({**c, "moneda": mon,
                             "propietario": c.get("propietario") or defecto_prop,
-                            "saldo": round(saldo, 2),
-                            "saldoEur": round(eur, 2) if eur is not None else None})
+                            "saldo": round(saldo, 2) if saldo is not None else None,
+                            "saldoEur": round(eur, 2) if eur is not None else None,
+                            "pendiente": pendiente_de(c, mon)})
     # Cambio de hoy y serie diaria salen del MISMO par que usa el motor para pasar
     # dólares a euros: USDEUR=X (euros por dólar). El panel vuelve a dólares con el
     # recíproco exacto de esa misma serie (dólares por euro), así que ida y vuelta

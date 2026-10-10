@@ -320,6 +320,38 @@ def test_aportado_de_cuenta_puede_ser_negativo_y_la_identidad_sigue(tmp_path):
     assert t["patrimonio"] == pytest.approx(t["aportado"] + t["plusvalia"])
 
 
+def test_el_panel_ensena_lo_anotado_que_el_saldo_a_mano_no_suma(tmp_path):
+    """Si el último saldo de una cuenta está anotado a mano y ese día has anotado
+    dinero (interés, dividendo…), ese dinero NO está sumado en ese saldo: el panel
+    lo enseña al lado en lugar de esconderlo."""
+    cfg = _fondo_y_cuenta(saldo=1050.0)
+    cfg["movimientos"].append({"id": "m4", "fecha": "2025-06-01", "tipo": "interes",
+                               "importe": 5.0, "cuenta": "c1"})
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    c = datos["cuentas"][0]
+    assert c["saldo"] == pytest.approx(1050.0)              # manda el saldo a mano
+    assert c["pendiente"]
+    assert c["pendiente"]["fecha"] == "2025-06-01"
+    assert c["pendiente"]["importe"] == pytest.approx(5.0)
+    assert c["pendiente"]["saldo"] == pytest.approx(1050.0)
+    # Un saldo CALCULADO ya recoge esos movimientos: no hay nada pendiente que enseñar.
+    cfg["valoraciones"][-1]["auto"] = True
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    assert datos["cuentas"][0]["pendiente"] is None
+
+
+def test_cuenta_sin_saldo_anotado_se_ensena_desconocida(tmp_path):
+    """Una cuenta cuyo saldo no se ha anotado nunca no lleva «0,00» (eso diría que
+    está vacía): se enseña «—», que es la verdad."""
+    cfg = _fondo_y_cuenta(saldo=1050.0)
+    cfg["cuentas"].append({"id": "c2", "nombre": "Sin anotar", "moneda": "EUR"})
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    por_id = {c["id"]: c for c in datos["cuentas"]}
+    assert por_id["c2"]["saldo"] is None and por_id["c2"]["saldoEur"] is None
+    assert por_id["c2"]["pendiente"] is None
+    assert por_id["c1"]["saldo"] == pytest.approx(1050.0)  # la anotada, sigue visible
+
+
 def test_cuenta_en_dolares_entra_convertida_a_euros(tmp_path):
     """El saldo anotado en la moneda de la cuenta (USD) entra en el panel en
     euros con el cambio de cada día: sin la serie de cambio, la cuenta sumaba

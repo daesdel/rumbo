@@ -1014,75 +1014,104 @@ def cambia(fn, avisos_extra=None):
 
 
 # ---------------------------------------------------------------- efectivo de la cuenta
-# Un dividendo o un interés es dinero que ENTRA en la cuenta anotada: su saldo no
-# lo calcula el motor, se anota a mano en «Saldos y valores» (es el valor del
-# producto de efectivo vinculado a la cuenta), así que aquí hay que subirlo con lo
-# cobrado. El saldo escrito se marca con «auto» para distinguirlo de uno anotado a
-# mano, que manda siempre: es el real del banco y casi siempre ya incluye lo cobrado.
-TIPOS_QUE_ENTRAN = ("dividendo", "interes")
+# El saldo de una cuenta no lo calcula el motor: vive en el producto de efectivo
+# vinculado (lo que se anota en «Saldos y valores»). Cuando se anota un movimiento
+# de DINERO —interés, dividendo, depósito, retirada, paso entre cuentas— ese saldo
+# se recalcula para que lo anotado se refleje SIEMPRE y de forma visible. El saldo
+# escrito se marca con «auto»; uno anotado a mano (el real del banco) manda y no se
+# pisa jamás… pero tampoco se esconde: se avisa con sus dos cifras.
 
 
-def _importe_en_producto(cfg, mov):
-    """El dinero que este movimiento mete en su cuenta, en la moneda del producto
-    de efectivo de esa cuenta (ahí se guarda el saldo, en la moneda del producto)."""
-    p = almacen.producto_efectivo_de(cfg, mov.get("cuenta"))
+def _importe_en_producto(cfg, mov, cid=None):
+    """El dinero que este movimiento mueve en la cuenta `cid` (por defecto, su
+    `cuenta`), en la moneda del producto de efectivo donde se guarda su saldo."""
+    p = almacen.producto_efectivo_de(cfg, cid or mov.get("cuenta"))
     if not p:
         return None
     mon = (p.get("moneda") or "EUR").upper()
-    eur = mov.get("importe")
-    if eur is None:
-        return None
-    if (mov.get("monedaOriginal") or "EUR").upper() == mon and mov.get("importeOriginal") is not None:
-        return float(mov["importeOriginal"])        # anotado en la moneda de la cuenta
-    if mon == "EUR":
-        return float(eur)                            # el importe guardado ya está en euros
-    tc = _tc_eur(mon, str(mov.get("fecha") or ""))
-    return round(float(eur) / tc, 6) if tc else None
+    return motor.importe_en_cuenta(mov, mon, lambda f: _tc_eur(mon, f))
 
 
-def refresca_efectivo(cfg, mov, avisos=None):
-    """Recalcula el saldo del día de un dividendo o un interés: suma lo cobrado
-    ese día por TODOS los dividendos e intereses de la cuenta, sobre el último
-    saldo anotado anterior. Como recalcula el día entero, corregir o borrar un
-    movimiento deja el saldo derecho. Devuelve True si ha tocado el saldo."""
-    tipo, cid, f = (mov or {}).get("tipo"), (mov or {}).get("cuenta"), (mov or {}).get("fecha")
-    if tipo not in TIPOS_QUE_ENTRAN or not cid or not f:
-        return False
+def _dinero(x):
+    """26797.18 → '26.797,18' (siempre con dos decimales: es una cantidad de dinero)."""
+    return f"{round(x, 2):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _refresca_cuenta(cfg, cid, f, avisos=None):
+    """Recalcula el saldo del día `f` de una cuenta con TODOS los movimientos de
+    dinero de ese día, con su signo (entra o sale). Como se rehace el día entero,
+    corregir o borrar un movimiento deja el saldo derecho. Devuelve True si ha
+    tocado el saldo."""
+    c = almacen.cuenta(cfg, cid) or {}
+    nombre_c = c.get("nombre") or cid
+    movs = [m for m in cfg.get("movimientos", [])
+            if m.get("fecha") == f and motor.efecto_de(m, cid)]
     p = almacen.producto_efectivo_de(cfg, cid)
-    if not p:
-        if avisos is not None:
-            c = almacen.cuenta(cfg, cid) or {}
-            avisos.append(f"«{c.get('nombre') or cid}» no tiene saldo de efectivo, así que este "
-                          "dinero no sube ningún saldo. Si quieres seguirlo, crea su cuenta de "
-                          "efectivo en «Productos».")
-        return False
-    vals = sorted((v for v in cfg.get("valoraciones", []) if v.get("producto") == p["id"]),
+    vals = sorted((v for v in cfg.get("valoraciones", []) if p and v.get("producto") == p["id"]),
                   key=lambda v: v["fecha"])
     actual = next((v for v in vals if v["fecha"] == f), None)
-    if actual is not None and not actual.get("auto"):
-        # Saldo anotado a mano: es el real del banco (y casi siempre ya incluye lo
-        # cobrado ese día), así que no se toca… pero se avisa, para que no parezca
-        # que el movimiento no ha hecho nada.
-        if avisos is not None:
-            avisos.append(f"«{p.get('corto') or p.get('nombre')}» ya tiene un saldo anotado a mano "
-                          f"para el {almacen.fmt_fecha(f)}: no lo he tocado (es el real del banco "
-                          "y casi siempre ya incluye lo cobrado ese día).")
+    if not movs:
+        # Ese día ya no queda nada anotado: el saldo calculado se retira.
+        if actual is not None and actual.get("auto"):
+            almacen.borra_valoracion(cfg, actual["id"])
+            return True
         return False
-    movs = [m for m in cfg.get("movimientos", [])
-            if m.get("tipo") in TIPOS_QUE_ENTRAN and m.get("cuenta") == cid and m.get("fecha") == f]
-    suma, sin_cambio = 0.0, False
+    if not p:
+        # Sin producto de efectivo el dinero de la cuenta no aparece en ningún sitio:
+        # se crea su saldo para que la cuenta sea visible y su dinero, subible.
+        try:
+            p = almacen.crea_producto_efectivo(cfg, cid)
+        except almacen.ErrorValidacion as e:
+            if avisos is not None:
+                avisos.append(f"No he podido crear el saldo de efectivo de «{nombre_c}»: "
+                              + " ".join(e.errores))
+            return False
+        if not p:
+            return False
+        if avisos is not None:
+            avisos.append(f"«{nombre_c}» no tenía saldo de efectivo, así que le he creado uno "
+                          "(ya aparece en «Productos» y en «Saldos y valores»). Su saldo sale "
+                          "de lo que lleves anotado: si en tu banco hay otra cifra, anótala en "
+                          "«Saldos y valores» y a partir de ahí manda ella.")
+        vals = []
+    # Neto del día en la moneda de la cuenta. Si falta algún cambio no se escribe
+    # nada (una cifra a medias es peor que ninguna) y se avisa.
+    neto, sin_cambio = 0.0, False
     for m in movs:
-        x = _importe_en_producto(cfg, m)
+        x = _importe_en_producto(cfg, m, cid)
         if x is None:
             sin_cambio = True
         else:
-            suma += x
-    suma = round(suma, 2)
-    if suma <= 0:                       # no queda ninguno: el saldo auto se retira
-        if actual is not None:
-            almacen.borra_valoracion(cfg, actual["id"])
-        return True
-    # Un saldo anotado a mano DESPUÉS de esta fecha es posterior a lo cobrado y ya
+            neto += motor.efecto_de(m, cid) * x
+    neto = round(neto, 2)
+    if sin_cambio:
+        if avisos is not None:
+            avisos.append(f"No encuentro el cambio a {(c.get('moneda') or 'EUR').upper()} del "
+                          f"{almacen.fmt_fecha(f)}: el saldo de «{nombre_c}» no se ha "
+                          "actualizado. Anótalo tú en «Saldos y valores».")
+        return False
+    if actual is not None and not actual.get("auto"):
+        # Saldo anotado a mano: es el real del banco y casi siempre ya incluye lo
+        # cobrado ese día, así que NO se le suma nada (se duplicaría) ni se le quita
+        # nada (se pisaría tu dato). Pero no se esconde: se dicen las dos cifras, y
+        # quien anotó un saldo anterior a este movimiento sabe cuánto subirlo.
+        if avisos is not None:
+            q = len(movs)
+            uno = q == 1
+            mon = (c.get("moneda") or "EUR").upper()
+            tipos = ", ".join(sorted({almacen.TIPOS_MOV.get(m["tipo"], m["tipo"]) for m in movs}))
+            cifra = f"+{_dinero(neto)}" if neto >= 0 else f"-{_dinero(abs(neto))}"
+            nuevo = _dinero(round(actual["valor"] + neto, 2))
+            avisos.append(
+                f"«{nombre_c}» ya tiene un saldo anotado a mano para el {almacen.fmt_fecha(f)}: "
+                f"{_dinero(actual['valor'])} {mon}. No lo he tocado (es el real del banco y casi "
+                "siempre ya incluye ese dinero), pero no lo escondo: ese día tienes "
+                f"{'un movimiento' if uno else f'{q} movimientos'} de dinero ({tipos}) que "
+                f"{'no está' if uno else 'no están'} sumado{'s' if uno else ''} en ese saldo: "
+                f"{cifra} {mon}. Si tu saldo era anterior, "
+                f"{'súbelo' if neto >= 0 else 'bájalo'} a {nuevo} {mon} en «Saldos y valores».")
+        return False
+    # Un saldo anotado a mano DESPUÉS de esta fecha es posterior al movimiento y ya
     # lo recoge (los movimientos se anotan cuando llega el extracto, a menudo con
     # días de retraso): no se sube nada, para no meter en el histórico un punto
     # calculado que ese saldo real contradice después.
@@ -1090,13 +1119,23 @@ def refresca_efectivo(cfg, mov, avisos=None):
         return False
     previo = next((v for v in reversed(vals) if v["fecha"] < f), None)
     val = almacen.guarda_valoracion(cfg, {"producto": p["id"], "fecha": f,
-                                          "valor": round((float(previo["valor"]) if previo else 0.0) + suma, 2)})
+                                          "valor": round((float(previo["valor"]) if previo else 0.0) + neto, 2)})
     val["auto"] = True
-    if sin_cambio and avisos is not None:
-        avisos.append(f"No encuentro el cambio a {p.get('moneda')} del "
-                      f"{almacen.fmt_fecha(f)}: el saldo de «{p.get('corto') or p.get('nombre')}» "
-                      "no se ha actualizado. Anótalo tú en «Saldos y valores».")
     return True
+
+
+def refresca_efectivo(cfg, mov, avisos=None):
+    """Recalcula el saldo del día en TODAS las cuentas que mueve este movimiento
+    (su `cuenta` y su `contrapartida`). Devuelve True si ha tocado algún saldo."""
+    mov = mov or {}
+    f = mov.get("fecha")
+    if not f:
+        return False
+    tocado = False
+    for cid in {mov.get("cuenta"), mov.get("contrapartida")} - {None, ""}:
+        if motor.efecto_de(mov, cid):
+            tocado = _refresca_cuenta(cfg, cid, f, avisos) or tocado
+    return tocado
 
 
 @app.post("/api/<coleccion>")

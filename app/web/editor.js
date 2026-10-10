@@ -639,6 +639,47 @@
   /* ---------------------------------------------- saldos y valores anotados */
   const etiquetaValor = p => p.tipo === "efectivo" ? "Saldo" : p.tipo === "deuda" ? "Lo que queda por pagar" : "Valor";
 
+  // Mismo criterio que el servidor para refrescar el efectivo de una cuenta:
+  // qué movimientos entran (+1) y cuáles salen (−1) según la cuenta que se mire.
+  const EFECTO = { dividendo: [1, 0], interes: [1, 0], deposito: [1, -1],
+                   retirada: [-1, 1], transferencia: [-1, 1], traspaso: [-1, 1] };
+  const efectoDe = (m, cid) => {
+    if (!cid || !EFECTO[m.tipo]) return 0;
+    if (m.cuenta === cid) return EFECTO[m.tipo][0];
+    return m.contrapartida === cid ? EFECTO[m.tipo][1] : 0;
+  };
+  /** El importe del movimiento en la moneda de la cuenta; null si haría falta un
+      cambio de divisa que no tenemos (no se inventa ninguna cifra). */
+  const importeEn = (m, mon) => {
+    if ((m.monedaOriginal || "EUR").toUpperCase() === mon && m.importeOriginal != null) {
+      return +m.importeOriginal;
+    }
+    return mon === "EUR" && m.importe != null ? +m.importe : null;
+  };
+  /** Lo anotado el mismo día del ÚLTIMO saldo A MANO de la cuenta: es el saldo que
+      enseña el panel, y ese dinero no está sumado en él, así que no puede quedarse
+      sin verse. Solo esa fila, o quedaría marcado medio histórico. */
+  function anotadoEseDia(p, v, ultimo) {
+    if (!ultimo || v.auto || !p.cuenta) return "";
+    const mon = (p.moneda || "EUR").toUpperCase();
+    let total = 0, n = 0;
+    for (const m of E.cfg.movimientos || []) {
+      if (m.fecha !== v.fecha) continue;
+      const s = efectoDe(m, p.cuenta);
+      if (!s) continue;
+      const x = importeEn(m, mon);
+      if (x == null) continue;
+      total += s * x;
+      n++;
+    }
+    if (!n || Math.abs(total) < 0.005) return "";
+    const q = n === 1 ? "ese día" : `ese día (${n})`;
+    const ayuda = "Tu saldo de este día está anotado a mano y es el real de tu banco: estos " +
+      "movimientos NO están sumados en él. Si tu saldo ya los incluye (lo normal), no hagas " +
+      "nada; si lo anotaste antes de que entraran, edítalo y súbelo.";
+    return `<span class="subt" title="${esc(ayuda)}">· ${q} ${total > 0 ? "+" : ""}${eur(total)}</span>`;
+  }
+
   function vistaSaldos() {
     const lista = E.cfg.productos.filter(manual);
     if (!lista.length) {
@@ -649,7 +690,7 @@
     const tarjetas = lista.map(p => {
       const vals = E.cfg.valoraciones.filter(v => v.producto === p.id).sort((a, b) => a.fecha < b.fecha ? 1 : -1);
       const conAportado = !soloSaldo(p);
-      const filas = vals.map(v => `<tr><td>${fecha(v.fecha)}${v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo cobrado ese día en dividendos e intereses. Cámbialo o bórralo si tu banco dice otra cosa."> · calculado</span>` : ""}</td><td>${eur(v.valor)}</td>
+      const filas = vals.map((v, i) => `<tr><td>${fecha(v.fecha)}${v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo cobrado ese día en dividendos, intereses, depósitos y retiradas. Cámbialo o bórralo si tu banco dice otra cosa."> · calculado</span>` : anotadoEseDia(p, v, i === 0)}</td><td>${eur(v.valor)}</td>
         ${conAportado ? `<td>${v.aportado != null ? eur(v.aportado) : "—"}</td>` : ""}
         <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}" title="Cambiar este valor">Editar</button>
           <button data-acc="replicarValor" data-id="${esc(v.id)}" title="Anotar otro igual, sin tocar este">Replicar</button>

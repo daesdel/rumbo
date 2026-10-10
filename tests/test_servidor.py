@@ -644,9 +644,10 @@ def test_varios_del_mismo_dia_y_borrado_dejan_el_saldo_derecho():
     assert _valor_de(cfg, "2025-06-10") == (None, None)
 
 
-def test_no_toca_un_saldo_anotado_a_mano():
+def test_no_toca_un_saldo_anotado_a_mano_y_lo_deja_a_la_vista():
     """Si ese día ya hay un saldo escrito a mano es el real del banco: no se le
-    suma nada (casi siempre ya incluye lo cobrado), pero se avisa."""
+    suma nada (casi siempre ya incluye lo cobrado) ni se le quita nada (se pisaría
+    el dato del banco), PERO tampoco se esconde: el aviso da las dos cifras."""
     cfg = _cartera_efectivo()
     cfg["valoraciones"].append({"id": "v2", "producto": "cash", "fecha": "2025-06-10", "valor": 1003.0})
     mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c1", "importe": 25.0}
@@ -655,6 +656,53 @@ def test_no_toca_un_saldo_anotado_a_mano():
     assert s.refresca_efectivo(cfg, mov, avisos) is False
     assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1003.0), None)
     assert avisos and "anotado a mano" in avisos[0]
+    # …con lo anotado ese día (25) y con lo que habría que poner si el saldo era
+    # anterior a ese dividendo (1.003 + 25): nada de «se ha ignorado en silencio».
+    assert "25" in avisos[0] and "1.028" in avisos[0]
+
+
+def test_un_deposito_sube_el_efectivo_y_una_retirada_lo_baja():
+    """El dinero que entra o sale de una cuenta (ingreso, retirada) también tiene
+    que reflejarse en su saldo, con su signo."""
+    cfg = _cartera_efectivo()
+    dep = {"id": "m1", "fecha": "2025-06-10", "tipo": "deposito", "cuenta": "c1", "importe": 500.0}
+    cfg["movimientos"].append(dep)
+    assert s.refresca_efectivo(cfg, dep) is True
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(1500.0), True)   # 1.000 + 500
+
+    ret = {"id": "m2", "fecha": "2025-06-12", "tipo": "retirada", "cuenta": "c1", "importe": 200.0}
+    cfg["movimientos"].append(ret)
+    assert s.refresca_efectivo(cfg, ret) is True
+    assert _valor_de(cfg, "2025-06-12") == (pytest.approx(1300.0), True)   # 1.500 − 200
+
+    # Borrar la retirada rehace su día y el saldo vuelve a subir: no queda nada huérfano.
+    cfg["movimientos"] = [dep]
+    s.refresca_efectivo(cfg, ret)
+    assert not any(v["fecha"] == "2025-06-12" for v in cfg["valoraciones"])
+
+
+def test_una_transferencia_mueve_las_dos_cuentas():
+    """Una transferencia es dinero que sale de una cuenta y entra en la otra: los
+    dos saldos se refrescan (y el día entero se rehace, así que no se duplica)."""
+    cfg = _cartera_efectivo()
+    cfg["cuentas"].append({"id": "c2", "nombre": "Ahorro", "moneda": "EUR"})
+    cfg["productos"].append({"id": "cash2", "nombre": "Ahorro", "corto": "Ahorro",
+                             "tipo": "efectivo", "fuente": "manual", "moneda": "EUR", "cuenta": "c2"})
+    cfg["valoraciones"].append({"id": "v2", "producto": "cash2", "fecha": "2025-06-01", "valor": 300.0})
+    mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "transferencia", "cuenta": "c1",
+           "contrapartida": "c2", "importe": 150.0}
+    cfg["movimientos"].append(mov)
+
+    def valor(pid, f):
+        v = next((v for v in cfg["valoraciones"] if v["producto"] == pid and v["fecha"] == f), None)
+        return (v["valor"], v.get("auto")) if v else (None, None)
+
+    assert s.refresca_efectivo(cfg, mov) is True
+    assert valor("cash", "2025-06-10") == (pytest.approx(850.0), True)     # 1.000 − 150
+    assert valor("cash2", "2025-06-10") == (pytest.approx(450.0), True)    #   300 + 150
+    # Los saldos de los días anteriores siguen intactos.
+    assert valor("cash", "2025-06-01") == (pytest.approx(1000.0), None)
+    assert valor("cash2", "2025-06-01") == (pytest.approx(300.0), None)
 
 
 def test_un_saldo_manual_posterior_deja_el_historico_como_esta():
@@ -683,15 +731,23 @@ def test_un_dividendo_se_apoya_en_el_ultimo_saldo_anotado():
     assert _valor_de(cfg, "2025-06-08") == (pytest.approx(1010.0), None)   # el de antes, intacto
 
 
-def test_sin_producto_de_efectivo_no_sube_nada_y_lo_cuenta():
+def test_cuenta_sin_producto_de_efectivo_se_le_crea_su_saldo(monkeypatch):
+    """Una cuenta sin producto de efectivo (REVOLUT_EUR y otras) era invisible: no
+    estaba en «Saldos y valores» y su dinero no subía nada. Ahora se le crea su
+    saldo al anotar el primer movimiento, y la cuenta queda localizable."""
+    monkeypatch.setattr(s, "_tc_eur", lambda mon, f: 1.0)     # sin salir a buscar el cambio
     cfg = _cartera_efectivo()
     cfg["cuentas"].append({"id": "c2", "nombre": "Revolut", "moneda": "USD"})
     mov = {"id": "m1", "fecha": "2025-06-10", "tipo": "dividendo", "cuenta": "c2", "importe": 3.0}
     cfg["movimientos"].append(mov)
     avisos = []
-    assert s.refresca_efectivo(cfg, mov, avisos) is False
-    assert len(cfg["valoraciones"]) == 1
+    assert s.refresca_efectivo(cfg, mov, avisos) is True
+    p = s.almacen.producto_efectivo_de(cfg, "c2")
+    assert p and p["moneda"] == "USD" and p["cuenta"] == "c2"
+    assert _valor_de(cfg, "2025-06-10") == (pytest.approx(3.0), True)   # 0 + lo anotado
     assert avisos and "Revolut" in avisos[0] and "efectivo" in avisos[0]
+    # …y se puede corregir a mano en «Saldos y valores»: el producto ya existe.
+    assert any(x["producto"] == p["id"] for x in cfg["valoraciones"])
 
 
 def test_el_importe_se_pasa_a_la_moneda_de_la_cuenta(monkeypatch):
