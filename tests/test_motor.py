@@ -730,3 +730,123 @@ def test_dividendo_de_un_producto_suma_el_bruto(tmp_path):
     assert datos["comisiones"]["compraventaPagada"] == pytest.approx(0.5)
     assert datos["total"]["dividendos"] == pytest.approx(15.5)
     assert datos["total"]["impuestos"] == pytest.approx(3.0)
+
+
+# ------------------------------------------- rentas (comisiones, impuestos, dividendos, intereses)
+
+def test_la_comision_de_cualquier_tipo_de_movimiento_cuenta():
+    """Una comisión (o una retención) anotada en un movimiento que no es compra, venta,
+    dividendo ni interés también tiene que contar: antes se perdía sin que nadie la
+    echara de menos. Se prueban una entrega y un depósito con comisión."""
+    motor.AVISOS.clear()
+    movs = [_mov("2025-01-01", "compra", 10, 1000.0, comision=2.0),
+            {"id": "m2", "fecha": "2025-02-01", "producto": "p", "tipo": "entrega",
+             "unidades": 1.0, "importe": 0.0, "comision": 4.0, "impuestos": 1.5}]
+    r = motor.aplicar_movimientos({"corto": "test"}, movs)
+    assert r["comisiones"] == pytest.approx(6.0)      # 2 de la compra + 4 de la entrega
+    assert r["impuestos"] == pytest.approx(1.5)
+
+
+def _cfg_rentas():
+    """Cartera mínima con dos años: 2025 completo y 2026 a medias (hasta el 30/06)."""
+    return {
+        "productos": [{"id": "fondo", "nombre": "Fondo", "corto": "Fondo"},
+                      {"id": "accion", "nombre": "Acción", "corto": "Acción", "cuenta": "b"}],
+        "cuentas": [{"id": "a", "nombre": "Cuenta A"}, {"id": "b", "nombre": "Cuenta B"}],
+        "movimientos": [
+            {"id": "m1", "fecha": "2025-03-10", "tipo": "compra", "producto": "fondo",
+             "unidades": 1, "importe": 100, "comision": 2},
+            {"id": "m2", "fecha": "2025-05-10", "tipo": "dividendo", "producto": "accion",
+             "cuenta": "b", "importe": 10, "impuestos": 2, "comision": 0.5},
+            {"id": "m3", "fecha": "2025-06-10", "tipo": "interes", "cuenta": "a",
+             "importe": 5, "impuestos": 1},
+            {"id": "m4", "fecha": "2025-07-10", "tipo": "comision", "cuenta": "a", "importe": 3},
+            {"id": "m5", "fecha": "2025-09-10", "tipo": "impuesto", "producto": "fondo",
+             "cuenta": "b", "importe": 4},
+            {"id": "m6", "fecha": "2026-02-10", "tipo": "dividendo", "cuenta": "a",
+             "importe": 20, "impuestos": 4},
+            {"id": "m7", "fecha": "2026-03-10", "tipo": "interes", "cuenta": "a", "importe": 6},
+        ],
+    }
+
+
+def test_resumen_rentas_historico_anio_en_curso_y_prevision():
+    r = motor.resumen_rentas(_cfg_rentas(), "2026-06-30")
+    assert r["anioActual"] == 2026
+    # Comisiones: 2025 = 2 (compra) + 0,5 (dividendo) + 3 (suelta) = 5,50; 2026 = 0
+    assert r["comisiones"]["historico"]["total"] == pytest.approx(5.5)
+    assert r["comisiones"]["promedioAnual"] == pytest.approx(5.5)
+    assert r["comisiones"]["anio"]["anotado"] == pytest.approx(0.0)
+    assert r["comisiones"]["anio"]["proyeccion"] == pytest.approx(5.5)   # la media manda
+    # Impuestos: 2025 = 2 + 1 + 4 = 7; 2026 = 4
+    assert r["impuestos"]["historico"]["total"] == pytest.approx(11.0)
+    assert r["impuestos"]["anio"]["anotado"] == pytest.approx(4.0)
+    assert r["impuestos"]["anio"]["proyeccion"] == pytest.approx(7.0)
+    # Dividendos (bruto): 2025 = 10 + 2 + 0,5 = 12,50; 2026 = 20 + 4 = 24
+    assert r["dividendos"]["historico"]["total"] == pytest.approx(36.5)
+    assert r["dividendos"]["anio"]["anotado"] == pytest.approx(24.0)
+    assert r["dividendos"]["anio"]["proyeccion"] == pytest.approx(24.0)  # lo anotado manda
+    # Intereses: 2025 = 6; 2026 = 6
+    assert r["intereses"]["historico"]["total"] == pytest.approx(12.0)
+    assert r["intereses"]["promedioAnual"] == pytest.approx(6.0)
+    assert r["intereses"]["anio"]["anotado"] == pytest.approx(6.0)
+    # El año en curso NO entra en el promedio (solo cuenta 2025)
+    assert r["dividendos"]["aniosCompletos"] == 1
+
+
+def test_resumen_rentas_desglose_por_producto_y_por_cuenta():
+    r = motor.resumen_rentas(_cfg_rentas(), "2026-06-30")
+    div = {d["nombre"]: d for d in r["dividendos"]["desglose"]}
+    assert div["Acción"]["bruto"] == pytest.approx(12.5)
+    assert div["Acción"]["retencion"] == pytest.approx(2.0)
+    assert div["Acción"]["comision"] == pytest.approx(0.5)
+    assert div["Acción"]["neto"] == pytest.approx(10.0)
+    assert div["Acción"]["cuenta"] == "Cuenta B"
+    assert div["Acción"]["ultimo"] == "2025-05-10"
+    # Un dividendo anotado solo en la cuenta (sin producto): se agrupa por cuenta
+    assert div["Sin producto"]["bruto"] == pytest.approx(24.0)
+    assert div["Sin producto"]["cuenta"] == "Cuenta A"
+    assert sum(d["bruto"] for d in r["dividendos"]["desglose"]) == pytest.approx(36.5)
+    # Intereses: por cuenta, con su retención
+    inte = {d["nombre"]: d for d in r["intereses"]["desglose"]}
+    assert inte["Cuenta A"]["bruto"] == pytest.approx(12.0)
+    assert inte["Cuenta A"]["retencion"] == pytest.approx(1.0)
+    assert sum(d["bruto"] for d in r["intereses"]["desglose"]) == pytest.approx(12.0)
+
+
+def test_resumen_rentas_por_mes_y_por_anio():
+    r = motor.resumen_rentas(_cfg_rentas(), "2026-06-30")
+    com_mes = {x["mes"]: x["total"] for x in r["comisiones"]["porMes"]}
+    assert com_mes["2025-03"] == pytest.approx(2.0)
+    assert com_mes["2025-05"] == pytest.approx(0.5)
+    assert com_mes["2025-07"] == pytest.approx(3.0)
+    assert "2026-01" not in com_mes                    # los meses sin nada no se listan
+    assert [x["anio"] for x in r["comisiones"]["porAnio"]] == [2025]
+    assert r["comisiones"]["porAnio"][0]["n"] == 3
+    assert r["dividendos"]["porAnio"][-1]["enCurso"] is True
+    # El año en curso trae sus doce meses, con ceros donde aún no hay nada
+    meses26 = r["dividendos"]["anio"]["porMes"]
+    assert len(meses26) == 12 and meses26[1]["total"] == pytest.approx(24.0)
+    assert meses26[5]["total"] == pytest.approx(0.0)
+
+
+def test_las_rentas_cuadran_con_los_kpi_del_panel(tmp_path):
+    """El histórico de cada sección tiene que ser el mismo número que el KPI del panel
+    (si no, la pestaña Rendimiento contaría una cosa y el panel otra)."""
+    cfg = _fondo_y_cuenta(saldo=1000.0)
+    cfg["movimientos"] += [
+        {"id": "m2", "fecha": "2025-05-01", "tipo": "dividendo", "producto": "fondo",
+         "cuenta": "c1", "importe": 12.0, "impuestos": 3.0, "comision": 0.5},
+        {"id": "m3", "fecha": "2025-06-01", "tipo": "interes", "cuenta": "c1", "importe": 8.0},
+        {"id": "m4", "fecha": "2025-07-01", "tipo": "comision", "cuenta": "c1", "importe": 4.0},
+        {"id": "m5", "fecha": "2025-08-01", "tipo": "impuesto", "cuenta": "c1", "importe": 2.5},
+    ]
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    r = datos["rentas"]
+    assert r["dividendos"]["historico"]["total"] == pytest.approx(datos["total"]["dividendos"])
+    assert r["intereses"]["historico"]["total"] == pytest.approx(datos["total"]["intereses"])
+    assert r["impuestos"]["historico"]["total"] == pytest.approx(datos["total"]["impuestos"])
+    assert r["comisiones"]["historico"]["total"] == pytest.approx(
+        datos["comisiones"]["compraventaPagada"])
+    assert r["comisiones"]["historico"]["total"] == pytest.approx(4.5)   # 0,5 + 4
+    assert r["impuestos"]["historico"]["total"] == pytest.approx(5.5)    # 3 + 2,5

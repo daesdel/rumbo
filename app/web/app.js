@@ -1888,6 +1888,89 @@
   /* ================================================================
      PESTAÑA 4 · RENDIMIENTO
      ================================================================ */
+  /* ---------------------------------------------- rentas: comisiones, impuestos, dividendos e intereses */
+  // Todo lo que se paga y se cobra, con el histórico real, el año en curso y su
+  // previsión de cierre, el desglose por mes y el promedio anual. Los números los
+  // manda ya calculados el motor (`D.rentas`, sin precios de por medio): aquí solo se pintan.
+  const MESES_CORTO = ["ene", "feb", "mar", "abr", "may", "jun",
+                       "jul", "ago", "sep", "oct", "nov", "dic"];
+
+  function pintaRentas() {
+    const cont = $("#rentas");
+    if (!cont) return;
+    const r = D.rentas;
+    if (!r) { cont.innerHTML = ""; return; }
+    const fmt = v => G.fmtEur(convAhora(v || 0));
+    const fmtNeg = v => v ? "−" + G.fmtEur(convAhora(Math.abs(v))) : "—";
+
+    const kpis = b => `<div class="kpis" style="margin:16px 0 4px">
+      <div class="kpi"><div class="e">Histórico</div><div class="v">${fmt(b.historico.total)}</div>
+        <div class="n">${b.historico.n} ${b.historico.n === 1 ? "movimiento" : "movimientos"}${
+          b.historico.desde ? ` · ${G.fmtFechaCorta(b.historico.desde)} → ${G.fmtFechaCorta(b.historico.hasta)}` : ""}</div></div>
+      <div class="kpi"><div class="e">Año ${b.anio.anio} · en curso</div><div class="v">${fmt(b.anio.anotado)}</div>
+        <div class="n">previsión de cierre: <b>${fmt(b.anio.proyeccion)}</b> · ${b.anio.n} movs</div></div>
+      <div class="kpi"><div class="e">Promedio anual</div><div class="v">${b.promedioAnual == null ? "—" : fmt(b.promedioAnual)}</div>
+        <div class="n">${b.aniosCompletos ? `${b.aniosCompletos} ${b.aniosCompletos === 1 ? "año completo" : "años completos"}` : "aún sin años completos"}</div></div>
+    </div>`;
+
+    const matriz = b => {
+      const porMes = {};
+      b.porMes.forEach(x => { porMes[x.mes] = x.total; });
+      const filas = b.porAnio.map(y => {
+        const celdas = MESES_CORTO.map((_, i) => {
+          const v = porMes[`${y.anio}-${String(i + 1).padStart(2, "0")}`];
+          return `<td class="${v ? "" : "subt"}">${v ? G.fmtEur(convAhora(v)) : "—"}</td>`;
+        }).join("");
+        return `<tr><td>${y.anio}${y.enCurso ? ' <span class="subt">·</span>' : ""}</td>${celdas}
+          <td><b>${G.fmtEur(convAhora(y.total))}</b></td></tr>`;
+      }).join("");
+      return `<div class="tablaEnv"><table class="dt mini"><thead><tr><th>Año</th>${
+        MESES_CORTO.map(m => `<th>${m}</th>`).join("")}<th>Total</th></tr></thead><tbody>${filas}</tbody></table></div>`;
+    };
+
+    const detalleSimple = b => `<div class="tablaEnv"><table class="dt"><thead><tr>
+        <th>Origen</th><th>Total</th><th>Veces</th></tr></thead><tbody>${
+        b.desglose.map(d => `<tr><td>${esc(d.nombre)}</td><td>${fmt(d.total)}</td>
+          <td class="subt">${d.n}</td></tr>`).join("")}</tbody></table></div>`;
+
+    const celdaRet = d => `<td class="${d.retencion ? "neg" : "subt"}">${fmtNeg(d.retencion)}</td>`;
+    const detalleDividendos = b => `<div class="tablaEnv"><table class="dt"><thead><tr>
+        <th>De quién</th><th>Cuenta</th><th>Bruto</th><th>Retención</th><th>Neto</th>
+        <th>Pagos</th><th>Último</th></tr></thead><tbody>${
+        b.desglose.map(d => `<tr><td>${esc(d.nombre)}</td>
+          <td class="subt">${esc(d.cuenta || "—")}</td><td>${fmt(d.bruto)}</td>${celdaRet(d)}
+          <td>${fmt(d.neto)}</td><td class="subt">${d.n}</td>
+          <td class="subt">${d.ultimo ? G.fmtFechaCorta(d.ultimo) : "—"}</td></tr>`).join("")}</tbody></table></div>`;
+
+    const detalleIntereses = b => `<div class="tablaEnv"><table class="dt"><thead><tr>
+        <th>Cuenta</th><th>Bruto</th><th>Retención</th><th>Neto</th><th>Cobros</th>
+        <th>Último</th></tr></thead><tbody>${
+        b.desglose.map(d => `<tr><td>${esc(d.nombre)}</td><td>${fmt(d.bruto)}</td>${celdaRet(d)}
+          <td>${fmt(d.neto)}</td><td class="subt">${d.n}</td>
+          <td class="subt">${d.ultimo ? G.fmtFechaCorta(d.ultimo) : "—"}</td></tr>`).join("")}</tbody></table></div>`;
+
+    const tarjeta = (titulo, subt, b, detalle) => `<section class="tarjeta">
+      <header><h2>${titulo}</h2><span class="subt">${subt}</span></header>
+      ${kpis(b)}${matriz(b)}
+      <div class="filaTabla" style="margin:18px 0 8px"><span class="subt">Desglose</span></div>
+      ${detalle(b)}</section>`;
+
+    cont.innerHTML =
+      tarjeta("Comisiones pagadas",
+        "Lo que has pagado de verdad: compras, ventas, dividendos, intereses y comisiones sueltas.",
+        r.comisiones, detalleSimple)
+      + tarjeta("Impuestos pagados",
+        "Retenciones de dividendos e intereses, y los impuestos que hayas anotado sueltos.",
+        r.impuestos, detalleSimple)
+      + tarjeta("Dividendos", "Lo cobrado, con su retención y la cuenta que lo recibe.",
+        r.dividendos, detalleDividendos)
+      + tarjeta("Intereses", "Lo que te ha rendido el dinero de tus cuentas, con su retención.",
+        r.intereses, detalleIntereses)
+      + `<p class="subt" style="margin-top:22px">La previsión de cierre del año en curso es lo
+         mayor entre lo ya anotado este año y tu promedio anual de los años completos. Estas
+         secciones son de toda la cartera${filtrando() ? " (los filtros de arriba no se les aplican)" : ""}.</p>`;
+  }
+
   function pintaRendimiento() {
     // Zoom de cada gráfico de la pestaña: cada uno el suyo y ninguno se recuerda.
     pintaSegm($("#segRangoAnual"), RANGOS_ANOS, estado.rangoAnual,
@@ -2064,6 +2147,8 @@
       $("#tablaComisiones").innerHTML = "";
       $("#notaComisiones").textContent = "Con estos filtros no queda ningún producto con comisión.";
     }
+
+    pintaRentas();
   }
 
   /* ---------------------------------------------- avisos y pie */

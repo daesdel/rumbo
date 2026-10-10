@@ -110,6 +110,8 @@
   /* ---------------------------------------------- ventana modal */
   function abreModal(titulo, cuerpo, alGuardar, textoBoton = "Guardar") {
     const dlg = $("#modal");
+    dlg.classList.remove("ancho");      // la ficha de anotaciones es la única más ancha
+    if (dlg.open) dlg.close();          // si venía de otra ventana abierta (p. ej. el historial)
     dlg.innerHTML = `<form class="mForm" novalidate>
       <header><h2>${titulo}</h2><button type="button" class="x" data-cerrar aria-label="Cerrar">×</button></header>
       <div class="mCuerpo">${cuerpo}</div>
@@ -921,21 +923,28 @@
         <p class="subt">Aquí aparecen tus cuentas, deudas, planes de pensiones y todo lo que no tiene precio en
         internet. Añádelos en «Productos» (tipo «Cuenta / efectivo», o fuente del precio «Valor anotado a mano»).</p></section>`;
     }
-    const tarjetas = lista.map(p => {
-      const vals = E.cfg.valoraciones.filter(v => v.producto === p.id).sort((a, b) => a.fecha < b.fecha ? 1 : -1);
+    // Una fila por valor con lo básico y sus anotaciones en un popup: con el historial
+    // entero a la vista la página se hacía larguísima y había que bajar y subir.
+    const filas = lista.map(p => {
+      const vals = valsDe(p.id);
+      const u = vals[0];
       const conAportado = !soloSaldo(p);
-      const filas = vals.map((v, i) => `<tr><td>${fecha(v.fecha)}${v.auto ? `<span class="subt" title="Saldo calculado: el último anotado a mano más lo cobrado ese día en dividendos, intereses, depósitos y retiradas. Cámbialo o bórralo si tu banco dice otra cosa."> · calculado</span>` : anotadoEseDia(p, v, i === 0)}</td><td>${eur(v.valor)}</td>
-        ${conAportado ? `<td>${v.aportado != null ? eur(v.aportado) : "—"}</td>` : ""}
-        <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}" title="Cambiar este valor">Editar</button>
-          <button data-acc="replicarValor" data-id="${esc(v.id)}" title="Anotar otro igual, sin tocar este">Replicar</button>
-          <button data-acc="borrarValor" data-id="${esc(v.id)}" title="Borrar este valor">Borrar</button></td></tr>`).join("");
-      return `<section class="tarjeta saldo"><header><h2><i class="pt" style="background:var(--s${p.slot || 1})"></i>${esc(nombre(p))}</h2>
-          <span class="subt">${esc(E.tipos[p.tipo] || "")}${p.entidad ? " · " + esc(p.entidad) : ""}</span><span class="sp"></span>
-          <button class="btn" data-acc="nuevoValor" data-id="${esc(p.id)}">+ Anotar</button></header>
-        ${filas ? `<div class="tablaEnv"><table class="dt"><thead><tr><th>Fecha</th><th>${etiquetaValor(p)}</th>
-          ${conAportado ? "<th>Aportado</th>" : ""}<th></th></tr></thead><tbody>${filas}</tbody></table></div>`
-          : '<p class="neg">Todavía no tiene ningún valor anotado.</p>'}</section>`;
+      const desde = vals.length ? vals[vals.length - 1].fecha : null;
+      return `<tr>
+        <td style="text-align:left"><i class="pt" style="background:var(--s${p.slot || 1})"></i> ${esc(nombre(p))}
+          <small class="subt">${esc(E.tipos[p.tipo] || "")}${p.entidad ? " · " + esc(p.entidad) : ""}${
+            p.moneda && p.moneda !== "EUR" ? " · " + esc(p.moneda) : ""}</small></td>
+        <td>${u ? fecha(u.fecha) : '<span class="neg">sin datos</span>'}</td>
+        <td>${u ? eur(u.valor) : "—"}${u && u.auto
+          ? '<span class="subt" title="Saldo calculado con sus movimientos"> · calculado</span>' : ""}</td>
+        ${conAportado ? `<td>${u && u.aportado != null ? eur(u.aportado) : "—"}</td>` : ""}
+        <td class="subt">${vals.length ? `${vals.length}${desde ? ` · desde ${fecha(desde)}` : ""}` : "—"}</td>
+        <td class="acc">
+          <button data-acc="verAnotaciones" data-id="${esc(p.id)}"${vals.length ? "" : " disabled"}
+            title="Ver su historial completo en una ventana">Ver anotaciones${vals.length ? ` (${vals.length})` : ""}</button>
+          <button data-acc="nuevoValor" data-id="${esc(p.id)}">+ Anotar</button></td></tr>`;
     }).join("");
+    const hayAportado = lista.some(p => !soloSaldo(p));
     return `<section class="tarjeta"><header><h2>Saldos y valores</h2>
         <span class="subt">Lo que no tiene precio en internet. Cuanto más a menudo lo anotes (una vez al mes basta),
         mejor sale su curva.</span><span class="sp"></span>
@@ -943,9 +952,47 @@
         <a class="btn" href="api/valores/plantilla" download>Descargar plantilla CSV</a>
         <button class="btn" data-acc="cargarPlantilla">Cargar plantilla</button></header>
       <input type="file" id="plantArchivo" accept=".csv,text/csv" hidden>
-      <div class="imErr" id="plantErr" hidden></div></section>
-      <div class="saldos">${tarjetas}</div>
+      <div class="imErr" id="plantErr" hidden></div>
+      <div class="tablaEnv" style="margin-top:16px"><table class="dt"><thead><tr>
+        <th style="text-align:left">Valor</th><th>Último dato</th><th>Valor</th>${
+          hayAportado ? "<th>Aportado</th>" : ""}<th>Anotaciones</th><th></th></tr></thead>
+        <tbody>${filas}</tbody></table></div>
+      <p class="ayuda" style="margin-top:12px">Pulsa <b>«Ver anotaciones»</b> y su historial se abre en una ventana,
+      sin salir de aquí; desde ella puedes editarlas, replicarlas o borrarlas.</p></section>
       ${vistaSinCotizacion()}`;
+  }
+
+  /** El historial completo de un valor, en la misma ventana modal: se abre desde su
+      fila de «Saldos y valores» y trae los botones de siempre para no salir de aquí. */
+  function abreAnotaciones(p) {
+    const vals = valsDe(p.id);
+    const conAportado = !soloSaldo(p);
+    const filas = vals.map((v, i) => `<tr><td>${fecha(v.fecha)}${v.auto ? `<span class="subt"
+        title="Saldo calculado: el último anotado a mano más lo cobrado ese día en dividendos, intereses, depósitos y retiradas. Cámbialo o bórralo si tu banco dice otra cosa."> · calculado</span>` : anotadoEseDia(p, v, i === 0)}</td>
+      <td>${eur(v.valor)}</td>
+      ${conAportado ? `<td>${v.aportado != null ? eur(v.aportado) : "—"}</td>` : ""}
+      <td class="acc"><button data-acc="editarValor" data-id="${esc(v.id)}">Editar</button>
+        <button data-acc="replicarValor" data-id="${esc(v.id)}">Replicar</button>
+        <button data-acc="borrarValor" data-id="${esc(v.id)}">Borrar</button></td></tr>`).join("");
+    const dlg = $("#modal");
+    dlg.classList.add("ancho");
+    dlg.innerHTML = `<div class="mForm">
+      <header><h2>Anotaciones · ${esc(nombre(p))}</h2>
+        <button type="button" class="x" data-cerrar aria-label="Cerrar">×</button></header>
+      <div class="mCuerpo">
+        <p class="subt">${esc(E.tipos[p.tipo] || "")}${p.entidad ? " · " + esc(p.entidad) : ""} ·
+          ${vals.length} ${vals.length === 1 ? "anotación" : "anotaciones"}${
+            vals.length > 1 ? ` · de ${fecha(vals[vals.length - 1].fecha)} a ${fecha(vals[0].fecha)}` : ""}</p>
+        ${filas ? `<div class="tablaEnv alto"><table class="dt"><thead><tr><th>Fecha</th>
+          <th>${esc(etiquetaValor(p))}</th>${conAportado ? "<th>Aportado</th>" : ""}<th></th></tr></thead>
+          <tbody>${filas}</tbody></table></div>`
+          : '<p class="neg">Todavía no tiene ninguna anotación.</p>'}
+      </div>
+      <footer><button type="button" class="btn" data-cerrar>Cerrar</button>
+        <button type="button" class="btn prim" data-acc="nuevoValor" data-id="${esc(p.id)}">+ Anotar</button></footer>
+    </div>`;
+    dlg.querySelectorAll("[data-cerrar]").forEach(b => { b.onclick = () => dlg.close(); });
+    if (!dlg.open) dlg.showModal();
   }
 
   /* --- valores que no se pueden bajar de internet: edición y fuente de precio --- */
@@ -1223,7 +1270,12 @@
   async function borrarValor(id) {
     const v = E.cfg.valoraciones.find(x => x.id === id);
     if (!confirm(`¿Borrar el valor de ${eur(v.valor)} del ${fecha(v.fecha)} de «${nombre(prod(v.producto))}»?`)) return;
-    try { await borra("valoraciones", id); pinta(); } catch (x) { alert(x.message); }
+    try {
+      await borra("valoraciones", id);
+      const dlg = $("#modal");
+      if (dlg && dlg.open) dlg.close();      // si el borrado venía del historial abierto
+      pinta();
+    } catch (x) { alert(x.message); }
   }
 
   /* ---------------------------------------------- importar */
@@ -1544,6 +1596,7 @@
     replicarMov: soloPropio(replicarMov),
     borrarMov: soloPropio(borrarMov),
     nuevoValor: soloPropio(id => formValor(null, id)),
+    verAnotaciones: soloPropio(id => abreAnotaciones(prod(id))),
     editarValor: soloPropio(id => formValor(E.cfg.valoraciones.find(v => v.id === id))),
     replicarValor: soloPropio(replicarValor),
     borrarValor: soloPropio(borrarValor),

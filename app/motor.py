@@ -527,12 +527,17 @@ def aplicar_movimientos(p, movs):
         f, t = m["fecha"], m.get("tipo")
         u, imp = float(m.get("unidades") or 0), float(m.get("importe") or 0)
         ret = float(m.get("impuestos") or 0)
+        com = float(m.get("comision") or 0)
+        # La comisión y la retención que traiga CUALQUIER movimiento del producto
+        # cuentan, sea del tipo que sea: antes solo se miraban en compras, ventas,
+        # dividendos e intereses, así que una comisión o una retención anotada en otro
+        # tipo se perdía sin que nadie la echara de menos.
+        comisiones += com
+        impuestos_tot += ret
         if t == "compra":
             lotes.append([u, imp, id(m)])
             eventos.append((f, u, imp))
             flujos.append((f, -imp))
-            comisiones += float(m.get("comision") or 0)
-            impuestos_tot += ret
         elif t == "venta":
             quedan, coste = u, 0.0
             while quedan > 1e-9 and lotes:
@@ -550,26 +555,20 @@ def aplicar_movimientos(p, movs):
             realizado += imp - coste
             eventos.append((f, -(u - quedan), -coste))
             flujos.append((f, imp))
-            comisiones += float(m.get("comision") or 0)
-            impuestos_tot += ret
         elif t == "dividendo":
             # El neto cobrado más la retención = dividendo bruto; el dinero que
             # entra en la cuenta es solo el neto.
-            bruto = imp + ret + float(m.get("comision") or 0)
+            bruto = imp + ret + com
             realizado += bruto
             dividendos += bruto
             flujos.append((f, imp))
-            comisiones += float(m.get("comision") or 0)
-            impuestos_tot += ret
         elif t == "interes":
             # Igual que el dividendo: lo anotado es lo NETO que llegó a la cuenta
             # y lo que rindió (bruto) es neto + retención + comisión.
-            bruto = imp + ret + float(m.get("comision") or 0)
+            bruto = imp + ret + com
             realizado += bruto
             intereses += bruto
             flujos.append((f, imp))
-            comisiones += float(m.get("comision") or 0)
-            impuestos_tot += ret
         elif t == "impuesto":
             realizado -= imp
             flujos.append((f, -imp))
@@ -593,6 +592,169 @@ def aplicar_movimientos(p, movs):
     return {"eventos": eventos, "flujos": flujos, "realizado": realizado,
             "comisiones": comisiones, "impuestos": impuestos_tot,
             "dividendos": dividendos, "intereses": intereses, "vendidas": vendidas}
+
+
+# Etiquetas de los desgloses de la pestaña Rendimiento (comisiones, impuestos,
+# dividendos e intereses) para no duplicarlas en el JS.
+ETQ_COMISION = {"compra": "Compras", "venta": "Ventas", "dividendo": "Dividendos",
+                "interes": "Intereses", "comision": "Comisiones sueltas"}
+ETQ_RETENCION = {"dividendo": "Retención de dividendos", "interes": "Retención de intereses",
+                 "impuesto": "Impuestos sueltos"}
+MESES_CORTOS = ["ene", "feb", "mar", "abr", "may", "jun",
+                "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def resumen_rentas(cfg, hasta):
+    """Comisiones, impuestos, dividendos e intereses: histórico real (por año y por
+    mes), año en curso con su previsión, promedio anual y desglose.
+
+    Se calcula SOLO con los movimientos (que ya están en euros), sin mirar precios ni
+    depender de la red: el mismo número sale en cualquier vista y se puede probar sin
+    conexión. `hasta` es la fecha de los datos (YYYY-MM-DD) y decide qué año está en
+    curso; la previsión de cierre es lo mayor entre lo ya anotado este año y el
+    promedio de los años completos (así un dividendo de enero no multiplica por doce).
+    """
+    hasta = hasta or ""
+    anio_actual = int(hasta[:4]) if len(hasta) >= 4 else dt.date.today().year
+    cuentas = {c.get("id"): (c.get("nombre") or c.get("id")) for c in cfg.get("cuentas", [])}
+    productos = {p.get("id"): p for p in cfg.get("productos", [])}
+
+    def nombre_prod(pid):
+        p = productos.get(pid) or {}
+        return p.get("corto") or p.get("nombre") or "(sin producto)"
+
+    def nuevo():
+        return {"total": 0.0, "n": 0, "porAnio": defaultdict(float),
+                "nAnio": defaultdict(int), "porMes": defaultdict(float),
+                "desde": None, "hasta": None}
+
+    acc = {k: nuevo() for k in ("comisiones", "impuestos", "dividendos", "intereses")}
+    com_tipo, ret_tipo = defaultdict(float), defaultdict(float)
+    com_n, ret_n = defaultdict(int), defaultdict(int)
+    div_prod, int_cuenta = {}, {}
+
+    def apunta(concepto, f, importe):
+        a = acc[concepto]
+        a["total"] += importe
+        a["n"] += 1
+        a["porAnio"][f[:4]] += importe
+        a["nAnio"][f[:4]] += 1
+        a["porMes"][f[:7]] += importe
+        if a["desde"] is None or f < a["desde"]:
+            a["desde"] = f
+        if a["hasta"] is None or f > a["hasta"]:
+            a["hasta"] = f
+
+    def detalle(almacen, k, **campos):
+        d = almacen.setdefault(k, dict(campos, clave=k, n=0, ultimo=None,
+                                       bruto=0.0, retencion=0.0, comision=0.0, neto=0.0))
+        return d
+
+    for m in cfg.get("movimientos", []):
+        f = m.get("fecha") or ""
+        if not f:
+            continue
+        t = m.get("tipo")
+        imp = float(m.get("importe") or 0)
+        ret = float(m.get("impuestos") or 0)
+        com = float(m.get("comision") or 0)
+        pid = m.get("producto")
+        cid = m.get("cuenta") or (productos.get(pid) or {}).get("cuenta") or ""
+        # Comisiones: el campo «comisión» de CUALQUIER movimiento más el importe de los
+        # que son de tipo «comisión» (los sueltos: custodia, etc.).
+        c_tot = com + (imp if t == "comision" else 0.0)
+        if c_tot:
+            apunta("comisiones", f, c_tot)
+            etq = ETQ_COMISION.get(t, "Otras comisiones")
+            com_tipo[etq] += c_tot
+            com_n[etq] += 1
+        # Impuestos: el campo «impuestos» de CUALQUIER movimiento más el importe de los
+        # de tipo «impuesto».
+        i_tot = ret + (imp if t == "impuesto" else 0.0)
+        if i_tot:
+            apunta("impuestos", f, i_tot)
+            etq = ETQ_RETENCION.get(t, "Otras retenciones")
+            ret_tipo[etq] += i_tot
+            ret_n[etq] += 1
+        if t == "dividendo":
+            bruto = imp + ret + com
+            apunta("dividendos", f, bruto)
+            k = pid or ("cuenta:" + (cid or "?"))
+            d = detalle(div_prod, k,
+                        nombre=nombre_prod(pid) if pid else "Sin producto",
+                        cuenta=cuentas.get(cid, "") if cid else "")
+            d["bruto"] += bruto
+            d["retencion"] += ret
+            d["comision"] += com
+            d["neto"] += imp
+            d["n"] += 1
+            if d["ultimo"] is None or f > d["ultimo"]:
+                d["ultimo"] = f
+        elif t == "interes":
+            bruto = imp + ret + com
+            apunta("intereses", f, bruto)
+            k = cid or pid or "?"
+            d = detalle(int_cuenta, k,
+                        nombre=cuentas.get(cid) or ("(sin cuenta)" if not pid else nombre_prod(pid)))
+            d["bruto"] += bruto
+            d["retencion"] += ret
+            d["comision"] += com
+            d["neto"] += imp
+            d["n"] += 1
+            if d["ultimo"] is None or f > d["ultimo"]:
+                d["ultimo"] = f
+
+    def red(x):
+        return round(x, 2) if x is not None else None
+
+    def bloque(a, desglose):
+        anios = sorted(int(x) for x in a["porAnio"])
+        completos = [y for y in anios if y < anio_actual]
+        real = a["porAnio"].get(str(anio_actual), 0.0)
+        prom = (sum(a["porAnio"][str(y)] for y in completos) / len(completos)
+                if completos else None)
+        # Previsión de cierre: lo mayor entre lo ya anotado este año y la media de los
+        # años completos. Con la media de un solo año raro se nota poco, pero no inventa
+        # cifras raras a principio de año (un dividendo de enero no se multiplica por 12).
+        proy = real if prom is None else max(real, prom)
+        return {
+            "historico": {"total": red(a["total"]), "n": a["n"],
+                          "desde": a["desde"], "hasta": a["hasta"]},
+            "porAnio": [{"anio": y, "total": red(a["porAnio"][str(y)]), "n": a["nAnio"][str(y)],
+                         "enCurso": y == anio_actual} for y in anios],
+            "porMes": [{"mes": k, "total": red(v)} for k, v in sorted(a["porMes"].items())],
+            "promedioAnual": red(prom),
+            "aniosCompletos": len(completos),
+            "anio": {"anio": anio_actual, "anotado": red(real),
+                     "n": a["nAnio"].get(str(anio_actual), 0), "proyeccion": red(proy),
+                     "porMes": [{"mes": i + 1,
+                                 "total": red(a["porMes"].get(f"{anio_actual}-{i + 1:02d}", 0.0))}
+                                for i in range(12)]},
+            "desglose": desglose,
+        }
+
+    def por_nombre(acc_tot, acc_n):
+        return [{"nombre": k, "total": red(v), "n": acc_n[k]}
+                for k, v in sorted(acc_tot.items(), key=lambda x: -x[1])]
+
+    def por_bruto(almacen):
+        out = []
+        for d in sorted(almacen.values(), key=lambda x: -x["bruto"]):
+            out.append({"nombre": d["nombre"], "cuenta": d.get("cuenta", ""), "clave": d["clave"],
+                        "bruto": red(d["bruto"]), "retencion": red(d["retencion"]),
+                        "comision": red(d["comision"]), "neto": red(d["neto"]),
+                        "n": d["n"], "ultimo": d["ultimo"]})
+        return out
+
+    return {
+        "anioActual": anio_actual,
+        "hasta": hasta,
+        "meses": list(MESES_CORTOS),
+        "comisiones": bloque(acc["comisiones"], por_nombre(com_tipo, com_n)),
+        "impuestos": bloque(acc["impuestos"], por_nombre(ret_tipo, ret_n)),
+        "dividendos": bloque(acc["dividendos"], por_bruto(div_prod)),
+        "intereses": bloque(acc["intereses"], por_bruto(int_cuenta)),
+    }
 
 
 def _pinta_pct():
@@ -1214,6 +1376,10 @@ def construir(cfg, carpeta, descargar=True):
         t, imp = m.get("tipo"), float(m.get("importe") or 0)
         ret = float(m.get("impuestos") or 0)
         com = float(m.get("comision") or 0)
+        # Como en los productos: la comisión y la retención de CUALQUIER movimiento de
+        # la cuenta cuentan, no solo las de intereses y dividendos.
+        comisiones_cuenta += com
+        impuestos_cuenta += ret
         if t in ("interes", "dividendo"):
             # El importe es lo neto que entró en la cuenta; lo bruto (lo que
             # rindió) suma también la retención y la comisión que le quitaron.
@@ -1222,8 +1388,6 @@ def construir(cfg, carpeta, descargar=True):
                 intereses_cuenta += bruto
             else:
                 dividendos_cuenta += bruto
-            impuestos_cuenta += ret
-            comisiones_cuenta += com
         elif t == "impuesto":
             impuestos_cuenta += imp
         elif t == "comision":
@@ -1760,6 +1924,7 @@ def construir(cfg, carpeta, descargar=True):
                                   "total": total_mes},
         "objetivo": cfg.get("objetivo"),
         "comisiones": comisiones,
+        "rentas": resumen_rentas(cfg, fecha_extracto.isoformat()),
         "rentabilidadAnual": rent_anual,
         "resumenMensual": resumen_mensual,
         "comparador": comparador,

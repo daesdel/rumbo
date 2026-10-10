@@ -26,6 +26,9 @@ CAMPOS_DINERO = {
     "anual", "base", "compraventaPagada", "inicio", "fin", "mercado", "nuevo",
     "comision", "min", "max", "mediana", "p33", "p67", "snapshots", "flujos", "tuya", "tuValor",
     "precios",
+    # Rentas de la pestaña Rendimiento (histórico y previsión de comisiones,
+    # impuestos, dividendos e intereses): todos son euros y hay que escalarlos.
+    "promedioAnual", "bruto", "retencion", "neto", "proyeccion", "anotado",
 }
 # «total» y «porProducto» significan cosas distintas según dónde estén (en
 # rentabilidadAnual son porcentajes): solo se escalan en aportacionesMensuales.
