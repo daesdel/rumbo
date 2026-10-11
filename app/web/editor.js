@@ -345,10 +345,29 @@
           cuando no coinciden. El <b>precio en vivo</b> mueve el valor minuto a minuto con una criptomoneda.</p>
       </details>`,
     async f => {
+      const eraManual = manual(p);
       const d = campos(f);
       d.largoPlazo = f.elements.largoPlazo.checked;
       if (!nuevo) d.id = p.id;
       const item = await guarda("productos", d);
+      // Si el producto era manual y ahora tiene código + fuente no manual,
+      // intentamos descargar su precio automáticamente.
+      const ahoraManual = manual(item);
+      if (!nuevo && eraManual && !ahoraManual && item.codigo) {
+        try {
+          const j = await api("POST", `api/productos/${encodeURIComponent(item.id)}/actualizar`);
+          if (j.nav != null) {
+            avisa([`Precio de «${nombre(item)}» descargado: ${num(j.nav)} € (${fecha(j.navFecha)}).`]
+              .concat(j.avisos || []));
+          } else if (j.errores && j.errores.length) {
+            avisa([`No se pudo descargar el precio de «${nombre(item)}»: ${j.errores[0]}`]);
+          } else {
+            avisa([`Código guardado para «${nombre(item)}». Se intentará descargar el precio en la próxima actualización.`]);
+          }
+        } catch (x) {
+          avisa([`No se pudo descargar el precio de «${nombre(item)}»: ${x.message}`]);
+        }
+      }
       if (!nuevo) return null;
       // Siguiente paso natural: su primer dato.
       return manual(item) ? () => formValor(null, item.id) : () => formMovimiento(null, item.id);
@@ -925,6 +944,7 @@
     }
     // Una fila por valor con lo básico y sus anotaciones en un popup: con el historial
     // entero a la vista la página se hacía larguísima y había que bajar y subir.
+    const hayAportado = lista.some(p => !soloSaldo(p));
     const filas = lista.map(p => {
       const vals = valsDe(p.id);
       const u = vals[0];
@@ -937,14 +957,14 @@
         <td>${u ? fecha(u.fecha) : '<span class="neg">sin datos</span>'}</td>
         <td>${u ? eur(u.valor) : "—"}${u && u.auto
           ? '<span class="subt" title="Saldo calculado con sus movimientos"> · calculado</span>' : ""}</td>
-        ${conAportado ? `<td>${u && u.aportado != null ? eur(u.aportado) : "—"}</td>` : ""}
+        ${hayAportado ? `<td>${conAportado ? (u && u.aportado != null ? eur(u.aportado) : "—") : ""}</td>` : ""}
         <td class="subt">${vals.length ? `${vals.length}${desde ? ` · desde ${fecha(desde)}` : ""}` : "—"}</td>
         <td class="acc">
           <button data-acc="verAnotaciones" data-id="${esc(p.id)}"${vals.length ? "" : " disabled"}
             title="Ver su historial completo en una ventana">Ver anotaciones${vals.length ? ` (${vals.length})` : ""}</button>
+          <button data-acc="editarProducto" data-id="${esc(p.id)}" title="Editar este producto">Editar</button>
           <button data-acc="nuevoValor" data-id="${esc(p.id)}">+ Anotar</button></td></tr>`;
     }).join("");
-    const hayAportado = lista.some(p => !soloSaldo(p));
     return `<section class="tarjeta"><header><h2>Saldos y valores</h2>
         <span class="subt">Lo que no tiene precio en internet. Cuanto más a menudo lo anotes (una vez al mes basta),
         mejor sale su curva.</span><span class="sp"></span>
