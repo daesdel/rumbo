@@ -540,6 +540,9 @@ PP_TIPOS = {
     "traspaso": ("traspaso", -1),
     "traspaso (salida)": ("traspaso", -1),
     "traspaso (entrada)": ("traspaso", 1),
+    # Escisiones (Corteva -> Vylor): PP las exporta como «Entrega (entrante)». Entran
+    # títulos con un coste asignado y NO se mueve dinero de ninguna cuenta.
+    "entrega": ("entrega", 1), "entrega (entrante)": ("entrega", 1),
     "apertura": ("apertura", 1), "cambio de divisa": ("cambio_divisa", -1),
     "saldo": ("saldo", 1), "reparto": ("saldo", 1),
 }
@@ -912,7 +915,9 @@ def preparar_portfolio(cfg, contenido, carpeta):
                     s = saldos[f["contrapartida"]]
                     s["acum"] = round(s["acum"] - signo * v, 2)
                     s["serie"][f["fecha"]] = s["acum"]
-        elif tipo != "traspaso":
+        elif tipo != "traspaso" and tipo != "entrega":
+            # La entrega entrante (escisión) NO mueve dinero: el «valor neto» del CSV
+            # es el coste que se le asigna a los títulos que entran, no un abono.
             mueve(f["cuenta"], f["neto"], moneda, f["fecha"], signo)
 
         # --- el movimiento en sí
@@ -981,7 +986,8 @@ def preparar_portfolio(cfg, contenido, carpeta):
         lotes, coste, por_fecha = [], 0.0, {}
         for m in movs:
             t, u, imp = m["tipo"], float(m.get("unidades") or 0), float(m.get("importe") or 0)
-            if t == "compra":
+            if t in ("compra", "entrega"):
+                # Una entrega entrante entra a coste, igual que una compra.
                 lotes.append([u, imp])
                 coste += imp
             elif t == "venta":
@@ -1018,8 +1024,8 @@ def celda_tipo(f):
     return f.get("tipo_pp") or ""
 
 
-ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
-            "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
+ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision": 3,
+            "interes": 4, "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
             "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
 
 
@@ -1080,8 +1086,8 @@ def aplicar(cfg, plan):
     existentes = {firma(m) for m in cfg["movimientos"]}
 
     añadidos, duplicados, filas = 0, 0, []
-    orden = {"apertura": 0, "deposito": 1, "compra": 2, "comision": 3, "interes": 4,
-             "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
+    orden = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision": 3,
+             "interes": 4, "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
     for mv in sorted(plan.movimientos, key=lambda m: (m["fecha"], orden.get(m["tipo"], 9), m["fila"])):
         claves = ("fecha", "tipo", "unidades", "importe", "comision", "impuestos", "nota",

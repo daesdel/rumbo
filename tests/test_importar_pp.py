@@ -51,6 +51,10 @@ TRANSFERENCIA_COMPRA = ("2025-11-13 00:00:00;Transferencia (salida);;;;950,00;;;
 GINA_COMPRA = ("2026-06-02 15:32:00;Compra;Amazon.com Inc.;1,79901607;221,18;397,90;;;"
                "397,90;REVOUT GINA USD;REVOLUT GINA USD;;")
 GINA_DEPOSITO = "2026-06-03 00:00:00;Depósito;;;;13,57;;;13,57;REVOLUT GINA EUROS;;;"
+# Escisión Corteva -> Vylor (fila 5 del export real): PP la exporta como «Entrega
+# (entrante)». Los USD 546,08 son el COSTE asignado a los 8 títulos, no un abono.
+ENTREGA_VYLOR = ("2026-10-01 00:00:00;Entrega (entrante);Vylor Inc;8;USD 68,26;"
+                 "USD 546,08;;;USD 546,08;FREEDOM USD;;;")
 
 
 def csv_pp(*filas):
@@ -271,3 +275,49 @@ def test_el_plan_ordena_las_fechas_de_menor_a_mayor(tmp_path):
     fechas = [m["fecha"] for m in plan.movimientos]
     assert fechas == sorted(fechas)
     assert fechas == ["2025-01-17", "2025-12-02", "2026-06-03", "2026-09-01"]
+
+
+# ------------------------------------------------------------- entrega (escisión)
+def test_entrega_entrante_se_importa_y_no_mueve_efectivo(tmp_path):
+    """PP exporta las escisiones como «Entrega (entrante)» (Corteva -> Vylor): antes se
+    descartaba por «tipo desconocido» y los títulos entregados desaparecían de la
+    cartera. Y no puede contar como abono: el «valor neto» del CSV es el coste que se
+    asigna a los títulos, así que el saldo de FREEDOM USD no sube."""
+    cfg, plan = prepara(tmp_path, ENTREGA_VYLOR)
+    assert not plan.errores
+    assert len(plan.movimientos) == 1
+    m = plan.movimientos[0]
+    assert m["tipo"] == "entrega"
+    assert m["unidades"] == pytest.approx(8.0)
+    assert m["importeOriginal"] == pytest.approx(546.08)
+    assert m["monedaOriginal"] == "USD"
+    assert m["importe"] == pytest.approx(round(546.08 * 0.92, 2))   # cambio de la caché
+    # Y la entrega no deja ninguna cuenta de efectivo con saldo
+    assert not [p for p in plan.productos_nuevos if p["datos"].get("tipo") == "efectivo"]
+
+
+def test_entrega_entrante_llega_a_la_cartera_sin_saldo_falso(tmp_path):
+    cfg, plan = prepara(tmp_path, ENTREGA_VYLOR)
+    informe = importar.aplicar(cfg, plan)
+    assert informe["añadidos"] == 1
+    movs = movimientos(cfg, tipo="entrega")
+    assert len(movs) == 1
+    assert movs[0]["unidades"] == pytest.approx(8.0)
+    assert movs[0]["importe"] == pytest.approx(round(546.08 * 0.92, 2))
+    # Ninguna cuenta de efectivo tiene saldo: no ha entrado dinero. (La valoración
+    # que sí se crea es el coste del propio Vylor, que es lo correcto.)
+    efectivo = [p["id"] for p in cfg["productos"] if p.get("tipo") == "efectivo"]
+    assert not [v for v in cfg["valoraciones"]
+                if v.get("producto") in efectivo and abs(float(v.get("valor") or 0)) > 0.005]
+
+
+def test_todos_los_tipos_del_export_de_pp_se_entienden():
+    """Guarda: si PP exporta un tipo que Rumbo no conoce, la fila se descarta en
+    silencio (pasó con «Entrega (entrante)»). Aquí están todos los que aparecen en el
+    export real más los habituales de PP."""
+    for tipo in ("Compra", "Venta", "Entrega (entrante)", "Dividendo", "Intereses",
+                 "Comisiones", "Impuestos", "Depósito", "Retirada",
+                 "Transferencia (salida)", "Transferencia (entrada)",
+                 "Traspaso (salida)", "Traspaso (entrada)", "Saldo", "Apertura",
+                 "Cambio de divisa", "Cupón"):
+        assert importar.sin_tildes(tipo).lower() in importar.PP_TIPOS, tipo
