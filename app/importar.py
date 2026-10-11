@@ -552,6 +552,11 @@ PP_COLUMNAS = {"fecha": "fecha", "tipo": "tipo", "activo": "activo", "titulos": 
                "precio": "precio", "cantidad": "cantidad", "comisiones": "comisiones",
                "impuestos": "impuestos", "cuenta": "cuenta", "nota": "nota", "fuente": "fuente"}
 
+# Algunos fondos vienen con su código de Morningstar como nombre («0P0001XF41.F», tal cual
+# los exporta PP). Yahoo los sirve con ese mismo código, así que se usan directamente en
+# vez de dejarlos «a coste».
+CODIGO_MORNINGSTAR = re.compile(r"^0P[0-9A-Z]{6,9}\.[A-Z]{1,2}$", re.I)
+
 # Fichas de los productos que aparecen en el export. Así no se «adivina» nada:
 # ACCOR y AIRBUS se negocian en euros (no en los ADR en dólares) y «blackrock» es
 # el fondo de MyInvestor, no la acción BLK. Lo que no esté aquí se valora a mano.
@@ -578,19 +583,22 @@ CATALOGO_PP = {
     "universal music group nv": ("accion", "yahoo", "0VD.HA", "EUR"),
     "cellnex telecom sa": ("accion", "yahoo", "CLNX.MC", "EUR"),
     "vinci s a": ("accion", "yahoo", "DG.PA", "EUR"),
+    # Escisión Corteva -> Vylor: PP la entrega con este nombre y cotiza en el NYSE.
+    "vylor inc": ("accion", "yahoo", "VYLR", "USD"),
     "bitcoin": ("cripto", "yahoo", "BTC-EUR", "EUR"),
     "xrp eur": ("cripto", "yahoo", "XRP-EUR", "EUR"),
     "invesco s p 500 ucits etf": ("etf", "yahoo", "SPXD.MI", "EUR"),
     "amundi s p 500 swap ucits etf eur acc": ("etf", "yahoo", "500.PA", "EUR"),
     "amundi msci world ex emu ucits": ("etf", "yahoo", "CM9.PA", "EUR"),
-    "amundi ibex35 ucits etf acc": ("etf", "manual", "", "EUR"),
-    "bnp paribas easy ftse epra nareit eurozone capped ucits etf capitalisation": ("etf", "manual", "", "EUR"),
-    "vanguard s p 500 ucits etf accumulating": ("etf", "manual", "", "EUR"),
-    "ishares msci world sri eur a": ("etf", "manual", "", "EUR"),
+    "amundi ibex35 ucits etf acc": ("etf", "yahoo", "AMES.DE", "EUR"),
+    "bnp paribas easy ftse epra nareit eurozone capped ucits etf capitalisation": ("etf", "yahoo", "EEA.PA", "EUR"),
+    "vanguard s p 500 ucits etf accumulating": ("etf", "yahoo", "VUAA.DE", "EUR"),
+    "ishares msci world sri eur a": ("etf", "yahoo", "2B7K.DE", "EUR"),
     "fidelity msci euro in pa eur": ("fondo", "manual", "", "EUR"),
     "fidelity msci jp indx pa eur": ("fondo", "manual", "", "EUR"),
     "fidelity msci pacf exjp pau": ("fondo", "manual", "", "EUR"),
-    "0p0001xf41 f": ("fondo", "manual", "", "EUR"),
+    # El nombre ES el código de Morningstar: Yahoo lo sirve tal cual.
+    "0p0001xf41 f": ("fondo", "yahoo", "0P0001XF41.F", "EUR"),
     "ishares emerging metal myinvestor": ("fondo", "manual", "", "EUR"),
     "vanguard us equity metal myinvestor": ("fondo", "manual", "", "EUR"),
     "ishares us equity index fund clase s": ("fondo", "manual", "", "EUR"),
@@ -845,9 +853,18 @@ def preparar_portfolio(cfg, contenido, carpeta):
             return prod_ref[nombre]
         clave = _normaliza(nombre)
         ficha = CATALOGO_PP.get(clave)
+        if not ficha and CODIGO_MORNINGSTAR.match(nombre.strip()):
+            # El nombre ya es el código: no hay nada que adivinar.
+            ficha = ("fondo", "yahoo", nombre.strip().upper(), None)
+        if not ficha and re.fullmatch(r".+ [a-z]", clave):
+            # PP le pega la clase al final («VINCI S.A.  A»): se prueba sin ese token,
+            # que es como está en el catálogo. Solo se acepta si el nombre recortado
+            # existe, así que no hay riesgo de acertar mal.
+            ficha = CATALOGO_PP.get(clave.rsplit(" ", 1)[0])
         moneda_cuenta = cuenta_moneda(fila["cuenta"]) if fila.get("cuenta") else "EUR"
         if ficha:
             tipo, fuente, codigo, moneda = ficha
+            moneda = moneda or moneda_fila or moneda_cuenta
         else:
             tipo, fuente, codigo = "otro", "manual", ""
             moneda = moneda_fila or moneda_cuenta

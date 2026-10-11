@@ -55,6 +55,13 @@ GINA_DEPOSITO = "2026-06-03 00:00:00;Depósito;;;;13,57;;;13,57;REVOLUT GINA EUR
 # (entrante)». Los USD 546,08 son el COSTE asignado a los 8 títulos, no un abono.
 ENTREGA_VYLOR = ("2026-10-01 00:00:00;Entrega (entrante);Vylor Inc;8;USD 68,26;"
                  "USD 546,08;;;USD 546,08;FREEDOM USD;;;")
+# Filas literales de los productos que estaban «a coste» por tener el código vacío.
+IBEX_ETF = ("2026-09-02 20:00:00;Compra;Amundi IBEX35 UCITS ETF Acc;0,3940211;511,80;"
+            "201,66;;;201,66;REVOLUT_EUR;REVOLUT_EUROS;;")
+VINCI_CLASE_A = ("2026-04-23 00:00:00;Dividendo;VINCI S.A.                    A;4,060089;;"
+                 "16,04;;4,71;11,33;TRADE REPUBLIC;;;")
+MORNINGSTAR = ("2026-03-24 00:00:00;Venta;0P0001XF41.F;10;10,31;103,10;;;103,10;"
+               "CARTERA METAL MY INVESTOR;MY INVESTOR;;")
 
 
 def csv_pp(*filas):
@@ -321,3 +328,51 @@ def test_todos_los_tipos_del_export_de_pp_se_entienden():
                  "Traspaso (salida)", "Traspaso (entrada)", "Saldo", "Apertura",
                  "Cambio de divisa", "Cupón"):
         assert importar.sin_tildes(tipo).lower() in importar.PP_TIPOS, tipo
+
+
+# ------------------------------------------------------------- productos que sí cotizan
+def _datos_de(plan, nombre):
+    return next(p["datos"] for p in plan.productos_nuevos if p["datos"]["nombre"] == nombre)
+
+
+def test_los_codigos_de_los_que_cotizan_estan_en_el_catalogo():
+    """Tickers comprobados contra los precios del propio export (el precio del CSV y el
+    del ticker cuadran). Los cuatro ETF tenían el código vacío y se valoraban a coste:
+    825 € de patrimonio que no se veían."""
+    for nombre, tipo, codigo, moneda in (
+            ("Amundi IBEX35 UCITS ETF Acc", "etf", "AMES.DE", "EUR"),
+            ("Vanguard S&P 500 UCITS ETF Accumulating", "etf", "VUAA.DE", "EUR"),
+            ("ISHARES MSCI WORLD SRI-EUR-A", "etf", "2B7K.DE", "EUR"),
+            ("BNP Paribas Easy FTSE EPRA/NAREIT Eurozone Capped UCITS ETF Capitalisation",
+             "etf", "EEA.PA", "EUR"),
+            ("Vylor Inc", "accion", "VYLR", "USD")):
+        ficha = importar.CATALOGO_PP.get(importar._normaliza(nombre))
+        assert ficha == (tipo, "yahoo", codigo, moneda), (nombre, ficha)
+
+
+def test_un_etf_del_catalogo_se_importa_con_codigo_y_sin_revision(tmp_path):
+    _, plan = prepara(tmp_path, IBEX_ETF)
+    datos = _datos_de(plan, "Amundi IBEX35 UCITS ETF Acc")
+    assert (datos["fuente"], datos["codigo"]) == ("yahoo", "AMES.DE")
+    assert not datos.get("revision")        # ya no se queda «a coste, pendiente de fijar»
+
+
+def test_la_clase_al_final_del_nombre_reutiliza_el_codigo_de_vinci(tmp_path):
+    """PP escribe «VINCI S.A.                    A»: sin esto se creaba un producto
+    manual (y duplicado) en vez de reutilizar el Vinci que ya está en el catálogo."""
+    _, plan = prepara(tmp_path, VINCI_CLASE_A)
+    datos = _datos_de(plan, "VINCI S.A.                    A")
+    assert (datos["fuente"], datos["codigo"]) == ("yahoo", "DG.PA")
+    assert not datos.get("revision")
+
+
+def test_el_codigo_morningstar_del_nombre_se_usa_directamente(tmp_path):
+    """Algunos fondos llegan con su código de Morningstar como nombre (0P0001XF41.F):
+    Yahoo lo sirve con ese mismo código, así que ya no hace falta dejarlos a coste."""
+    cfg, plan = prepara(tmp_path, MORNINGSTAR)
+    assert not plan.errores
+    datos = _datos_de(plan, "0P0001XF41.F")
+    assert (datos["fuente"], datos["codigo"]) == ("yahoo", "0P0001XF41.F")
+    assert not datos.get("revision")
+    importar.aplicar(cfg, plan)
+    assert producto(cfg, "0P0001XF41.F")["codigo"] == "0P0001XF41.F"

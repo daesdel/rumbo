@@ -1,5 +1,9 @@
 # Tus datos: nunca se suben
 mis_datos/
+# ...y todas sus variantes: mis_datos_local_* (copias de trabajo), mis_datos_pp_test
+# (export de Portfolio Performance), etc. Dentro va la cartera entera: movimientos,
+# valoraciones, historial y copias de seguridad.
+mis_datos*/
 
 # Entornos de Python que crean los lanzadores
 .venv/
@@ -12,10 +16,13 @@ __pycache__/
 # Caché de precios descargada (dato de ejecución)
 cache/
 
+# Copias de la cartera exportadas a mano desde la app (Mis datos → Copias)
+copia_patrimonio_*.json
+
+# Un /tmp dentro del repo (el /tmp del sistema nunca puede acabar en un commit)
+/tmp/rumbo_*
+
 # Cosas del entorno, no del proyecto
 .DS_Store
 .freebuff
 HANDOFF.md
-
-# Copia de seguridad de los datos locales de antes de sincronizar con el servidor
-mis_datos_local*/
