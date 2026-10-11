@@ -376,3 +376,117 @@ def test_el_codigo_morningstar_del_nombre_se_usa_directamente(tmp_path):
     assert not datos.get("revision")
     importar.aplicar(cfg, plan)
     assert producto(cfg, "0P0001XF41.F")["codigo"] == "0P0001XF41.F"
+
+
+# ------------------------------------------------- una cuenta que es un plan de pensiones
+# Filas literales del export real: la aportación son DOS filas encadenadas (el
+# depósito que mete el dinero en la cuenta y la compra de participaciones que lo saca).
+PLAN_DEPOSITO = "2025-12-01 00:00:00;Depósito;;;;55,90;;;55,90;PLAN 2040 ING;;;"
+
+
+def _saldo(cfg, cid):
+    """Saldo de la cuenta de efectivo, con las mismas reglas que usa el motor."""
+    from app import motor
+    return round(sum(motor.efecto_de(m, cid) * float(m.get("importe") or 0)
+                     for m in cfg["movimientos"]), 2)
+
+
+def test_cuenta_del_plan_no_duplica_cuenta_ni_producto(tmp_path):
+    """«PLAN 2040 ING» es una cuenta que en realidad es un plan de pensiones: al
+    importar tiene que quedar UNA cuenta de efectivo (el monedero) y UN producto
+    (el plan), sin duplicados, y ya enlazado a Yahoo."""
+    cfg, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    assert not plan.errores
+    importar.aplicar(cfg, plan)
+
+    cuentas = [c for c in cfg["cuentas"] if c["nombre"] == "PLAN 2040 ING"]
+    assert len(cuentas) == 1
+    assert cuentas[0]["tipo"] == "efectivo"        # la cuenta guarda el dinero
+
+    planes = [p for p in cfg["productos"] if p.get("tipo") == "pension"]
+    assert len(planes) == 1                        # un solo plan
+    assert planes[0]["codigo"] == "0P00008571.F"   # ya trae el precio de Yahoo
+    assert planes[0]["fuente"] == "yahoo"
+    assert not planes[0].get("revision")
+
+    efectivos = [p for p in cfg["productos"] if p.get("tipo") == "efectivo"]
+    assert len(efectivos) == 1                     # una sola cuenta de efectivo
+    assert efectivos[0]["cuenta"] == cuentas[0]["id"]
+
+
+def test_el_plan_solo_tiene_compras_con_unidades(tmp_path):
+    """En el plan de pensiones no puede haber ingresos sueltos: cada aportación es
+    una compra de participaciones, y el ingreso se queda en la cuenta de efectivo."""
+    cfg, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    importar.aplicar(cfg, plan)
+    pid = next(p["id"] for p in cfg["productos"] if p.get("tipo") == "pension")
+    del_plan = movimientos(cfg, producto=pid)
+    assert del_plan
+    assert all(m["tipo"] == "compra" for m in del_plan)
+    assert all(float(m["unidades"] or 0) > 0 for m in del_plan)
+    ingresos = movimientos(cfg, tipo="deposito")
+    assert ingresos and all(m.get("producto") is None for m in ingresos)
+
+
+def test_la_cuenta_del_plan_no_queda_en_negativo(tmp_path):
+    """PP a veces apunta la compra sin su depósito (o días después). La cuenta de
+    efectivo no puede quedarse en negativo: se añade el ingreso que falta."""
+    cfg, plan = prepara(tmp_path, PLAN2040)        # compra SIN su depósito
+    informe = importar.aplicar(cfg, plan)
+    cid = next(c["id"] for c in cfg["cuentas"] if c["nombre"] == "PLAN 2040 ING")
+    assert _saldo(cfg, cid) == pytest.approx(0.0)
+    assert any("sin su ingreso" in a for a in informe["avisos"])
+
+
+def test_la_serie_de_saldo_de_la_cuenta_sube_con_los_ingresos_añadidos(tmp_path):
+    """El saldo que enseña la app sale de la serie anotada que crea el importador: si
+    se añade el ingreso que faltaba, la serie tiene que subir con él o la cuenta
+    seguiría apareciendo en negativo."""
+    cfg, plan = prepara(tmp_path, PLAN2040)        # compra SIN su depósito
+    importar.aplicar(cfg, plan)
+    efectivo = next(p for p in cfg["productos"]
+                    if p.get("tipo") == "efectivo" and p["nombre"] == "PLAN 2040 ING")
+    vals = sorted([v for v in cfg["valoraciones"] if v["producto"] == efectivo["id"]],
+                  key=lambda v: v["fecha"])
+    assert vals
+    assert vals[-1]["valor"] == pytest.approx(0.0)
+    assert all(float(v["valor"]) >= -0.005 for v in vals)
+
+
+def test_la_vista_previa_no_duplica_los_ingresos_al_confirmar(tmp_path):
+    """La vista previa y la confirmación llaman a aplicar(): los ingresos que faltan
+    no pueden acumularse entre las dos llamadas."""
+    cfg, plan = prepara(tmp_path, PLAN2040)
+    p1 = importar.vista_previa(cfg, plan)
+    p2 = importar.vista_previa(cfg, plan)
+    assert p1["totales"]["depositos"] == p2["totales"]["depositos"]
+    importar.aplicar(cfg, plan)
+    assert len(movimientos(cfg, tipo="deposito")) == 1
+    assert len(plan.movimientos) == 1              # el plan no se ha modificado
+
+
+def test_la_vista_previa_ofrece_las_cuentas_detectadas(tmp_path):
+    """El informe lleva las cuentas para poder cambiar su tipo antes de importar."""
+    _, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    inf = importar.vista_previa(_cartera(), plan)
+    detectadas = {c["datos"]["nombre"]: c["datos"]["tipo"] for c in inf["cuentasNuevas"]}
+    assert detectadas["PLAN 2040 ING"] == "pension"
+
+
+def test_el_tipo_elegido_en_la_vista_previa_decide_si_es_cuenta_o_producto(tmp_path):
+    """El tipo que se elija en la vista previa manda: «broker» deja la cuenta como
+    cuenta de dinero; «pensión» la convierte (el monedero + el plan como producto)."""
+    cfg1, plan1 = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    for c in plan1.cuentas:
+        c["datos"]["tipo"] = "broker"
+    importar.aplicar(cfg1, plan1)
+    assert [c["tipo"] for c in cfg1["cuentas"]] == ["broker"]
+
+    cfg2, plan2 = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    for c in plan2.cuentas:
+        c["datos"]["tipo"] = "pension"
+    importar.aplicar(cfg2, plan2)
+    assert [c["tipo"] for c in cfg2["cuentas"]] == ["efectivo"]
+    planes = [p for p in cfg2["productos"] if p.get("tipo") == "pension"]
+    assert len(planes) == 1
+    assert planes[0]["codigo"] == "0P00008571.F"

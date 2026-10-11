@@ -1421,6 +1421,39 @@
     }
   }
 
+  /** Opciones del desplegable de tipo de una cuenta: los tipos de cuenta que ya
+      usa la app (banco, bróker…) y los de producto (ETF, fondo, pensión…), porque
+      aquí se decide justo si la cuenta es una cuenta o un producto. */
+  function opcionesTipoCuenta(sel) {
+    const deCuenta = E.tiposCuenta || {}, deProducto = E.tipos || {};
+    const claves = [];
+    Object.keys(deCuenta).forEach(k => { if (!(k in deProducto)) claves.push(k); });
+    Object.keys(deProducto).forEach(k => claves.push(k));
+    if (sel && !claves.includes(sel)) claves.unshift(sel);
+    return claves.map(k => `<option value="${esc(k)}"${k === sel ? " selected" : ""}>${
+      esc(deProducto[k] || deCuenta[k] || k)}</option>`).join("");
+  }
+
+  /** Una fila de la tabla de cuentas detectadas, con su tipo editable. */
+  function filaCuentaDetectada(c, i) {
+    return `<tr><td style="text-align:left"><b>${esc(c.datos.nombre)}</b>${
+      c.existente ? ' <span class="subt">(ya existe)</span>' : ""}</td>` +
+      `<td><select data-cuentatipo="${i}" data-tipo-orig="${esc(c.datos.tipo || "")}" style="width:170px">${
+        opcionesTipoCuenta(c.datos.tipo)}</select></td>` +
+      `<td>${esc(c.datos.moneda || "EUR")}</td><td>${esc(c.datos.entidad || "—")}</td></tr>`;
+  }
+
+  /** «Cuentas detectadas»: si alguna no es una cuenta sino un plan, un fondo…,
+      aquí se cambia su tipo antes de importar. */
+  function bloqueCuentas(inf) {
+    const lista = inf.cuentasNuevas || [];
+    if (!lista.length) return "";
+    return `<div class="imNuevos"><div class="secc">Cuentas detectadas: cambia el tipo si alguna no es una cuenta</div>
+      <div class="tablaEnv"><table class="dt"><thead><tr><th style="text-align:left">Cuenta</th>
+      <th style="text-align:left">Tipo</th><th>Moneda</th><th>Entidad</th></tr></thead>
+      <tbody>${lista.map(filaCuentaDetectada).join("")}</tbody></table></div></div>`;
+  }
+
   function vistaPrevia() {
     const inf = IMP.informe, t = inf.totales;
     const n = inf.añadidos + inf.saldos;
@@ -1450,7 +1483,7 @@
       </div>
       <div class="comprueba"><b>Compara estas cifras con tu banco antes de confirmar.</b>
         ${IMP.origen === "ia" ? "Una IA puede equivocarse al copiar números o saltarse alguna fila: revisa sobre todo el total invertido." : ""}</div>
-      ${avisos}${errores}${nuevos}
+      ${avisos}${errores}${bloqueCuentas(inf)}${nuevos}
       ${filas ? `<div class="tablaEnv alto" style="margin-top:16px"><table class="dt"><thead><tr><th>Fecha</th>
         <th style="text-align:left">Producto</th><th style="text-align:left">Tipo</th><th>Unidades</th><th>Importe</th>
         <th style="text-align:left"></th><th>Estado</th></tr></thead><tbody>${filas}</tbody></table></div>` : ""}
@@ -1463,8 +1496,15 @@
     const b = $("#imConfirmarBtn");
     b.disabled = true;
     b.textContent = "Importando…";
+    // Solo se envían las cuentas cuyo tipo haya cambiado el usuario.
+    const cuentas = [];
+    document.querySelectorAll("[data-cuentatipo]").forEach(sel => {
+      if (sel.value && sel.value !== sel.dataset.tipoOrig) {
+        cuentas.push({ idx: Number(sel.dataset.cuentatipo), tipo: sel.value });
+      }
+    });
     try {
-      const j = await api("POST", "api/importar/confirmar", { token: IMP.token });
+      const j = await api("POST", "api/importar/confirmar", { token: IMP.token, cuentas });
       E.cfg = j.cartera;
       window.EDITOR_SUCIO = true;
       const i = j.informe;

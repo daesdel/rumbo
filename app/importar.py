@@ -605,9 +605,88 @@ CATALOGO_PP = {
     "amundi index s p 500 myinvestor": ("fondo", "manual", "", "EUR"),
     "gx spx quarter tail hedge uc": ("fondo", "manual", "", "EUR"),
     "blackrock": ("fondo", "manual", "", "EUR"),
-    "plan2040 ing": ("pension", "manual", "", "EUR"),
+    # El plan de pensiones de ING sí tiene valor liquidativo público: se enlaza
+    # solo para que traiga el precio desde la primera importación.
+    "plan2040 ing": ("pension", "yahoo", "0P00008571.F", "EUR"),
+    "plan 2040 ing": ("pension", "yahoo", "0P00008571.F", "EUR"),
     "gold philharmoniker 1oz": ("commodity", "manual", "", "EUR"),
 }
+
+# Tipos de inversión: si el usuario los elige para una «cuenta» del CSV, esa
+# cuenta es en realidad un producto y el dinero vive en una cuenta de efectivo.
+TIPOS_INVERSION = ("pension", "fondo", "etf", "accion", "cripto", "bono", "inmueble")
+
+# Movimientos que meten dinero en la cuenta de efectivo y que lo sacan.
+ENTRA_EFECTIVO = ("deposito", "interes", "dividendo", "venta")
+SALE_EFECTIVO = ("compra", "comision", "impuesto", "retirada")
+
+
+def _ficha_catalogo(nombre):
+    """Ficha del catálogo para un nombre, tolerando espacios de más
+    («PLAN 2040 ING» y «PLAN2040 ING» son el mismo plan)."""
+    if not nombre:
+        return None
+    clave = _normaliza(nombre)
+    ficha = CATALOGO_PP.get(clave)
+    if ficha:
+        return ficha
+    sin_espacios = clave.replace(" ", "")
+    for k, v in CATALOGO_PP.items():
+        if k.replace(" ", "") == sin_espacios:
+            return v
+    return None
+
+
+def _fuente_para(nombre, tipo):
+    """(fuente, código) del catálogo para ese nombre y tipo, si se conoce."""
+    ficha = _ficha_catalogo(nombre)
+    if not ficha:
+        return None, ""
+    tipo_cat, fuente, codigo, _moneda = ficha
+    if tipo and tipo_cat != tipo:
+        return None, ""
+    return fuente, codigo
+
+
+def _aportaciones_que_faltan(plan, ref, nombre, moneda="EUR"):
+    """Cada compra que paga esta cuenta tiene que tener su ingreso: Portfolio
+    Performance a veces apunta el depósito días después (o aún no lo ha apuntado),
+    y la cuenta quedaría en negativo. Devuelve (movimientos, ajustes de la serie),
+    sin tocar el plan (la vista previa se ejecuta dos veces: no puede duplicarlos).
+
+    Usa las mismas reglas de dinero que el motor (motor.efecto_de), así que una
+    compra que paga la cuenta contrapartida no cuenta aquí. Todo se calcula en la
+    moneda de la cuenta, que es donde vive el saldo."""
+    movs = []
+    for m in plan.movimientos:
+        e = motor.efecto_de(m, ref)
+        if not e:
+            continue
+        imp = motor.importe_en_cuenta(m, moneda, None)
+        if imp is None:
+            imp = float(m.get("importe") or 0)
+        movs.append((e, m, float(imp)))
+    if not movs:
+        return [], []
+    extra, ajustes, saldo = [], [], 0.0
+    for e, m, imp in sorted(movs, key=lambda x: (x[1]["fecha"], ORDEN_PP.get(x[1]["tipo"], 9), x[1]["fila"])):
+        saldo += e * imp
+        if saldo < -0.005:
+            falta = round(-saldo, 2)
+            tc = float(m.get("tipoCambio") or 1) or 1.0
+            extra.append({
+                "fila": m["fila"], "fecha": m["fecha"], "tipo": "deposito",
+                "producto": None, "unidades": 0.0,
+                "importe": round(falta * tc, 2) if moneda != "EUR" else falta,
+                "importeOriginal": falta, "monedaOriginal": moneda, "tipoCambio": tc,
+                "cuenta": ref, "contrapartida": None,
+                "propietario": m.get("propietario"),
+                "nota": f"Aportación al plan {nombre}: el CSV no traía el ingreso",
+                "marcas": ["ingreso añadido"], "origen": "portfolio", "fuente": "",
+            })
+            ajustes.append((m["fecha"], falta))     # la serie de saldo sube lo mismo
+            saldo = 0.0
+    return extra, ajustes
 
 
 def es_portfolio_performance(cabecera):
@@ -1049,13 +1128,29 @@ ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision":
 # ---------------------------------------------------------------- aplicar
 
 def aplicar(cfg, plan):
-    """Ejecuta el plan sobre cfg (la real o una copia) y devuelve el informe."""
+    """Ejecuta el plan sobre cfg (la real o una copia) y devuelve el informe.
+
+    No modifica `plan`: la vista previa llama a esta función y después la
+    confirmación la vuelve a llamar, así que todo lo que se añada va en listas
+    aparte (si no, se duplicaría)."""
     ids, errores = {}, list(plan.errores)
+    productos_extra, movs_extra, avisos_extra, ajustes = [], [], [], {}
+    series_ajustadas = []      # [(ref del efectivo, [(fecha, cuánto sube)])]
+
+    # 0) ¿Qué «cuentas» del CSV son en realidad un producto? Lo elige el usuario
+    # en la vista previa (o lo detecta solo el importador). La cuenta se queda
+    # como monedero de dinero y el producto es el plan/fondo.
+    conversiones = {}
+    for c in getattr(plan, "cuentas", None) or []:
+        if c["datos"].get("tipo") in TIPOS_INVERSION and c["datos"].get("nombre"):
+            conversiones[c["ref"]] = c["datos"]["tipo"]
 
     # 1) las cuentas, primero: los productos y movimientos apuntan a sus ids
     ids_cuentas = {}
     for c in getattr(plan, "cuentas", None) or []:
         datos = dict(c["datos"])
+        if c["ref"] in conversiones:
+            datos["tipo"] = "efectivo"      # la cuenta es el monedero, no el plan
         if c.get("cuenta"):
             datos["id"] = c["cuenta"]
         try:
@@ -1072,11 +1167,73 @@ def aplicar(cfg, plan):
                                    if v.get("producto") not in viejos]
     c_real = lambda ref: ids_cuentas.get(ref, ref)
 
-    # 2) los productos
-    for n in plan.productos_nuevos:
+    # 1b) La cuenta convertida: un solo producto (el que ya trae el CSV o uno
+    # nuevo con el nombre de la cuenta) y las aportaciones emparejadas.
+    for c in getattr(plan, "cuentas", None) or []:
+        tipo = conversiones.get(c["ref"])
+        if not tipo:
+            continue
+        cuenta_id = ids_cuentas.get(c["ref"])
+        if not cuenta_id:
+            continue
+        nombre = c["datos"]["nombre"]
+        fuente, codigo = _fuente_para(nombre, tipo)
+        # ¿El CSV ya trae el producto de inversión de esta cuenta? (las compras
+        # apuntan a él). Si es así se reutiliza: nunca se duplica.
+        ya = []
+        for mv in plan.movimientos:
+            if mv.get("cuenta") == c["ref"] and mv.get("producto") and mv["producto"] not in ya:
+                ya.append(mv["producto"])
+        if ya:
+            ajustes[ya[0]] = {"tipo": tipo}
+            if fuente:
+                ajustes[ya[0]]["fuente"] = fuente
+                ajustes[ya[0]]["codigo"] = codigo
+        else:
+            existente = _producto_existente(cfg, "", nombre)
+            ref_prod = (existente or {}).get("id") or f"cuenta-prod:{c['ref']}"
+            datos_prod = {"id": (existente or {}).get("id"), "nombre": nombre,
+                          "corto": " ".join(nombre.split())[:24], "tipo": tipo,
+                          "fuente": fuente or "manual", "codigo": codigo or "",
+                          "moneda": c["datos"].get("moneda") or "EUR", "largoPlazo": True,
+                          "propietario": c["datos"].get("propietario") or "david",
+                          "cuenta": cuenta_id, "entidad": c["datos"].get("entidad", "")}
+            if not fuente:
+                datos_prod["revision"] = "valor a coste, pendiente de fijar"
+            productos_extra.append({"ref": ref_prod, "datos": datos_prod})
+        # El dinero del plan no puede salir de la nada: cada compra con su ingreso.
+        faltan, ajustes_serie = _aportaciones_que_faltan(
+            plan, c["ref"], nombre, c["datos"].get("moneda") or "EUR")
+        if faltan:
+            movs_extra += faltan
+            # El saldo anotado de la cuenta (la serie que crea el importador) tiene
+            # que subir lo mismo: si no, la cuenta sigue saliendo en negativo.
+            ref_efectivo = next((p["ref"] for p in plan.productos_nuevos
+                                 if p["datos"].get("cuenta") == c["ref"]
+                                 and p["datos"].get("tipo") in almacen.SOLO_SALDO), None)
+            series_ajustadas.append((ref_efectivo, ajustes_serie))
+            avisos_extra.append(
+                f"{nombre}: {len(faltan)} aportación(es) venían sin su ingreso en el CSV; "
+                "se han añadido para que la cuenta de efectivo no quede en negativo.")
+
+    # 2) los productos (sin duplicar: si ya existe uno con ese nombre, se reutiliza)
+    for n in list(plan.productos_nuevos) + productos_extra:
         datos = dict(n["datos"])
+        datos.update(ajustes.get(n["ref"], {}))
+        if datos.get("fuente") not in (None, "", "manual"):
+            datos.pop("revision", None)
         if datos.get("cuenta"):
             datos["cuenta"] = c_real(datos["cuenta"])
+        if not datos.get("id"):
+            existente = _producto_existente(
+                cfg, datos.get("identificador") or datos.get("codigo") or "",
+                datos.get("nombre") or "")
+            # Se reutiliza solo si es «de la misma familia»: el contenedor de
+            # efectivo de una cuenta y su activo pueden llamarse igual y no son
+            # lo mismo (si no, el plan se colapsaría con la cuenta de dinero).
+            if existente and ((datos.get("tipo") in almacen.SOLO_SALDO)
+                              == (existente.get("tipo") in almacen.SOLO_SALDO)):
+                datos["id"] = existente["id"]
         try:
             prod, _ = almacen.guarda_producto(cfg, datos)
         except almacen.ErrorValidacion as e:
@@ -1106,7 +1263,8 @@ def aplicar(cfg, plan):
     orden = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision": 3,
              "interes": 4, "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
-    for mv in sorted(plan.movimientos, key=lambda m: (m["fecha"], orden.get(m["tipo"], 9), m["fila"])):
+    for mv in sorted(list(plan.movimientos) + movs_extra,
+                     key=lambda m: (m["fecha"], orden.get(m["tipo"], 9), m["fila"])):
         claves = ("fecha", "tipo", "unidades", "importe", "comision", "impuestos", "nota",
                   "importeOriginal", "monedaOriginal", "tipoCambio", "propietario",
                   "contrapartidaImporte", "contrapartidaMoneda", "fuente")
@@ -1124,7 +1282,7 @@ def aplicar(cfg, plan):
         else:
             try:
                 guardado = almacen.guarda_movimiento(cfg, datos)
-                guardado["origen"] = mv["origen"]
+                guardado["origen"] = mv.get("origen", "portfolio")
                 añadidos += 1
             except almacen.ErrorValidacion as e:
                 errores.append({"fila": mv["fila"], "mensaje": " ".join(e.errores)})
@@ -1132,16 +1290,24 @@ def aplicar(cfg, plan):
         filas.append({"fila": mv["fila"], "fecha": mv["fecha"],
                       "producto": datos.get("producto"), "cuenta": datos.get("cuenta"),
                       "tipo": mv["tipo"],
-                      "unidades": mv.get("unidades"), "importe": mv["importe"], "marcas": mv["marcas"],
+                      "unidades": mv.get("unidades"), "importe": mv["importe"],
+                      "marcas": mv.get("marcas") or [],
                       "estado": estado})
 
     saldos = 0
     for v in plan.valoraciones:
+        valor = v["valor"]
+        # La serie de saldo de una cuenta con aportaciones añadidas sube lo mismo.
+        for ref_ef, deltas in series_ajustadas:
+            if v.get("producto") == ref_ef:
+                for fecha, delta in deltas:
+                    if v["fecha"] >= fecha:
+                        valor = round(valor + delta, 2)
         try:
-            almacen.guarda_valoracion(cfg, {"producto": real(v["producto"]), "fecha": v["fecha"], "valor": v["valor"]})
+            almacen.guarda_valoracion(cfg, {"producto": real(v["producto"]), "fecha": v["fecha"], "valor": valor})
             saldos += 1
             filas.append({"fila": v["fila"], "fecha": v["fecha"], "producto": real(v["producto"]), "tipo": "saldo",
-                          "unidades": None, "importe": v["valor"], "marcas": [], "estado": "nuevo"})
+                          "unidades": None, "importe": valor, "marcas": [], "estado": "nuevo"})
         except almacen.ErrorValidacion as e:
             errores.append({"fila": v["fila"], "mensaje": " ".join(e.errores)})
 
@@ -1155,16 +1321,20 @@ def aplicar(cfg, plan):
     return {
         "añadidos": añadidos, "repetidos": duplicados, "saldos": saldos, "sustituidos": sustituidos,
         "errores": sorted(errores, key=lambda e: (str(type(e["fila"])), str(e["fila"]).zfill(6))),
-        "avisos": plan.avisos,
+        "avisos": list(plan.avisos) + avisos_extra,
         "totales": {"compras": total("compra"), "ventas": total("venta"),
                     "dividendos": total("dividendo"), "comisiones": total("comision"),
                     "intereses": total("interes"), "impuestos": total("impuesto"),
                     "depositos": total("deposito"), "retiradas": total("retirada"),
                     "transferencias": total("transferencia"),
                     "numCompras": sum(1 for f in filas if f["tipo"] == "compra" and f["estado"] == "nuevo")},
-        "productosNuevos": [{**n["datos"], "id": ids.get(n["ref"]), "precio": n["precio"],
-                             "monedaPrecio": n["monedaPrecio"], "fechaPrecio": n["fecha"],
-                             "mercado": n["mercado"]} for n in plan.productos_nuevos],
+        "cuentasNuevas": [{"ref": c["ref"], "datos": dict(c["datos"]),
+                           "existente": bool(c.get("cuenta"))}
+                          for c in getattr(plan, "cuentas", None) or []],
+        "productosNuevos": [{**n["datos"], "id": ids.get(n["ref"]), "precio": n.get("precio"),
+                             "monedaPrecio": n.get("monedaPrecio"), "fechaPrecio": n.get("fecha"),
+                             "mercado": n.get("mercado")}
+                            for n in list(plan.productos_nuevos) + productos_extra],
         "filas": sorted(filas, key=lambda f: f["fecha"], reverse=True),
     }
 

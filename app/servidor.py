@@ -1262,9 +1262,19 @@ def api_importar_previsualizar():
 
 @app.post("/api/importar/confirmar")
 def api_importar_confirmar():
-    plan = PLANES.pop((request.get_json(silent=True) or {}).get("token"), None)
+    datos_req = request.get_json(silent=True) or {}
+    plan = PLANES.pop(datos_req.get("token"), None)
     if plan is None:
         return jsonify(ok=False, errores=["Esa vista previa ya no vale: vuelve a revisar el archivo."]), 400
+    # Aplicar cambios de tipos de cuenta desde el frontend
+    cuentas_cambios = datos_req.get("cuentas", [])
+    if cuentas_cambios and hasattr(plan, "cuentas") and plan.cuentas:
+        for cambio in cuentas_cambios:
+            idx = cambio.get("idx")
+            tipo_nuevo = cambio.get("tipo")
+            if idx is not None and isinstance(idx, int) and 0 <= idx < len(plan.cuentas):
+                if tipo_nuevo:
+                    plan.cuentas[idx]["datos"]["tipo"] = tipo_nuevo
     informe = {}
 
     def fn(cfg):
