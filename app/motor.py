@@ -604,15 +604,18 @@ MESES_CORTOS = ["ene", "feb", "mar", "abr", "may", "jun",
                 "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
-def resumen_rentas(cfg, hasta):
+def resumen_rentas(cfg, hasta, fx=None):
     """Comisiones, impuestos, dividendos e intereses: histórico real (por año y por
     mes), año en curso con su previsión, promedio anual y desglose.
 
-    Se calcula SOLO con los movimientos (que ya están en euros), sin mirar precios ni
-    depender de la red: el mismo número sale en cualquier vista y se puede probar sin
-    conexión. `hasta` es la fecha de los datos (YYYY-MM-DD) y decide qué año está en
-    curso; la previsión de cierre es lo mayor entre lo ya anotado este año y el
-    promedio de los años completos (así un dividendo de enero no multiplica por doce).
+    Se calcula SOLO con los movimientos, sin mirar precios ni depender de la red: el
+    mismo número sale en cualquier vista y se puede probar sin conexión. `hasta` es la
+    fecha de los datos (YYYY-MM-DD) y decide qué año está en curso; la previsión de
+    cierre es lo mayor entre lo ya anotado este año y el promedio de los años completos
+    (así un dividendo de enero no multiplica por doce).
+
+    `fx` (opcional) es una función fecha → dólares por euro: cada movimiento se
+    reexpresa con el cambio de SU día, como en el resto del panel. Sin ella, en euros.
     """
     hasta = hasta or ""
     anio_actual = int(hasta[:4]) if len(hasta) >= 4 else dt.date.today().year
@@ -655,9 +658,12 @@ def resumen_rentas(cfg, hasta):
         if not f:
             continue
         t = m.get("tipo")
-        imp = float(m.get("importe") or 0)
-        ret = float(m.get("impuestos") or 0)
-        com = float(m.get("comision") or 0)
+        # `fx` reexpresa cada movimiento con el cambio de SU día (dólares por euro);
+        # sin ella, todo queda en euros.
+        k = fx(f) if fx else 1.0
+        imp = float(m.get("importe") or 0) * k
+        ret = float(m.get("impuestos") or 0) * k
+        com = float(m.get("comision") or 0) * k
         pid = m.get("producto")
         cid = m.get("cuenta") or (productos.get(pid) or {}).get("cuenta") or ""
         # Comisiones: el campo «comisión» de CUALQUIER movimiento más el importe de los
@@ -1521,25 +1527,32 @@ def construir(cfg, carpeta, descargar=True):
             if p["id"] in ids_inv:
                 flujo_inv[i] -= v
 
-    serie_inv = [0.0] * n
+    # La serie de lo que sí cotiza. Los días sin ningún dato van en None, no en 0:
+    # una cartera que aún no existe no «pierde» nada, y con 0.0 el índice encadenado
+    # se hundía un 95 % al día (de ahí las barras de −95 % de 2007, 2008 y 2015 y
+    # unas métricas de riesgo sin sentido).
+    serie_inv = [None] * n
     for p in inv:
         for i in range(n):
             v = p["serie"][i]
             if v is not None:
-                serie_inv[i] += v
+                serie_inv[i] = (serie_inv[i] or 0.0) + v
 
     def indice_twr(valores, flujos):
         """
         Rentabilidad encadenada, limpia del efecto de cuando entra el dinero.
         El dia que empieza la posicion cuenta la diferencia entre lo que pagaste
         (comisiones incluidas) y el cierre de ese dia.
+
+        Antes del primer dia con datos el indice no existe (None): asi la serie y las
+        metricas empiezan cuando empieza la cartera, no en la primera fecha de precios.
         """
         out, ant, nivel = [], None, 100.0
         for i in range(len(valores)):
             v = valores[i]
             f = flujos[i] if i < len(flujos) else 0.0
             if v is None:
-                out.append(nivel)
+                out.append(None if ant is None else nivel)
                 continue
             if ant is None or ant <= 1:
                 if f > 0:
@@ -1551,6 +1564,14 @@ def construir(cfg, carpeta, descargar=True):
         return out
 
     idx_cartera = indice_twr(serie_inv, flujo_inv)
+
+    def base_ano_de(idx, ini):
+        """Nivel del índice al cerrar el año anterior. Si aún no existía (la cartera
+        empieza ese año), la base es 100, que es donde arranca el índice."""
+        for k in range(ini - 1, -1, -1):
+            if idx[k] is not None:
+                return idx[k]
+        return 100.0
 
     def indice_pesos(pesos):
         """Compra y mantener con pesos fijos, base 100."""
@@ -1648,19 +1669,21 @@ def construir(cfg, carpeta, descargar=True):
         ini = next(i for i, f in enumerate(eje_iso) if f[:4] == ano)
         fin = max(i for i, f in enumerate(eje_iso) if f[:4] == ano)
         base_ano = ini - 1 if ini > 0 else None
-        b = idx_cartera[base_ano] if base_ano is not None else 100.0
-        rent_anual["cartera"].append(r4(idx_cartera[fin] / b - 1) if b else None)
+        fin_c = idx_cartera[fin]
+        b = base_ano_de(idx_cartera, ini) if fin_c is not None else None
+        rent_anual["cartera"].append(r4(fin_c / b - 1) if (fin_c is not None and b) else None)
         rent_anual["parcial"].append(ano in (anos_nat[0], anos_nat[-1]))
         for p in inv:
             i0 = primer_dia[p["id"]]
-            if i0 is None or i0 > fin:
+            ix = idx_prod[p["id"]]
+            fin_p = ix[fin] if i0 is not None else None
+            if i0 is None or i0 > fin or fin_p is None:
                 rent_anual["porProducto"][p["id"]].append(None)
                 rent_anual["desde"][p["id"]].append(None)
                 continue
-            ix = idx_prod[p["id"]]
             empieza_aqui = base_ano is None or i0 > base_ano
-            bb = 100.0 if empieza_aqui else ix[base_ano]
-            rent_anual["porProducto"][p["id"]].append(r4(ix[fin] / bb - 1))
+            bb = 100.0 if empieza_aqui else (ix[base_ano] or base_ano_de(ix, ini))
+            rent_anual["porProducto"][p["id"]].append(r4(fin_p / bb - 1) if bb else None)
             rent_anual["desde"][p["id"]].append(eje_iso[i0] if empieza_aqui else None)
 
     # --- resumen mes a mes ---
@@ -1880,6 +1903,17 @@ def construir(cfg, carpeta, descargar=True):
             else:
                 break
 
+    # El mismo cambio (dólares por euro del día) que usa el panel para reexpresar la
+    # cartera, aquí para las secciones de rentas cuando se miran en dólares: cada
+    # movimiento con el cambio de su día, no con el de hoy.
+    def fx_rentas(fecha_iso):
+        if not usdeur_dia:
+            return 1.0
+        v = valor_en(usdeur_dia, fecha_iso, 10)
+        if not v:
+            v = next((usdeur_dia[k] for k in sorted(usdeur_dia) if usdeur_dia[k]), None)
+        return (1.0 / v) if v else 1.0
+
     datos = {
         "generado": dt.datetime.now().replace(microsecond=0).isoformat(),
         "titular": cfg.get("titular", "Mi patrimonio"),
@@ -1924,7 +1958,8 @@ def construir(cfg, carpeta, descargar=True):
                                   "total": total_mes},
         "objetivo": cfg.get("objetivo"),
         "comisiones": comisiones,
-        "rentas": resumen_rentas(cfg, fecha_extracto.isoformat()),
+        "rentas": {"eur": resumen_rentas(cfg, fecha_extracto.isoformat()),
+                   "usd": resumen_rentas(cfg, fecha_extracto.isoformat(), fx=fx_rentas)},
         "rentabilidadAnual": rent_anual,
         "resumenMensual": resumen_mensual,
         "comparador": comparador,

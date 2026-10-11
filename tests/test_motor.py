@@ -842,7 +842,7 @@ def test_las_rentas_cuadran_con_los_kpi_del_panel(tmp_path):
         {"id": "m5", "fecha": "2025-08-01", "tipo": "impuesto", "cuenta": "c1", "importe": 2.5},
     ]
     datos = motor.construir(cfg, str(tmp_path), descargar=False)
-    r = datos["rentas"]
+    r = datos["rentas"]["eur"]
     assert r["dividendos"]["historico"]["total"] == pytest.approx(datos["total"]["dividendos"])
     assert r["intereses"]["historico"]["total"] == pytest.approx(datos["total"]["intereses"])
     assert r["impuestos"]["historico"]["total"] == pytest.approx(datos["total"]["impuestos"])
@@ -850,3 +850,70 @@ def test_las_rentas_cuadran_con_los_kpi_del_panel(tmp_path):
         datos["comisiones"]["compraventaPagada"])
     assert r["comisiones"]["historico"]["total"] == pytest.approx(4.5)   # 0,5 + 4
     assert r["impuestos"]["historico"]["total"] == pytest.approx(5.5)    # 3 + 2,5
+    # El motor manda también la versión en dólares, para que la pestaña Rendimiento
+    # no tenga que enseñar euros con el símbolo del dólar.
+    assert "usd" in datos["rentas"]
+
+
+def test_resumen_rentas_en_dolares_convierte_cada_movimiento_a_su_dia():
+    """En dólares cada movimiento va con el cambio de SU día, no con el de hoy: un
+    dividendo de 2025 no puede valorarse con el cambio de 2026."""
+    cfg = _cfg_rentas()
+    r = motor.resumen_rentas(cfg, "2026-06-30",
+                             fx=lambda f: 2.0 if f < "2026-01-01" else 3.0)
+    # Dividendos (bruto): 2025 = 12,50 € × 2 = 25; 2026 = 24 € × 3 = 72
+    assert r["dividendos"]["porAnio"][0]["total"] == pytest.approx(25.0)
+    assert r["dividendos"]["porAnio"][1]["total"] == pytest.approx(72.0)
+    assert r["dividendos"]["historico"]["total"] == pytest.approx(97.0)
+    # Intereses: 2025 = 6 × 2 = 12; 2026 = 6 × 3 = 18
+    assert r["intereses"]["historico"]["total"] == pytest.approx(30.0)
+    # Comisiones: 2025 = 5,50 × 2 = 11
+    assert r["comisiones"]["historico"]["total"] == pytest.approx(11.0)
+    # Y el desglose va en la misma moneda que el total
+    div = {d["nombre"]: d for d in r["dividendos"]["desglose"]}
+    assert div["Acción"]["bruto"] == pytest.approx(25.0)
+
+
+def test_el_indice_empieza_cuando_empieza_la_cartera_y_no_se_hunde(tmp_path):
+    """El índice encadenado no puede arrancar en la primera fecha del eje: antes de la
+    primera compra no hay cartera, así que no existe (None). Con un 0 en esos días se
+    hundía un 95 % al día y salían barras de −95 % y métricas de riesgo falsas."""
+    (tmp_path / "cache").mkdir()
+    precios = {}
+    for m in range(1, 13):
+        for dd in (1, 10, 20, 28):
+            precios[f"2024-{m:02d}-{dd:02d}"] = 100.0
+    for m in range(1, 7):
+        for dd in (1, 10, 20, 28):
+            precios[f"2025-{m:02d}-{dd:02d}"] = 110.0
+    (tmp_path / "cache" / "TEST.json").write_text(json.dumps(precios), encoding="utf-8")
+    cfg = {
+        "titular": "Prueba",
+        "productos": [
+            {"id": "cta", "nombre": "Cuenta", "corto": "Cuenta",
+             "tipo": "efectivo", "fuente": "manual"},
+            {"id": "fondo", "nombre": "Fondo", "corto": "Fondo", "tipo": "fondo",
+             "fuente": "yahoo", "codigo": "TEST", "origen": "csv", "moneda": "EUR"},
+        ],
+        "movimientos": [
+            {"id": "m1", "fecha": "2025-03-01", "producto": "fondo", "tipo": "compra",
+             "unidades": 10, "importe": 1000.0},
+        ],
+        "valoraciones": [
+            {"id": "v1", "producto": "cta", "fecha": "2024-01-01", "valor": 500.0},
+            {"id": "v2", "producto": "cta", "fecha": "2025-06-28", "valor": 500.0},
+        ],
+        "comparador": [{"id": "real", "nombre": "Mi cartera", "real": True}],
+    }
+    datos = motor.construir(cfg, str(tmp_path), descargar=False)
+    fechas, idx = datos["fechas"], datos["indiceCartera"]
+    i_mar = fechas.index("2025-03-01")
+    assert i_mar > 0
+    assert all(v is None for v in idx[:i_mar])          # antes de comprar, sin índice
+    assert idx[i_mar] is not None                       # el día de la compra, sí
+    # 2024 no tiene cartera: ni barra de −95 % ni nada
+    assert datos["rentabilidadAnual"]["cartera"][0] is None
+    assert all(v is None or v > -0.5 for v in datos["rentabilidadAnual"]["cartera"])
+    # Y las métricas de riesgo empiezan cuando empieza la cartera, no en 2024
+    m = next(c for c in datos["comparador"] if c.get("real"))["metricas"]
+    assert m["desde"] >= "2025-03-01"

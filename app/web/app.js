@@ -169,6 +169,7 @@
     ["realizado", "dividendos", "intereses", "impuestosPagados"]
       .forEach(k => { if (p[k] != null) c[k] = red2(p[k] * kf); });
     if (p.serie) c.serie = convSerie(p.serie);
+    if (p.navSerie) c.navSerie = convSerie(p.navSerie);   // valor liquidativo, sin unidades
     if (p.serieAportado) c.serieAportado = convApSerie(p.serieAportado);
     // El aportado sale de su curva ya convertida: así cada aporte va con el cambio
     // del día en que se hizo (un depósito en dólares sigue siendo los dólares que
@@ -218,14 +219,15 @@
   const r2 = v => (v == null ? null : Math.round(v * 100) / 100);
 
   /** Índice encadenado (base 100), limpio del efecto de cuándo entra el dinero.
-      Espejo exacto de motor.indice_twr(). */
+      Espejo exacto de motor.indice_twr(): antes del primer día con datos no existe
+      (null), para que la serie no arranque años antes de que hubiera cartera. */
   function indiceTWR(valores, flujos) {
     const out = [];
     let ant = null, nivel = 100;
     for (let i = 0; i < valores.length; i++) {
       const v = valores[i];
       const f = i < flujos.length ? flujos[i] : 0;
-      if (v == null) { out.push(nivel); continue; }
+      if (v == null) { out.push(ant == null ? null : nivel); continue; }
       if (ant == null || ant <= 1) { if (f > 0) nivel *= Math.max(v / f, 0.05); }
       else nivel *= 1 + Math.max((v - f) / ant - 1, -0.95);
       out.push(nivel);
@@ -234,34 +236,118 @@
     return out;
   }
 
-  /** Índice de TU cartera con los filtros puestos (sin filtros, el del motor). */
+  /** Índice de TU cartera con los filtros y la divisa de vista puestos (sin filtros y
+      en euros, el del motor). En dólares se vuelve a montar aquí con cada valor
+      convertido por el cambio de SU día: así la rentabilidad y el riesgo son los de
+      verdad en dólares, no los de euros con otro símbolo. */
   function idxCartera() {
-    if (!filtrando()) {
+    if (!filtrando() && !enUSD()) {
       const real = (D.comparador || []).find(x => x.real);
       return real && real.indice ? real.indice : null;
     }
     const n = D.fechas.length;
-    const lista = crudos(D.productos).filter(p => p.origen === "csv" || p.origen === "ordenes");
+    const lista = crudos(D.productos)
+      .filter(p => p.origen === "csv" || p.origen === "ordenes")
+      .map(p => enUSD() ? baseConv(p) : p);
     if (!lista.length) return null;
-    const serie = new Array(n).fill(0), fl = new Array(n).fill(0);
+    const serie = new Array(n).fill(null), fl = new Array(n).fill(0);
     let hay = false;
     lista.forEach(p => {
       const s = p.serie || [];
-      for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] += s[i]; hay = true; }
+      for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] = (serie[i] || 0) + s[i]; hay = true; }
       (p.flujos || []).forEach(([f, v]) => { const i = idxFecha(f); if (i >= 0) fl[i] -= v; });
     });
     return hay ? indiceTWR(serie, fl) : null;
+  }
+
+  /** «Comprar y mantener» con pesos fijos, base 100 (espejo de motor.indice_pesos()).
+      Con la divisa de vista puesta, cada valor liquidativo va con el cambio de su día. */
+  function indicePesos(pesos) {
+    const n = D.fechas.length;
+    const tot = Object.values(pesos).reduce((a, b) => a + b, 0);
+    if (!tot) return null;
+    const todos = TODOS();
+    const navs = {};
+    for (const pid of Object.keys(pesos)) {
+      const p = todos.find(x => x.id === pid);
+      if (!p || !p.navSerie) return null;
+      navs[pid] = p.navSerie;
+    }
+    let i0 = -1;
+    for (let i = 0; i < n && i0 < 0; i++) {
+      if (Object.keys(navs).every(k => navs[k][i])) i0 = i;
+    }
+    if (i0 < 0) return null;
+    const out = new Array(n).fill(null), ult = {};
+    Object.keys(navs).forEach(k => { ult[k] = navs[k][i0]; });
+    for (let i = i0; i < n; i++) {
+      let s = 0;
+      for (const [k, peso] of Object.entries(pesos)) {
+        const v = navs[k][i] || ult[k];
+        ult[k] = v;
+        s += (peso / tot) * v / navs[k][i0];
+      }
+      out[i] = Math.round(s * 100 * 10000) / 10000;
+    }
+    return out;
+  }
+
+  /** Índice TWR de un producto (espejo de motor: idx_prod). */
+  function indiceProducto(p) {
+    const n = D.fechas.length;
+    const fl = new Array(n).fill(0);
+    (p.flujos || []).forEach(([f, v]) => { const i = idxFecha(f); if (i >= 0) fl[i] -= v; });
+    return indiceTWR(p.serie || [], fl);
+  }
+
+  /** Rentabilidad por año de cada producto, recalculada con la divisa de vista
+      (espejo de motor.rentabilidadAnual.porProducto). */
+  function rentAnualProductos(lista, anos) {
+    const f = D.fechas, n = f.length;
+    const porProducto = {}, desde = {};
+    lista.forEach(p => {
+      const s = p.serie || [];
+      const i0 = s.findIndex(v => v != null);
+      const ix = indiceProducto(p);
+      porProducto[p.id] = [];
+      desde[p.id] = [];
+      anos.forEach(ano => {
+        let ini = -1, fin = -1;
+        for (let i = 0; i < n; i++) if (f[i].slice(0, 4) === ano) { if (ini < 0) ini = i; fin = i; }
+        const finV = (fin >= 0 && i0 >= 0) ? ix[fin] : null;
+        if (fin < 0 || i0 < 0 || i0 > fin || finV == null) {
+          porProducto[p.id].push(null); desde[p.id].push(null); return;
+        }
+        const baseAno = ini - 1;
+        const empiezaAqui = baseAno < 0 || i0 > baseAno;
+        let b = 100;
+        if (!empiezaAqui) {
+          b = null;
+          for (let k = baseAno; k >= 0; k--) if (ix[k] != null) { b = ix[k]; break; }
+          if (b == null) b = 100;
+        }
+        porProducto[p.id].push(b ? r4(finV / b - 1) : null);
+        desde[p.id].push(empiezaAqui ? f[i0] : null);
+      });
+    });
+    return { porProducto, desde };
   }
 
   /** Rentabilidad por año natural de un índice (espejo de rentabilidadAnual.cartera). */
   function rentAnualDe(idx, anos) {
     if (!idx) return null;
     const f = D.fechas;
+    // Base: el último nivel del índice antes de ese año; si la cartera empezó ese año
+    // (antes no existía), 100, que es donde arranca el índice.
+    const baseDe = ini => {
+      for (let k = ini - 1; k >= 0; k--) if (idx[k] != null) return idx[k];
+      return 100;
+    };
     return anos.map(ano => {
       let ini = -1, fin = -1;
       for (let i = 0; i < f.length; i++) if (f[i].slice(0, 4) === ano) { if (ini < 0) ini = i; fin = i; }
-      if (fin < 0) return null;
-      const b = ini > 0 ? idx[ini - 1] : 100;
+      if (fin < 0 || idx[fin] == null) return null;
+      const b = baseDe(ini);
       return b ? r4(idx[fin] / b - 1) : null;
     });
   }
@@ -1273,11 +1359,11 @@
       // (que no cuente cuándo metiste el dinero), pero con las cifras de la vista.
       const lista = visibles().filter(p => p.origen === "csv" || p.origen === "ordenes");
       const n = D.fechas.length;
-      const serie = new Array(n).fill(0), fl = new Array(n).fill(0);
+      const serie = new Array(n).fill(null), fl = new Array(n).fill(0);
       let hay = false;
       lista.forEach(p => {
         const s = p.serie || [];
-        for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] += s[i]; hay = true; }
+        for (let i = 0; i < n; i++) if (s[i] != null) { serie[i] = (serie[i] || 0) + s[i]; hay = true; }
         (p.flujos || []).forEach(([f, v]) => { const i = idxFecha(f); if (i >= 0) fl[i] -= v; });
       });
       const idx = hay ? indiceTWR(serie, fl) : null;
@@ -1898,10 +1984,10 @@
   function pintaRentas() {
     const cont = $("#rentas");
     if (!cont) return;
-    const r = D.rentas;
+    const r = D.rentas && (enUSD() ? D.rentas.usd : D.rentas.eur);
     if (!r) { cont.innerHTML = ""; return; }
-    const fmt = v => G.fmtEur(convAhora(v || 0));
-    const fmtNeg = v => v ? "−" + G.fmtEur(convAhora(Math.abs(v))) : "—";
+    const fmt = v => G.fmtEur(v == null ? 0 : v);
+    const fmtNeg = v => v ? "−" + G.fmtEur(Math.abs(v)) : "—";
 
     const kpis = b => `<div class="kpis" style="margin:16px 0 4px">
       <div class="kpi"><div class="e">Histórico</div><div class="v">${fmt(b.historico.total)}</div>
@@ -1919,10 +2005,10 @@
       const filas = b.porAnio.map(y => {
         const celdas = MESES_CORTO.map((_, i) => {
           const v = porMes[`${y.anio}-${String(i + 1).padStart(2, "0")}`];
-          return `<td class="${v ? "" : "subt"}">${v ? G.fmtEur(convAhora(v)) : "—"}</td>`;
+          return `<td class="${v ? "" : "subt"}">${v ? G.fmtEur(v) : "—"}</td>`;
         }).join("");
         return `<tr><td>${y.anio}${y.enCurso ? ' <span class="subt">·</span>' : ""}</td>${celdas}
-          <td><b>${G.fmtEur(convAhora(y.total))}</b></td></tr>`;
+          <td><b>${G.fmtEur(y.total)}</b></td></tr>`;
       }).join("");
       return `<div class="tablaEnv"><table class="dt mini"><thead><tr><th>Año</th>${
         MESES_CORTO.map(m => `<th>${m}</th>`).join("")}<th>Total</th></tr></thead><tbody>${filas}</tbody></table></div>`;
@@ -1981,12 +2067,16 @@
       id => { estado.rangoComp = id; pintaRendimiento(); });
     const ra = D.rentabilidadAnual;
     if (ra && ra.anos.length) {
-      // Con filtros encima, la rentabilidad de TU cartera se recalcula aquí.
+      // Con filtros encima o viendo en dólares, la rentabilidad de TU cartera se
+      // recalcula aquí: en dólares cada valor va con el cambio de SU día.
       const idx = idxCartera();
-      const cartera = filtrando() ? rentAnualDe(idx, ra.anos) : ra.cartera;
+      const cartera = (filtrando() || enUSD()) ? rentAnualDe(idx, ra.anos) : ra.cartera;
       // El zoom de este gráfico cuenta años: la tabla de abajo sigue con todos.
       const anos = anosDeRango(estado.rangoAnual);
-      const i0 = anos ? Math.max(0, ra.anos.length - anos) : 0;
+      // Y los años anteriores a la primera compra no tienen nada que enseñar: el
+      // gráfico arranca donde arranca la cartera, sin huecos vacíos a la izquierda.
+      const primerDato = Math.max(0, (cartera || []).findIndex(v => v != null));
+      const i0 = Math.max(anos ? Math.max(0, ra.anos.length - anos) : 0, primerDato);
       const queAnos = i0 ? ` Enseña los últimos ${ra.anos.length - i0} años.` : "";
       if (cartera) {
         G.barrasSimples($("#grafAnual"), {
@@ -2008,8 +2098,14 @@
         "Tu rentabilidad en cada producto y año, desde el precio real al que compraste y con comisiones. "
         + "En un año completo coincide con la rentabilidad publicada del producto; el primer año cuenta desde tu primera compra.";
       const verProducto = false;
-      const tabla = ra.porProducto;
-      const desde = ra.desde || {};
+      // En dólares la tabla por producto también se recalcula (cambio de cada día);
+      // en euros y sin filtros vale la del motor.
+      let tabla = ra.porProducto, desde = ra.desde || {};
+      if (enUSD()) {
+        const calc = rentAnualProductos(visibles().filter(p => ra.porProducto[p.id]), ra.anos);
+        tabla = calc.porProducto;
+        desde = calc.desde;
+      }
       const MES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
       const corto = iso => { const q = iso.split("-"); return `${+q[2]} ${MES[+q[1] - 1]}`; };
       const celda = (v, d) => v == null
@@ -2033,7 +2129,9 @@
     const comp = (() => {
       const base = D.comparador || [];
       const real = base.find(x => x.real);
-      if (!filtrando() || !real) return base;
+      // Con filtros (propietario/ocultos) o viendo en dólares, las métricas se
+      // recalculan aquí: las del motor son de toda la cartera y en euros.
+      if ((!filtrando() && !enUSD()) || !real) return base;
       // El tipo sin riesgo del motor (para el Sharpe): si no viene, se deduce
       // de cualquier alternativa que lo tenga calculado.
       let rf = real.rf != null ? real.rf : null;
@@ -2041,13 +2139,35 @@
         const conS = base.find(x => x.metricas && x.metricas.sharpe != null && x.metricas.vol);
         if (conS) rf = conS.metricas.cagr - conS.metricas.sharpe * conS.metricas.vol;
       }
+      // En dólares el tipo sin riesgo también se reexpresa: el CAGR del monetario en
+      // la divisa de vista, no el de euros.
+      if (enUSD() && rf != null) {
+        const mon = TODOS().find(x => x.navSerie &&
+          /monetari/i.test([x.tipo, x.clase, x.nombre].join(" ")));
+        if (mon) {
+          const mm = metricasIndice(indicePesos({ [mon.id]: 1 }), null);
+          if (mm) rf = mm.cagr;
+        }
+      }
       const idx = idxCartera();
       const met = metricasIndice(idx, rf);
       if (!met) return base.filter(x => !x.real);   // sin datos: la cartera real se queda fuera
-      return base.map(x => x.real
-        ? Object.assign({}, x, { indice: idx.map(v => v == null ? null : Math.round(v * 100) / 100),
-                                  metricas: met })
-        : x);
+      return base.map(x => {
+        if (x.real) {
+          return Object.assign({}, x, {
+            indice: idx.map(v => v == null ? null : Math.round(v * 100) / 100), metricas: met });
+        }
+        // Las alternativas con pesos también se rehacen (en la divisa de vista).
+        if (x.pesos) {
+          const ix = indicePesos(x.pesos);
+          const m = ix ? metricasIndice(ix, rf) : null;
+          if (ix && m) {
+            return Object.assign({}, x, {
+              indice: ix.map(v => v == null ? null : Math.round(v * 100) / 100), metricas: m });
+          }
+        }
+        return x;
+      });
     })();
     const detalles = $("#compDetalles");
     // Los detalles solo se dibujan al abrirlos: un SVG dentro de algo cerrado no tiene ancho.
