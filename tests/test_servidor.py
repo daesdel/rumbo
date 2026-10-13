@@ -5,6 +5,8 @@ test_servidor.py  ·  El servidor local y su blindaje
 El middleware de Host/Origin (contra DNS rebinding y CSRF), la ruta de salud
 y la guardia del modo demostración.
 """
+import os
+
 import pytest
 
 from app import servidor as s
@@ -51,7 +53,8 @@ def test_datos_js_se_recalcula_si_el_calculo_guardado_es_null(cliente):
             f.write("null")
 
         cuerpo = cliente.get("/datos.js").get_data(as_text=True)
-        assert cuerpo.startswith("window.DATOS = {")     # no "null"
+        assert "window.DATOS = {" in cuerpo               # no "null"
+        assert cuerpo.startswith('window.VERSION = "V')  # la versión va primero
     finally:
         if cartera_antes is None:
             if os.path.exists(ruta):
@@ -928,3 +931,46 @@ def test_api_al_crear_una_cuenta_se_le_crea_su_producto_de_efectivo(cliente, mon
         assert tipos["broker"] == "Bróker" and "efectivo" in tipos
     finally:
         _restaura_estados(ruta, cartera_antes, calc, calc_antes)
+
+
+# ------------------------------------------------------- versión de la app
+
+def test_app_version_tiene_el_formato_acordado():
+    """La versión vive en un solo sitio (app/VERSION) y en formato V<mayor>.<menor>
+    con DOS dígitos en la menor: V1.00, V1.01, … V1.99, V2.00."""
+    import re
+    with open(os.path.join(s.RAIZ, "app", "VERSION"), encoding="utf-8") as f:
+        version = f.read().strip()
+    assert re.fullmatch(r"\d+\.\d{2}", version), version
+    etiqueta = s.version_etiqueta()
+    assert etiqueta == "V" + version
+    assert re.fullmatch(r"V\d+\.\d{2}", etiqueta), etiqueta
+
+
+def test_el_comparador_de_versiones_ordena_bien(cliente):
+    """V1.99 < V2.00 y V1.01 > V1.00: el orden tiene que ser el de los números, no
+    el alfabético, o el aviso de «hay versión nueva» mentiría."""
+    como_tupla = lambda v: tuple(int(x) for x in __import__("re").findall(r"\d+", v))
+    assert como_tupla("1.99") < como_tupla("2.00")
+    assert como_tupla("1.00") < como_tupla("1.01")
+    assert como_tupla("2.00") > como_tupla("1.99")
+    assert como_tupla(s.version_actual()) == como_tupla(s.version_actual())
+
+
+def test_api_version_devuelve_la_etiqueta_los_dos_repos_y_la_publica(cliente):
+    """El navegador no formatea versiones: se lo da el backend ya hecho. Y los
+    enlaces son los dos: el repo propio y el proyecto original."""
+    j = cliente.get("/api/version").get_json()
+    assert j["etiqueta"] == "V" + j["actual"]
+    assert j["repo"] == s.REPO == "https://github.com/daesdel/rumbo"
+    assert j["repoOriginal"] == s.REPO_ORIGINAL == "https://github.com/danidm98/rumbo"
+    # El aviso de versión nueva se lee del repo PROPIO, no del original.
+    assert "danidm98" not in j["repo"]
+    assert "hayNueva" in j
+
+
+def test_datos_js_lleva_la_version_al_navegador(cliente):
+    """El header se pinta sin ida y vuelta: /datos.js ya entrega window.VERSION."""
+    cuerpo = cliente.get("/datos.js").get_data(as_text=True)
+    assert cuerpo.startswith('window.VERSION = "V')
+    assert "window.DATOS = {" in cuerpo

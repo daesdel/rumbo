@@ -1299,7 +1299,8 @@
   }
 
   /* ---------------------------------------------- importar */
-  const IMP = { origen: "myinvestor", informe: null, token: null, hecho: null, prompt: null, archivos: [] };
+  const IMP = { origen: "myinvestor", informe: null, token: null, hecho: null, prompt: null, archivos: [],
+                tipos: {}, fueraCta: new Set(), fueraProd: new Set(), recalc: 0, timer: null };
   const ICONOS = {
     portfolio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11M14 9v11"/></svg>',
     myinvestor: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-5 7 5v11M9 21v-6h6v6"/></svg>',
@@ -1371,6 +1372,15 @@
       </div></section>`;
   }
 
+  /** Deja la importación como recién empezada (tipos y exclusiones incluidos). */
+  function limpiaImportacion() {
+    clearTimeout(IMP.timer);
+    IMP.recalc++;
+    IMP.tipos = {};
+    IMP.fueraCta = new Set();
+    IMP.fueraProd = new Set();
+  }
+
   function conectaImportar() {
     const inp = $("#imArchivos"), z = $("#imZona");
     if (inp) {
@@ -1392,6 +1402,7 @@
     if (IMP.origen === "ia" && !IMP.prompt) {
       api("GET", "api/prompt").then(j => { IMP.prompt = j.texto; const pre = $("#imPrompt"); if (pre) pre.textContent = j.texto; });
     }
+    conectaExclusiones();
   }
 
   async function imRevisar() {
@@ -1412,6 +1423,9 @@
       IMP.informe = j.informe;
       IMP.token = j.token;
       IMP.hecho = null;
+      IMP.tipos = {};                 // tipos de cuenta cambiados a mano
+      IMP.fueraCta = new Set();       // cuentas desmarcadas
+      IMP.fueraProd = new Set();      // productos desmarcados a mano
       pinta();
     } catch (x) {
       fallo.textContent = x.message;
@@ -1419,6 +1433,78 @@
       b.disabled = false;
       b.textContent = "Revisar antes de importar";
     }
+  }
+
+  /* ---- qué se importa y qué no: casillas de la vista previa ---- */
+
+  /** Una cuenta se excluye si el usuario la ha desmarcado. */
+  function cuentaFuera(ref) { return IMP.fueraCta.has(ref); }
+
+  /** Un producto se excluye si lo desmarcó el usuario o si lo está su cuenta:
+      sin la cuenta no hay de dónde salga el dinero. */
+  function productoFuera(p) {
+    return IMP.fueraProd.has(p.ref) || !!(p.cuenta && IMP.fueraCta.has(p.cuenta));
+  }
+
+  /** Un producto que se cae solo porque su cuenta está desmarcada. */
+  function productoArrastrado(p) {
+    return !IMP.fueraProd.has(p.ref) && !!(p.cuenta && IMP.fueraCta.has(p.cuenta));
+  }
+
+  function cuantosDentro(lista, fuera) { return lista.filter(x => !fuera(x)).length; }
+
+  /** Los desmarcados, tal y como los espera el servidor. */
+  function exclusiones() {
+    return { omitirCuentas: [...IMP.fueraCta], omitirProductos: [...IMP.fueraProd] };
+  }
+
+  /** Los tipos de cuenta que el usuario ha cambiado (por ref, no por índice). */
+  function tiposCambiados() {
+    return Object.entries(IMP.tipos).map(([ref, tipo]) => ({ ref, tipo }));
+  }
+
+  /** Vuelve a pedir la vista previa con las exclusiones, para que los totales de
+      arriba y la tabla de movimientos enseñen el impacto de verdad. */
+  function recalcula() {
+    if (!IMP.token) return;
+    clearTimeout(IMP.timer);
+    const mio = ++IMP.recalc;
+    IMP.timer = setTimeout(() => {
+      const cuerpo = { token: IMP.token, cuentas: tiposCambiados(), ...exclusiones() };
+      api("POST", "api/importar/excluir", cuerpo).then(r => {
+        if (mio !== IMP.recalc) return;        // llegó tarde: hay otro cálculo en curso
+        if (r && r.informe) { IMP.informe = r.informe; pinta(); }
+      }).catch(() => {});
+    }, 350);
+  }
+
+  function marcaCuenta(ref, dentro) {
+    if (dentro) IMP.fueraCta.delete(ref); else IMP.fueraCta.add(ref);
+    pinta();            // la cascada se ve al momento
+    recalcula();
+  }
+
+  function marcaProducto(ref, dentro) {
+    if (dentro) IMP.fueraProd.delete(ref); else IMP.fueraProd.add(ref);
+    pinta();
+    recalcula();
+  }
+
+  function cambiaTipoCuenta(ref, tipo, original) {
+    if (tipo === original) delete IMP.tipos[ref]; else IMP.tipos[ref] = tipo;
+    recalcula();
+  }
+
+  function conectaExclusiones() {
+    document.querySelectorAll("[data-impcuenta]").forEach(el => {
+      el.onchange = () => marcaCuenta(el.dataset.impcuenta, el.checked);
+    });
+    document.querySelectorAll("[data-impprod]").forEach(el => {
+      el.onchange = () => marcaProducto(el.dataset.impprod, el.checked);
+    });
+    document.querySelectorAll("[data-cuentatipo]").forEach(el => {
+      el.onchange = () => cambiaTipoCuenta(el.dataset.cuentatipo, el.value, el.dataset.tipoOrig);
+    });
   }
 
   /** Opciones del desplegable de tipo de una cuenta: los tipos de cuenta que ya
@@ -1434,24 +1520,40 @@
       esc(deProducto[k] || deCuenta[k] || k)}</option>`).join("");
   }
 
-  /** Una fila de la tabla de cuentas detectadas, con su tipo editable. */
+  /** Una fila de la tabla de cuentas detectadas: casilla, tipo y datos. */
   function filaCuentaDetectada(c, i) {
-    return `<tr><td style="text-align:left"><b>${esc(c.datos.nombre)}</b>${
-      c.existente ? ' <span class="subt">(ya existe)</span>' : ""}</td>` +
-      `<td><select data-cuentatipo="${i}" data-tipo-orig="${esc(c.datos.tipo || "")}" style="width:170px">${
-        opcionesTipoCuenta(c.datos.tipo)}</select></td>` +
+    const dentro = !cuentaFuera(c.ref);
+    return `<tr><td><input type="checkbox" data-impcuenta="${esc(c.ref)}"${
+      dentro ? " checked" : ""} title="Importar esta cuenta"></td>` +
+      `<td style="text-align:left"><b>${esc(c.datos.nombre)}</b>${
+        c.existente ? ' <span class="subt">(ya existe)</span>' : ""}</td>` +
+      `<td><select data-cuentatipo="${esc(c.ref)}" data-tipo-orig="${esc(c.datos.tipo || "")}"${
+        dentro ? "" : " disabled"} style="width:170px">${
+        opcionesTipoCuenta(IMP.tipos[c.ref] || c.datos.tipo)}</select></td>` +
       `<td>${esc(c.datos.moneda || "EUR")}</td><td>${esc(c.datos.entidad || "—")}</td></tr>`;
   }
 
-  /** «Cuentas detectadas»: si alguna no es una cuenta sino un plan, un fondo…,
-      aquí se cambia su tipo antes de importar. */
+  /** «Cuentas detectadas»: el usuario puede cambiar el tipo y desmarcar las que
+      no quiera traer. */
   function bloqueCuentas(inf) {
     const lista = inf.cuentasNuevas || [];
     if (!lista.length) return "";
-    return `<div class="imNuevos"><div class="secc">Cuentas detectadas: cambia el tipo si alguna no es una cuenta</div>
-      <div class="tablaEnv"><table class="dt"><thead><tr><th style="text-align:left">Cuenta</th>
-      <th style="text-align:left">Tipo</th><th>Moneda</th><th>Entidad</th></tr></thead>
+    return `<div class="imNuevos"><div class="secc">Cuentas detectadas
+        <span class="subt">${cuantosDentro(lista, c => cuentaFuera(c.ref))} de ${lista.length} cuentas se importarán</span></div>
+      <div class="tablaEnv"><table class="dt"><thead><tr><th style="width:34px">Importar</th>
+      <th style="text-align:left">Cuenta</th><th style="text-align:left">Tipo</th>
+      <th>Moneda</th><th>Entidad</th></tr></thead>
       <tbody>${lista.map(filaCuentaDetectada).join("")}</tbody></table></div></div>`;
+  }
+
+  /** Una fila de «Productos nuevos que se crean», con su casilla. */
+  function filaProducto(p) {
+    const fuera = productoFuera(p), arrastrado = productoArrastrado(p);
+    return `<div class="imProd"><label class="impChk"><input type="checkbox" data-impprod="${esc(p.ref)}"${
+      fuera ? "" : " checked"}${arrastrado ? " disabled" : ""} title="Importar este producto"></label>
+      <b>${esc(p.nombre)}</b>${arrastrado ? ' <span class="subt">se excluye con su cuenta</span>' : ""}
+      <span class="meta"><span>${esc(E.tipos[p.tipo] || p.tipo)}</span><span>${esc(p.codigo || "valor a mano")}</span>
+      <span>${esc(E.fuentes[p.fuente])}</span>${p.precio ? `<span>${num(p.precio)} ${esc(p.monedaPrecio)} · ${fecha(p.fechaPrecio)}</span>` : ""}</span></div>`;
   }
 
   function vistaPrevia() {
@@ -1461,10 +1563,10 @@
     const errores = inf.errores.length ? `<div class="imErr"><b>${inf.errores.length} ${inf.errores.length === 1 ? "fila tiene" : "filas tienen"} problemas y no se importará${inf.errores.length === 1 ? "" : "n"}:</b>
       <ul>${inf.errores.map(e => `<li><span class="fila">${typeof e.fila === "number" ? "Fila " + e.fila : esc(e.fila)}</span>${esc(e.mensaje)}</li>`).join("")}</ul></div>` : "";
     const avisos = inf.avisos.map(a => `<div class="av"><span>⚠</span><span>${esc(a)}</span></div>`).join("");
-    const nuevos = inf.productosNuevos.length ? `<div class="imNuevos"><div class="secc">Productos nuevos que se crearán</div>
-      ${inf.productosNuevos.map(p => `<div class="imProd"><b>${esc(p.nombre)}</b>
-        <span class="meta"><span>${esc(E.tipos[p.tipo] || p.tipo)}</span><span>${esc(p.codigo || "valor a mano")}</span>
-        <span>${esc(E.fuentes[p.fuente])}</span>${p.precio ? `<span>${num(p.precio)} ${esc(p.monedaPrecio)} · ${fecha(p.fechaPrecio)}</span>` : ""}</span></div>`).join("")}</div>` : "";
+    const listaNuevos = inf.productosNuevos || [];
+    const nuevos = listaNuevos.length ? `<div class="imNuevos"><div class="secc">Productos nuevos que se crearán
+        <span class="subt">${cuantosDentro(listaNuevos, productoFuera)} de ${listaNuevos.length} productos se importarán</span></div>
+      ${listaNuevos.map(filaProducto).join("")}</div>` : "";
     const ESTADO = { nuevo: "Nuevo", repetido: "Ya estaba", error: "Con error" };
     const filas = inf.filas.map(f => `<tr class="est-${f.estado}"><td>${fecha(f.fecha)}</td>
       <td style="text-align:left">${esc(f.productoNombre)}</td><td style="text-align:left">${esc(E.tiposMov[f.tipo] || "Saldo")}</td>
@@ -1496,15 +1598,13 @@
     const b = $("#imConfirmarBtn");
     b.disabled = true;
     b.textContent = "Importando…";
-    // Solo se envían las cuentas cuyo tipo haya cambiado el usuario.
-    const cuentas = [];
-    document.querySelectorAll("[data-cuentatipo]").forEach(sel => {
-      if (sel.value && sel.value !== sel.dataset.tipoOrig) {
-        cuentas.push({ idx: Number(sel.dataset.cuentatipo), tipo: sel.value });
-      }
-    });
+    clearTimeout(IMP.timer);             // que no se cuele un recálculo a destiempo
+    IMP.recalc++;
+    const cuentas = tiposCambiados();
+    const { omitirCuentas, omitirProductos } = exclusiones();
     try {
-      const j = await api("POST", "api/importar/confirmar", { token: IMP.token, cuentas });
+      const j = await api("POST", "api/importar/confirmar",
+                          { token: IMP.token, cuentas, omitirCuentas, omitirProductos });
       E.cfg = j.cartera;
       window.EDITOR_SUCIO = true;
       const i = j.informe;
@@ -1514,6 +1614,9 @@
         (i.repetidos ? `. ${pl(i.repetidos, "ya estaba y se ha omitido", "ya estaban y se han omitido")}` : "") + ".";
       IMP.informe = null;
       IMP.token = null;
+      IMP.tipos = {};
+      IMP.fueraCta = new Set();
+      IMP.fueraProd = new Set();
       pinta();
       avisa(j.avisos);
     } catch (x) {
@@ -1623,9 +1726,13 @@
 
   /* ---------------------------------------------- aviso de versión nueva */
   api("GET", "api/version").then(v => {
+    const etiqueta = v.etiqueta || (v.actual ? "V" + v.actual : "");
     const pie = $("#ayudaVersion");
-    if (pie) pie.innerHTML = `Versión ${esc(v.actual)}. ¿Otra duda o un fallo? Cuéntalo en la
+    if (pie) pie.innerHTML = `Versión ${esc(etiqueta)}. ¿Otra duda o un fallo? Cuéntalo en la
       <a href="${esc(v.repo)}" target="_blank" rel="noopener">página del proyecto en GitHub</a>.`;
+    // Los dos repos, como crédito: el nuestro y el proyecto original.
+    document.querySelectorAll(".enlaceRepo").forEach(el => { el.href = v.repo; });
+    document.querySelectorAll(".enlaceRepoOriginal").forEach(el => { el.href = v.repoOriginal || v.repo; });
     if (!v.hayNueva) return;
     $("#bannerVersionTexto").innerHTML = `<b>Hay una versión nueva (${esc(v.ultima)}).</b> Descárgala en
       <a href="${esc(v.repo)}" target="_blank" rel="noopener">GitHub</a> y copia tu carpeta <code>mis_datos</code> a la
@@ -1674,9 +1781,9 @@
         pinta();
       } catch (x) { alert(x.message); }
     }),
-    imOrigen(id) { IMP.origen = id; IMP.hecho = null; pinta(); },
+    imOrigen(id) { IMP.origen = id; IMP.hecho = null; limpiaImportacion(); pinta(); },
     imRevisar: soloPropio(imRevisar),
-    imCancelar() { IMP.informe = null; IMP.token = null; pinta(); },
+    imCancelar() { IMP.informe = null; IMP.token = null; limpiaImportacion(); pinta(); },
     imConfirmar,
     descargarCopia,
     subirCopia,
@@ -1701,42 +1808,13 @@
   const btnEmpezar = $("#btnEmpezar");
   if (btnEmpezar) btnEmpezar.onclick = empezar;
 
-  /* ---------------------------------------------- el canal del autor */
-  // Una tarjeta pequeña, la primera vez que ves tu propio panel con datos. Si pulsas
-  // «Ahora no», vuelve como mucho una vez más al cabo de un mes; luego, nunca.
-  (function canal() {
+  /* ---------------------------------------------- enlaces de crédito */
+  // El crédito al autor original vive en la pestaña Ayuda: aquí solo se rellenan
+  // los enlaces (el canal, como agradecimiento, sin llamada a la acción).
+  (function creditos() {
     const K = window.CANAL;
     if (!K) return;
-    document.querySelectorAll(".autorCanal").forEach(el => { el.textContent = K.autor; });
     document.querySelectorAll(".enlaceCanal").forEach(el => { el.href = K.canal; });
-    document.querySelectorAll(".enlaceSuscribir").forEach(el => { el.href = K.suscribir; });
-    const tut = $("#ayudaTutorial");
-    if (tut) tut.href = K.tutorial || K.canal + "/videos";
-
-    if (!D || D.modo !== "propio" || !(D.productos || []).length) return;
-    let est = {};
-    try { est = JSON.parse(recuerda.lee("patrimonio.canal") || "{}"); } catch (e) { est = {}; }
-    const MES = 30 * 24 * 3600 * 1000;
-    if (est.hecho || (est.veces || 0) >= 2 || (est.veces === 1 && Date.now() - (est.ultima || 0) < MES)) return;
-    const guarda = cambios => recuerda.guarda("patrimonio.canal", JSON.stringify({ ...est, ...cambios }));
-
-    setTimeout(() => {
-      if (document.body.classList.contains("video") || $("#modal").open) return;
-      const t = document.createElement("div");
-      t.className = "tarjetaCanal";
-      t.setAttribute("role", "dialog");
-      t.innerHTML = `<button class="x" aria-label="Cerrar">×</button>
-        <b>¿Te está siendo útil?</b>
-        <p>Esta herramienta es gratis. La hago para mi canal de YouTube, donde cuento cómo invierto:
-          suscribirte es la mejor forma de apoyarla. — ${esc(K.autor)}</p>
-        <div class="botones"><a class="btn prim" href="${esc(K.suscribir)}" target="_blank" rel="noopener">▶ Suscribirme</a>
-          <button class="ahoraNo">Ahora no</button></div>`;
-      const cierra = () => { t.remove(); guarda({ veces: (est.veces || 0) + 1, ultima: Date.now() }); };
-      t.querySelector(".x").onclick = cierra;
-      t.querySelector(".ahoraNo").onclick = cierra;
-      t.querySelector("a").onclick = () => { guarda({ hecho: true }); setTimeout(() => t.remove(), 300); };
-      document.body.appendChild(t);
-    }, 6000);
   })();
 
   window.Editor = {

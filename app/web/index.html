@@ -619,21 +619,10 @@ body.video .tarjeta{padding:22px 24px}
 .ayudaVideo .btn{text-decoration:none}
 .banner a,.pie a{color:var(--s1);text-decoration:none;font-weight:600}
 .banner a:hover,.pie a:hover{text-decoration:underline}
-.creditoCanal{display:block;margin-top:6px}
-.tarjetaCanal{position:fixed;right:22px;bottom:22px;z-index:50;width:340px;max-width:calc(100vw - 32px);
-  background:var(--sup);border:1px solid var(--borde);border-radius:16px;padding:16px 18px 14px;
-  box-shadow:0 18px 50px rgba(0,0,0,.28);animation:subeCanal .35s ease-out}
-@keyframes subeCanal{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.tarjetaCanal .x{position:absolute;top:8px;right:10px;border:0;background:none;color:var(--tinta3);font-size:18px;cursor:pointer}
-.tarjetaCanal b{display:block;font-size:14.5px;padding-right:18px}
-.tarjetaCanal p{margin:6px 0 12px;font-size:13px;line-height:1.5;color:var(--tinta2)}
-.tarjetaCanal .botones{display:flex;gap:8px;align-items:center}
-.tarjetaCanal .btn.prim{background:#e0322b;text-decoration:none}
-.tarjetaCanal .ahoraNo{border:0;background:none;color:var(--tinta3);font:inherit;font-size:13px;cursor:pointer}
-body.video .tarjetaCanal{display:none}
-@media(max-width:640px){.tarjetaCanal{right:16px;left:16px;bottom:16px;width:auto}}
 /* ---- Marca ---- */
 .marca .logoIcono{width:24px;height:24px;border-radius:6px;display:block}
+.marca .marcaBloque{display:flex;flex-direction:column;line-height:1.05}
+.marca .versionApp{font-weight:600;color:var(--tinta2);font-size:10.5px;letter-spacing:.06em;font-variant-numeric:tabular-nums}
 .marca .nombreApp{font-weight:780;letter-spacing:.02em;text-transform:uppercase;font-size:14.5px}
 .marca .marcaSep{width:1px;height:15px;background:var(--borde)}
 .marca #marcaTexto{font-weight:500;color:var(--tinta2);font-size:13.5px}
@@ -645,7 +634,7 @@ body.video .tarjetaCanal{display:none}
 <div class="top">
   <div class="env">
     <div class="topFila">
-      <div class="marca"><img class="logoIcono" src="icono-64.png" alt="" width="24" height="24"><span class="nombreApp">Rumbo</span><span class="marcaSep"></span><span id="marcaTexto">Mi patrimonio</span></div>
+      <div class="marca"><img class="logoIcono" src="icono-64.png" alt="" width="24" height="24"><span class="marcaBloque"><span class="nombreApp">Rumbo</span><span class="versionApp" id="versionApp"></span></span><span class="marcaSep"></span><span id="marcaTexto">Mi patrimonio</span></div>
       <div class="sep"></div>
       <span class="meta" id="metaFecha"></span>
       <button class="btn" id="btnPrecios" title="Descarga los precios de hoy de cada producto">↻ Actualizar precios</button>
@@ -668,9 +657,8 @@ body.video .tarjetaCanal{display:none}
 
 <div class="banner" id="bannerVersion" hidden><span id="bannerVersionTexto"></span></div>
 <div class="banner" id="bannerDemo" hidden>
-  <span><b>Estás viendo una cartera de ejemplo:</b> es la cartera real de <span class="autorCanal"></span>,
-  que cada mes cuenta cómo evoluciona en su <a class="enlaceCanal" target="_blank" rel="noopener">canal de YouTube</a>.
-  No es una recomendación de inversión.</span>
+  <span><b>Estás viendo una cartera de ejemplo:</b> es una cartera con datos reales de mercado,
+  con fines divulgativos. No es una recomendación de inversión.</span>
   <button class="btn prim" id="btnEmpezar">Empezar con mis datos</button>
 </div>
 <p class="aviso-legal">Herramienta informativa. No es asesoramiento financiero. No se garantiza la exactitud de los datos ni de los precios.</p>
@@ -895,11 +883,14 @@ body.video .tarjetaCanal{display:none}
 
 <div class="panel" id="tab-ayuda" role="tabpanel" hidden>
   <section class="tarjeta ayudaTarjeta ayudaVideo">
-    <div><b>¿Prefieres verlo en vídeo?</b>
-      <p>En el canal de <span class="autorCanal"></span> tienes el tutorial paso a paso: instalación, cómo meter
-      tus datos y cómo sacarle partido.</p></div>
-    <div class="botones"><a class="btn prim" id="ayudaTutorial" target="_blank" rel="noopener">▶ Ver el tutorial</a>
-      <a class="btn enlaceSuscribir" target="_blank" rel="noopener">Suscribirme</a></div>
+    <div><b>¿De dónde sale Rumbo?</b>
+      <p>Rumbo es una adaptación de la herramienta original creada por
+      <b>Dani Dominguez Quant</b>. Gracias por el trabajo inicial que hizo posible este proyecto.</p>
+      <p class="subt">Autor original: <a class="enlaceCanal" target="_blank" rel="noopener">canal de YouTube</a>.</p></div>
+    <div class="botones">
+      <a class="btn prim enlaceRepo" target="_blank" rel="noopener">Proyecto actual</a>
+      <a class="btn enlaceRepoOriginal" target="_blank" rel="noopener">Proyecto original</a>
+    </div>
   </section>
 
   <section class="tarjeta ayudaTarjeta">

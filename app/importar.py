@@ -269,6 +269,21 @@ def _producto_existente(cfg, identificador, nombre):
     return None
 
 
+def _producto_existente_de(cfg, nombre, es_saldo):
+    """El producto que ya existe con ese nombre Y de la misma familia: `es_saldo`
+    para el dinero (efectivo/deuda) y lo contrario para un activo. Hace falta
+    porque una cuenta y su activo pueden llamarse igual («REVOLUT FONDO
+    MONETARIO DÓLAR»), y no son lo mismo: sin esto se crea un duplicado con _2."""
+    nom = sin_tildes(nombre)
+    if not nom:
+        return None
+    for p in cfg.get("productos", []):
+        if nom in (sin_tildes(p.get("nombre")), sin_tildes(p.get("corto"))):
+            if (p.get("tipo") in almacen.SOLO_SALDO) == bool(es_saldo):
+                return p
+    return None
+
+
 class Resolutor:
     """Encuentra (o propone crear) el producto de cada fila, una sola vez por producto."""
 
@@ -648,7 +663,22 @@ def _fuente_para(nombre, tipo):
     return fuente, codigo
 
 
-def _aportaciones_que_faltan(plan, ref, nombre, moneda="EUR"):
+def _exclusiones(excluir):
+    """Lo que ha desmarcado el usuario, como dos juegos de refs del plan."""
+    e = excluir or {}
+    return set(e.get("cuentas") or ()), set(e.get("productos") or ())
+
+
+def _se_importa(mv, fuera_cuentas, fuera_prod):
+    """Un movimiento se importa si no toca ninguna entidad excluida. Cuentan las
+    tres referencias: a qué producto va, de qué cuenta sale y con qué cuenta se
+    paga."""
+    return not (mv.get("producto") in fuera_prod
+                or mv.get("cuenta") in fuera_cuentas
+                or mv.get("contrapartida") in fuera_cuentas)
+
+
+def _aportaciones_que_faltan(plan, ref, nombre, moneda="EUR", movs=None):
     """Cada compra que paga esta cuenta tiene que tener su ingreso: Portfolio
     Performance a veces apunta el depósito días después (o aún no lo ha apuntado),
     y la cuenta quedaría en negativo. Devuelve (movimientos, ajustes de la serie),
@@ -656,20 +686,23 @@ def _aportaciones_que_faltan(plan, ref, nombre, moneda="EUR"):
 
     Usa las mismas reglas de dinero que el motor (motor.efecto_de), así que una
     compra que paga la cuenta contrapartida no cuenta aquí. Todo se calcula en la
-    moneda de la cuenta, que es donde vive el saldo."""
-    movs = []
-    for m in plan.movimientos:
+    moneda de la cuenta, que es donde vive el saldo. `movs` son los movimientos
+    que de verdad se van a importar (los excluidos no piden su ingreso)."""
+    if movs is None:
+        movs = plan.movimientos
+    vivos = []
+    for m in movs:
         e = motor.efecto_de(m, ref)
         if not e:
             continue
         imp = motor.importe_en_cuenta(m, moneda, None)
         if imp is None:
             imp = float(m.get("importe") or 0)
-        movs.append((e, m, float(imp)))
-    if not movs:
+        vivos.append((e, m, float(imp)))
+    if not vivos:
         return [], []
     extra, ajustes, saldo = [], [], 0.0
-    for e, m, imp in sorted(movs, key=lambda x: (x[1]["fecha"], ORDEN_PP.get(x[1]["tipo"], 9), x[1]["fila"])):
+    for e, m, imp in sorted(vivos, key=lambda x: (x[1]["fecha"], ORDEN_PP.get(x[1]["tipo"], 9), x[1]["fila"])):
         saldo += e * imp
         if saldo < -0.005:
             falta = round(-saldo, 2)
@@ -1127,7 +1160,7 @@ ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision":
 
 # ---------------------------------------------------------------- aplicar
 
-def aplicar(cfg, plan):
+def aplicar(cfg, plan, excluir=None, tipos=None):
     """Ejecuta el plan sobre cfg (la real o una copia) y devuelve el informe.
 
     No modifica `plan`: la vista previa llama a esta función y después la
@@ -1137,20 +1170,42 @@ def aplicar(cfg, plan):
     productos_extra, movs_extra, avisos_extra, ajustes = [], [], [], {}
     series_ajustadas = []      # [(ref del efectivo, [(fecha, cuánto sube)])]
 
-    # 0) ¿Qué «cuentas» del CSV son en realidad un producto? Lo elige el usuario
-    # en la vista previa (o lo detecta solo el importador). La cuenta se queda
-    # como monedero de dinero y el producto es el plan/fondo.
+    # 0) Exclusiones. Desmarcar una entidad en la vista previa significa «no lo
+    # importes ahora», nunca «bórralo» (ver el barrido de más abajo). Un producto
+    # que dependa de una cuenta excluida se va con ella: sin su cuenta no tiene
+    # de dónde salir el dinero.
+    fuera_cuentas, fuera_prod = _exclusiones(excluir)
+    for n in list(getattr(plan, "productos_nuevos", None) or []):
+        if n["datos"].get("cuenta") in fuera_cuentas:
+            fuera_prod.add(n["ref"])
+
+    # 0b) ¿Qué «cuentas» del CSV son en realidad un producto? Lo elige el usuario
+    # en la vista previa (o lo detecta solo el importador), y llega como
+    # {ref: tipo} para no tener que tocar el plan. La cuenta se queda como
+    # monedero de dinero y el producto es el plan/fondo.
+    tipos = tipos or {}
     conversiones = {}
     for c in getattr(plan, "cuentas", None) or []:
-        if c["datos"].get("tipo") in TIPOS_INVERSION and c["datos"].get("nombre"):
-            conversiones[c["ref"]] = c["datos"]["tipo"]
+        tipo = tipos.get(c["ref"], c["datos"].get("tipo"))
+        if tipo in TIPOS_INVERSION and c["datos"].get("nombre"):
+            conversiones[c["ref"]] = tipo
+
+    # 0c) Los movimientos que sí se importan. Se calcula ANTES de las aportaciones
+    # sintéticas: si se excluye el producto pero no su cuenta, no puede añadirse
+    # un ingreso para una compra que ya no se va a traer.
+    movs_vivos = [m for m in plan.movimientos
+                  if _se_importa(m, fuera_cuentas, fuera_prod)]
 
     # 1) las cuentas, primero: los productos y movimientos apuntan a sus ids
     ids_cuentas = {}
     for c in getattr(plan, "cuentas", None) or []:
+        if c["ref"] in fuera_cuentas:
+            continue                        # no se crea ni se toca
         datos = dict(c["datos"])
         if c["ref"] in conversiones:
             datos["tipo"] = "efectivo"      # la cuenta es el monedero, no el plan
+        elif c["ref"] in tipos:
+            datos["tipo"] = tipos[c["ref"]]
         if c.get("cuenta"):
             datos["id"] = c["cuenta"]
         try:
@@ -1190,7 +1245,7 @@ def aplicar(cfg, plan):
                 ajustes[ya[0]]["fuente"] = fuente
                 ajustes[ya[0]]["codigo"] = codigo
         else:
-            existente = _producto_existente(cfg, "", nombre)
+            existente = _producto_existente_de(cfg, nombre, False)
             ref_prod = (existente or {}).get("id") or f"cuenta-prod:{c['ref']}"
             datos_prod = {"id": (existente or {}).get("id"), "nombre": nombre,
                           "corto": " ".join(nombre.split())[:24], "tipo": tipo,
@@ -1202,8 +1257,9 @@ def aplicar(cfg, plan):
                 datos_prod["revision"] = "valor a coste, pendiente de fijar"
             productos_extra.append({"ref": ref_prod, "datos": datos_prod})
         # El dinero del plan no puede salir de la nada: cada compra con su ingreso.
+        # Solo cuentan los movimientos que de verdad se importan (movs_vivos).
         faltan, ajustes_serie = _aportaciones_que_faltan(
-            plan, c["ref"], nombre, c["datos"].get("moneda") or "EUR")
+            plan, c["ref"], nombre, c["datos"].get("moneda") or "EUR", movs_vivos)
         if faltan:
             movs_extra += faltan
             # El saldo anotado de la cuenta (la serie que crea el importador) tiene
@@ -1218,6 +1274,8 @@ def aplicar(cfg, plan):
 
     # 2) los productos (sin duplicar: si ya existe uno con ese nombre, se reutiliza)
     for n in list(plan.productos_nuevos) + productos_extra:
+        if n["ref"] in fuera_prod:
+            continue                        # excluido: no se crea ni se actualiza
         datos = dict(n["datos"])
         datos.update(ajustes.get(n["ref"], {}))
         if datos.get("fuente") not in (None, "", "manual"):
@@ -1226,13 +1284,14 @@ def aplicar(cfg, plan):
             datos["cuenta"] = c_real(datos["cuenta"])
         if not datos.get("id"):
             existente = _producto_existente(
-                cfg, datos.get("identificador") or datos.get("codigo") or "",
-                datos.get("nombre") or "")
-            # Se reutiliza solo si es «de la misma familia»: el contenedor de
-            # efectivo de una cuenta y su activo pueden llamarse igual y no son
-            # lo mismo (si no, el plan se colapsaría con la cuenta de dinero).
-            if existente and ((datos.get("tipo") in almacen.SOLO_SALDO)
-                              == (existente.get("tipo") in almacen.SOLO_SALDO)):
+                cfg, datos.get("identificador") or datos.get("codigo") or "", None)
+            if not existente:
+                # Por nombre solo vale uno de la misma familia: el contenedor de
+                # efectivo de una cuenta y su activo pueden llamarse igual.
+                existente = _producto_existente_de(
+                    cfg, datos.get("nombre") or "",
+                    datos.get("tipo") in almacen.SOLO_SALDO)
+            if existente:
                 datos["id"] = existente["id"]
         try:
             prod, _ = almacen.guarda_producto(cfg, datos)
@@ -1242,13 +1301,28 @@ def aplicar(cfg, plan):
         ids[n["ref"]] = prod["id"]
     real = lambda ref: ids.get(ref, ref)
 
+    # Ids REALES de la cartera de lo que el usuario ha excluido: sirven para no
+    # borrar lo que ya había. Excluir es «no lo importes ahora», no «bórralo».
+    ids_fuera_prod = {n["datos"]["id"] for n in list(plan.productos_nuevos) + productos_extra
+                      if n["ref"] in fuera_prod and n["datos"].get("id")}
+    ids_fuera_cuenta = {c["cuenta"] for c in (getattr(plan, "cuentas", None) or [])
+                        if c["ref"] in fuera_cuentas and c.get("cuenta")}
+
+    def es_de_excluida(m):
+        return (m.get("producto") in ids_fuera_prod
+                or m.get("cuenta") in ids_fuera_cuenta
+                or m.get("contrapartida") in ids_fuera_cuenta)
+
     sustituidos = 0
     if getattr(plan, "reemplazarTodo", None):
         antes = len(cfg["movimientos"])
         cfg["movimientos"] = [m for m in cfg["movimientos"]
-                              if m.get("origen") != plan.reemplazarTodo]
+                              if m.get("origen") != plan.reemplazarTodo
+                              or es_de_excluida(m)]
         sustituidos += antes - len(cfg["movimientos"])
     for ref, origen in plan.reemplazar:
+        if real(ref) in ids_fuera_prod:
+            continue                        # excluido: no se le borra nada
         antes = len(cfg["movimientos"])
         cfg["movimientos"] = [m for m in cfg["movimientos"]
                               if not (m.get("producto") == real(ref) and m.get("origen") == origen)]
@@ -1263,7 +1337,7 @@ def aplicar(cfg, plan):
     orden = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision": 3,
              "interes": 4, "impuesto": 5, "dividendo": 6, "venta": 7, "retirada": 8,
              "transferencia": 9, "traspaso": 10, "cambio_divisa": 11, "saldo": 12}
-    for mv in sorted(list(plan.movimientos) + movs_extra,
+    for mv in sorted(list(movs_vivos) + movs_extra,
                      key=lambda m: (m["fecha"], orden.get(m["tipo"], 9), m["fila"])):
         claves = ("fecha", "tipo", "unidades", "importe", "comision", "impuestos", "nota",
                   "importeOriginal", "monedaOriginal", "tipoCambio", "propietario",
@@ -1296,6 +1370,8 @@ def aplicar(cfg, plan):
 
     saldos = 0
     for v in plan.valoraciones:
+        if v.get("producto") in fuera_prod:
+            continue                        # los saldos de un producto excluido no se traen
         valor = v["valor"]
         # La serie de saldo de una cuenta con aportaciones añadidas sube lo mismo.
         for ref_ef, deltas in series_ajustadas:
@@ -1331,14 +1407,20 @@ def aplicar(cfg, plan):
         "cuentasNuevas": [{"ref": c["ref"], "datos": dict(c["datos"]),
                            "existente": bool(c.get("cuenta"))}
                           for c in getattr(plan, "cuentas", None) or []],
-        "productosNuevos": [{**n["datos"], "id": ids.get(n["ref"]), "precio": n.get("precio"),
+        "productosNuevos": [{**n["datos"], "ref": n["ref"], "id": ids.get(n["ref"]),
+                             "excluido": n["ref"] in fuera_prod,
+                             "precio": n.get("precio"),
                              "monedaPrecio": n.get("monedaPrecio"), "fechaPrecio": n.get("fecha"),
                              "mercado": n.get("mercado")}
                             for n in list(plan.productos_nuevos) + productos_extra],
+        # Lo que se ha quedado fuera, ya con la cascada aplicada: el navegador lo
+        # usa para volver a pintar las casillas después de recalcular.
+        "excluidas": {"cuentas": sorted(fuera_cuentas),
+                      "productos": sorted(fuera_prod)},
         "filas": sorted(filas, key=lambda f: f["fecha"], reverse=True),
     }
 
 
-def vista_previa(cfg, plan):
+def vista_previa(cfg, plan, excluir=None, tipos=None):
     """El mismo informe que dará aplicar(), sin tocar la cartera de verdad."""
-    return aplicar(copy.deepcopy(cfg), plan)
+    return aplicar(copy.deepcopy(cfg), plan, excluir=excluir, tipos=tipos)

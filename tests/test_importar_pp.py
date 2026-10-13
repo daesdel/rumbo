@@ -10,6 +10,7 @@ import copy
 import datetime as dt
 import json
 import os
+from collections import Counter
 
 import pytest
 
@@ -490,3 +491,125 @@ def test_el_tipo_elegido_en_la_vista_previa_decide_si_es_cuenta_o_producto(tmp_p
     planes = [p for p in cfg2["productos"] if p.get("tipo") == "pension"]
     assert len(planes) == 1
     assert planes[0]["codigo"] == "0P00008571.F"
+
+
+# ------------------------------------------- excluir cuentas y productos (Fase 2)
+
+def _firma(cfg):
+    """Huella de todos los movimientos, con nombres en vez de ids: así se puede
+    comparar antes y después de reimportar aunque los ids se reasignen."""
+    nom = {p["id"]: p["nombre"] for p in cfg["productos"]}
+    cta = {c["id"]: c["nombre"] for c in cfg["cuentas"]}
+    return Counter((m["fecha"], m["tipo"], round(float(m.get("importe") or 0), 2),
+                    nom.get(m.get("producto"), m.get("producto")),
+                    cta.get(m.get("cuenta"), m.get("cuenta")))
+                   for m in cfg["movimientos"])
+
+
+def _importa(tmp_path, cfg, *filas, excluir=None, tipos=None):
+    _cache_cambio(str(tmp_path))
+    return importar.aplicar(cfg, importar.preparar_portfolio(cfg, csv_pp(*filas), str(tmp_path)),
+                            excluir=excluir, tipos=tipos)
+
+
+def _ref_de_producto(plan, nombre):
+    return next(p["ref"] for p in plan.productos_nuevos if p["datos"]["nombre"] == nombre)
+
+
+def test_la_vista_previa_da_un_ref_a_cada_cuenta_y_producto(tmp_path):
+    """Las casillas de la vista previa necesitan un identificador estable para cada
+    entidad (por ref, no por índice: el orden de la tabla puede cambiar)."""
+    _, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040, TESLA_COMPRA)
+    inf = importar.vista_previa(_cartera(), plan)
+    assert inf["cuentasNuevas"] and all(c["ref"] for c in inf["cuentasNuevas"])
+    assert inf["productosNuevos"] and all(p["ref"] for p in inf["productosNuevos"])
+    assert inf["excluidas"] == {"cuentas": [], "productos": []}
+
+
+def test_excluir_un_producto_no_lo_importa_ni_trae_sus_movimientos(tmp_path):
+    cfg, plan = prepara(tmp_path, TESLA_COMPRA, COSTCO_COMPRA)
+    ref = _ref_de_producto(plan, "Tesla Inc.")
+    importar.aplicar(cfg, plan, excluir={"productos": [ref]})
+    assert not any(p["nombre"] == "Tesla Inc." for p in cfg["productos"])
+    # Solo queda la compra de COSTCO: la de Tesla no se ha traído.
+    assert len([m for m in cfg["movimientos"] if m.get("tipo") == "compra"]) == 1
+    # El otro producto sí entra: excluir uno no arrastra a los demás.
+    assert any(p["nombre"].startswith("COSTCO") for p in cfg["productos"])
+
+
+def test_excluir_una_cuenta_se_lleva_sus_productos_por_cascada(tmp_path):
+    """Sin la cuenta no hay de dónde salga el dinero: los productos que dependen de
+    ella se excluyen solos (la cuenta de efectivo y el plan)."""
+    cfg, plan = prepara(tmp_path, PLAN2040)
+    assert len(plan.cuentas) == 1
+    ref_cuenta = plan.cuentas[0]["ref"]
+    dependientes = {p["ref"] for p in plan.productos_nuevos
+                    if p["datos"].get("cuenta") == ref_cuenta}
+    assert len(dependientes) == 2                    # la cuenta de efectivo y el plan
+    inf = importar.vista_previa(_cartera(), plan, excluir={"cuentas": [ref_cuenta]})
+    assert set(inf["excluidas"]["productos"]) == dependientes
+    importar.aplicar(cfg, plan, excluir={"cuentas": [ref_cuenta]})
+    assert not cfg["cuentas"]
+    assert not [p for p in cfg["productos"] if "2040" in p["nombre"].upper()]
+    assert not cfg["movimientos"]
+
+
+def test_la_vista_previa_baja_los_totales_al_excluir(tmp_path):
+    """El recálculo del servidor sirve para ver el impacto de verdad, no un contador
+    del navegador: los movimientos y lo invertido tienen que bajar."""
+    cfg, plan = prepara(tmp_path, TESLA_COMPRA, COSTCO_COMPRA)
+    todo = importar.vista_previa(cfg, plan)
+    ref = _ref_de_producto(plan, "Tesla Inc.")
+    menos = importar.vista_previa(cfg, plan, excluir={"productos": [ref]})
+    assert menos["añadidos"] < todo["añadidos"]
+    assert menos["totales"]["compras"] < todo["totales"]["compras"]
+    assert len(menos["filas"]) < len(todo["filas"])
+
+
+def test_reimportar_excluyendo_no_borra_lo_que_ya_habia(tmp_path):
+    """EXCLUIR ES «NO LO IMPORTES AHORA», NUNCA «BÓRRALO». El barrido de
+    `reemplazarTodo` borra los movimientos del origen «portfolio» y los reescribe:
+    sin protegerlo, reimportar con una entidad excluida la borraría de la cartera."""
+    cfg = _cartera()
+    _cache_cambio(str(tmp_path))
+    csv = csv_pp(TESLA_COMPRA, COSTCO_COMPRA)
+    importar.aplicar(cfg, importar.preparar_portfolio(cfg, csv, str(tmp_path)))
+    antes = _firma(cfg)
+    assert antes and any(p["nombre"] == "Tesla Inc." for p in cfg["productos"])
+
+    plan = importar.preparar_portfolio(cfg, csv, str(tmp_path))
+    ref = _ref_de_producto(plan, "Tesla Inc.")
+    importar.aplicar(cfg, importar.preparar_portfolio(cfg, csv, str(tmp_path)),
+                     excluir={"productos": [ref]})
+
+    assert _firma(cfg) == antes                        # ni un movimiento perdido
+    assert any(p["nombre"] == "Tesla Inc." for p in cfg["productos"])   # ni el producto
+
+
+def test_reimportar_excluyendo_una_cuenta_conserva_sus_movimientos(tmp_path):
+    cfg = _cartera()
+    _cache_cambio(str(tmp_path))
+    csv = csv_pp(PLAN_DEPOSITO, PLAN2040)
+    importar.aplicar(cfg, importar.preparar_portfolio(cfg, csv, str(tmp_path)))
+    antes = _firma(cfg)
+    cid = cfg["cuentas"][0]["id"]
+    movs_cuenta = sum(1 for m in cfg["movimientos"] if m.get("cuenta") == cid)
+    assert movs_cuenta
+
+    plan = importar.preparar_portfolio(cfg, csv, str(tmp_path))
+    importar.aplicar(cfg, importar.preparar_portfolio(cfg, csv, str(tmp_path)),
+                     excluir={"cuentas": [plan.cuentas[0]["ref"]]})
+
+    assert _firma(cfg) == antes
+    assert any(c["id"] == cid for c in cfg["cuentas"])
+    assert sum(1 for m in cfg["movimientos"] if m.get("cuenta") == cid) == movs_cuenta
+
+
+def test_los_tipos_elegidos_no_tocan_el_plan(tmp_path):
+    """La vista previa se recalcula cada vez que el usuario toca algo: si `aplicar`
+    modificara el plan, el segundo cálculo daría otro resultado."""
+    _, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040)
+    ref = plan.cuentas[0]["ref"]
+    inf = importar.vista_previa(_cartera(), plan, tipos={ref: "broker"})
+    assert plan.cuentas[0]["datos"]["tipo"] == "pension"     # el plan sigue igual
+    assert [c["datos"]["tipo"] for c in inf["cuentasNuevas"]] == ["pension"]  # el informe sí lo refleja

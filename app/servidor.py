@@ -213,7 +213,8 @@ def datos_js():
         # Nunca colgarse con un "null" guardado: si el cálculo no vale (cartera recién
         # importada, cálculo interrumpido...), se recalcula al vuelo y sin ir a internet.
         datos = recalcula(descargar=False)
-    cuerpo = "window.DATOS = " + json.dumps(datos, ensure_ascii=False, separators=(",", ":")) + ";\n"
+    cuerpo = "window.VERSION = " + json.dumps(version_etiqueta()) + ";\n"
+    cuerpo += "window.DATOS = " + json.dumps(datos, ensure_ascii=False, separators=(",", ":")) + ";\n"
     return Response(cuerpo, mimetype="application/javascript",
                     headers={"Cache-Control": "no-store"})
 
@@ -1266,19 +1267,14 @@ def api_importar_confirmar():
     plan = PLANES.pop(datos_req.get("token"), None)
     if plan is None:
         return jsonify(ok=False, errores=["Esa vista previa ya no vale: vuelve a revisar el archivo."]), 400
-    # Aplicar cambios de tipos de cuenta desde el frontend
-    cuentas_cambios = datos_req.get("cuentas", [])
-    if cuentas_cambios and hasattr(plan, "cuentas") and plan.cuentas:
-        for cambio in cuentas_cambios:
-            idx = cambio.get("idx")
-            tipo_nuevo = cambio.get("tipo")
-            if idx is not None and isinstance(idx, int) and 0 <= idx < len(plan.cuentas):
-                if tipo_nuevo:
-                    plan.cuentas[idx]["datos"]["tipo"] = tipo_nuevo
+    # Tipos de cuenta elegidos en la vista previa y entidades desmarcadas. Llegan
+    # como parámetros (no se toca el plan): así volver a recalcular la vista previa
+    # da el mismo resultado y la confirmación no depende del orden de las llamadas.
+    tipos, excluir = _cambios_de_importacion(datos_req)
     informe = {}
 
     def fn(cfg):
-        informe.update(importar.aplicar(cfg, plan))
+        informe.update(importar.aplicar(cfg, plan, excluir=excluir, tipos=tipos))
         return None
     respuesta = cambia(fn)
     if isinstance(respuesta, tuple):
@@ -1286,6 +1282,32 @@ def api_importar_confirmar():
     datos = respuesta.get_json()
     datos["informe"] = {k: informe[k] for k in ("añadidos", "repetidos", "saldos", "sustituidos")}
     return jsonify(datos)
+
+
+def _cambios_de_importacion(datos_req):
+    """Saca de la petición los tipos elegidos y lo que se ha desmarcado."""
+    tipos = {}
+    for cambio in datos_req.get("cuentas") or []:
+        ref, tipo = cambio.get("ref"), cambio.get("tipo")
+        if ref and tipo:
+            tipos[ref] = tipo
+    excluir = {"cuentas": [r for r in (datos_req.get("omitirCuentas") or []) if r],
+               "productos": [r for r in (datos_req.get("omitirProductos") or []) if r]}
+    return tipos, excluir
+
+
+@app.post("/api/importar/excluir")
+def api_importar_excluir():
+    """Recalcula la vista previa con lo que el usuario ha ido desmarcando, para que
+    vea el impacto de verdad (totales y movimientos), no solo un contador. No
+    consume el token: sigue valiendo para confirmar."""
+    datos_req = request.get_json(silent=True) or {}
+    plan = PLANES.get(datos_req.get("token"))
+    if plan is None:
+        return jsonify(ok=False, errores=["Esa vista previa ya no vale: vuelve a revisar el archivo."]), 400
+    tipos, excluir = _cambios_de_importacion(datos_req)
+    cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
+    return jsonify(ok=True, informe=importar.vista_previa(cfg, plan, excluir=excluir, tipos=tipos))
 
 
 @app.get("/api/plantilla.xlsx")
@@ -1561,19 +1583,27 @@ def api_exportar_web():
     if not datos:
         return jsonify(ok=False, errores=["Todavía no hay nada que exportar."]), 400
     ocultar = request.args.get("ocultar") == "1"
-    html = exportar.pagina(WEB, datos, ocultar=ocultar, titulo=datos.get("titular") or "Mi patrimonio")
+    html = exportar.pagina(WEB, datos, ocultar=ocultar, titulo=datos.get("titular") or "Mi patrimonio",
+                           version=version_etiqueta())
     nombre = "patrimonio_sin_importes.html" if ocultar else "patrimonio.html"
     return Response(html.encode("utf-8"), mimetype="text/html",
                     headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
 
 
-REPO = "https://github.com/danidm98/rumbo"
+REPO = "https://github.com/daesdel/rumbo"
+REPO_ORIGINAL = "https://github.com/danidm98/rumbo"
 _VERSION = {}
 
 
 def version_actual():
     with open(os.path.join(RAIZ, "app", "VERSION"), encoding="utf-8") as f:
         return f.read().strip()
+
+
+def version_etiqueta():
+    """La versión como se enseña: V1.00. El número vive solo en app/VERSION y el
+    navegador no lo formatea nunca (así no hay que cambiarlo en dos sitios)."""
+    return "V" + version_actual()
 
 
 @app.get("/api/version")
@@ -1589,7 +1619,8 @@ def api_version():
             _VERSION.update(ultima=None, cuando=dt.datetime.now())
     ultima = _VERSION.get("ultima")
     como_tupla = lambda v: tuple(int(x) for x in re.findall(r"\d+", v or "0"))
-    return jsonify(actual=actual, ultima=ultima, repo=REPO,
+    return jsonify(actual=actual, etiqueta="V" + actual, ultima=ultima,
+                   repo=REPO, repoOriginal=REPO_ORIGINAL,
                    hayNueva=bool(ultima) and como_tupla(ultima) > como_tupla(actual))
 
 

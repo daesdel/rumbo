@@ -79,8 +79,9 @@ def sin_importes(datos):
     return out
 
 
-def pagina(web, datos, ocultar=False, titulo="Mi patrimonio"):
-    """HTML autónomo del panel. 'web' es la carpeta app/web."""
+def pagina(web, datos, ocultar=False, titulo="Mi patrimonio", version=""):
+    """HTML autónomo del panel. 'web' es la carpeta app/web. `version` es la
+    etiqueta ya formateada (V1.00) que se pinta en el header del exportado."""
     def lee(nombre):
         with open(os.path.join(web, nombre), encoding="utf-8") as f:
             return f.read()
@@ -102,6 +103,7 @@ def pagina(web, datos, ocultar=False, titulo="Mi patrimonio"):
     previo = "window.ESTATICO = true;\n"
     if ocultar:
         previo += "window.OCULTAR_IMPORTES = true;\n"
+    previo += "window.VERSION = " + json.dumps(version) + ";\n"
     trozos = [previo + "window.DATOS = " + json.dumps(datos, ensure_ascii=False, separators=(",", ":")) + ";"]
     trozos += [lee(n) for n in ("canal.js", "graficos.js", "app.js")]
     scripts = "\n".join("<script>\n" + t.replace("</script>", "<\\/script>") + "\n</script>" for t in trozos)
