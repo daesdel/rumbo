@@ -283,6 +283,54 @@
   const COLOR_FUENTE = { morningstar: "var(--s3)", yahoo: "var(--s7)", coingecko: "var(--s4)" };
   const decimal = v => v == null || v === "" ? "" : String(v).replace(".", ",");
 
+  /** El buscador de precios (ISIN, ticker o nombre). Es EL MISMO en el modal de
+      producto y en la vista previa de importación: misma caja, misma llamada a
+      api/buscar, mismas tarjetas .bItem y mismos mensajes.
+      Se busca dentro del contenedor con clases (no ids) porque el modal y la vista
+      previa pueden estar a la vez en el DOM y los ids chocarían.
+      `alElegir(resultado, boton, contenedor)` recibe el resultado elegido. */
+  function montaBuscador(caja, alElegir, opts = {}) {
+    if (!caja) return null;
+    caja.innerHTML =
+      `<div class="tit">${opts.titulo || "Busca tu producto"}</div>
+       <div class="sub">${opts.subtitulo || "Por ISIN, ticker o nombre. Comprobamos que tiene precio antes de proponerlo."}</div>
+       <div class="fila"><div class="caja">${LUPA}<input class="bq" placeholder="IE00BYX5NX33, AAPL, bitcoin, oro…" autocomplete="off"></div>
+         <button type="button" class="btn prim bBuscar">Buscar</button></div>
+       <div class="bRes"></div>${opts.nota || ""}`;
+    const entrada = caja.querySelector(".bq");
+    const res = caja.querySelector(".bRes");
+    const buscar = async () => {
+      const q = entrada.value.trim();
+      if (!q) return;
+      res.innerHTML = '<p class="cargando">Buscando y comprobando precios…</p>';
+      try {
+        const j = await api("GET", "api/buscar?q=" + encodeURIComponent(q));
+        if (!j.resultados.length && j.sinConexion) {
+          res.innerHTML = `<p class="neg">No he podido conectar con internet (o Yahoo/Morningstar no han
+            respondido). Comprueba tu conexión e inténtalo otra vez.</p>`;
+          return;
+        }
+        if (!j.resultados.length) {
+          res.innerHTML = `<p class="neg">No encuentro «${esc(q)}» con precio en internet. Prueba con el ISIN
+            (viene en la ficha del producto en tu banco) o elige «Valor anotado a mano».</p>`;
+          return;
+        }
+        res.innerHTML = j.resultados.map((r, i) => `<button type="button" class="bItem" data-i="${i}" style="--c:${COLOR_FUENTE[r.fuente]}">
+          <span class="franja"></span>
+          <span><span class="nm">${esc(r.nombre || r.codigo)}</span>
+            <span class="meta"><span>${esc(r.codigo)}</span>${r.mercado && r.mercado !== E.fuentes[r.fuente] ? `<span>${esc(r.mercado)}</span>` : ""}<span>${esc(E.fuentes[r.fuente])}</span></span></span>
+          <span class="pre">${num(r.precio)} ${esc(r.moneda)}<small>${fecha(r.fecha)}</small></span></button>`).join("");
+        res.querySelectorAll(".bItem").forEach(b => {
+          b.onclick = () => alElegir(j.resultados[+b.dataset.i], b, res);
+        });
+      } catch (x) { res.innerHTML = `<p class="neg">${esc(x.message)}</p>`; }
+    };
+    caja.querySelector(".bBuscar").onclick = buscar;
+    entrada.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); buscar(); } };
+    if (opts.foco) entrada.focus();
+    return { buscar };
+  }
+
   function formProducto(p) {
     const nuevo = !p;
     p = p || { tipo: "fondo", fuente: "morningstar", moneda: "EUR", largoPlazo: true, slot: siguienteColor() };
@@ -291,15 +339,7 @@
     const colores = Array.from({ length: 12 }, (_, i) =>
       `<label class="color" style="--c:var(--s${i + 1})" title="Color ${i + 1}"><input type="radio" name="slot" value="${i + 1}"><i></i></label>`).join("");
     const f = abreModal(nuevo ? "Añadir producto" : "Editar " + esc(nombre(p)), `
-      <div class="buscador">
-        <div class="tit">Busca tu producto</div>
-        <div class="sub">Por ISIN, ticker o nombre. Comprobamos que tiene precio antes de proponerlo.</div>
-        <div class="fila"><div class="caja">${LUPA}<input id="bq" placeholder="IE00BYX5NX33, AAPL, bitcoin, oro…" autocomplete="off"></div>
-          <button type="button" class="btn prim" id="bBuscar">Buscar</button></div>
-        <div id="bRes" class="bRes"></div>
-        <p class="ayuda">¿No aparece o no tiene precio en internet (un piso, oro físico, un plan de pensiones)?
-          Rellénalo abajo y elige <b>«Valor anotado a mano»</b> como fuente del precio.</p>
-      </div>
+      <div class="buscador"></div>
 
       ${seccion("El producto")}
       <div class="rejilla">
@@ -386,53 +426,27 @@
     f.elements.fuente.onchange = ajusta;
     ajusta();
 
-    const buscar = async () => {
-      const q = $("#bq").value.trim();
-      const res = $("#bRes");
-      if (!q) return;
-      res.innerHTML = '<p class="cargando">Buscando y comprobando precios…</p>';
-      try {
-        const j = await api("GET", "api/buscar?q=" + encodeURIComponent(q));
-        if (!j.resultados.length && j.sinConexion) {
-          res.innerHTML = `<p class="neg">No he podido conectar con internet (o Yahoo/Morningstar no han
-            respondido). Comprueba tu conexión e inténtalo otra vez.</p>`;
-          return;
-        }
-        if (!j.resultados.length) {
-          res.innerHTML = `<p class="neg">No encuentro «${esc(q)}» con precio en internet. Prueba con el ISIN
-            (viene en la ficha del producto en tu banco) o elige «Valor anotado a mano».</p>`;
-          return;
-        }
-        res.innerHTML = j.resultados.map((r, i) => `<button type="button" class="bItem" data-i="${i}" style="--c:${COLOR_FUENTE[r.fuente]}">
-          <span class="franja"></span>
-          <span><span class="nm">${esc(r.nombre || r.codigo)}</span>
-            <span class="meta"><span>${esc(r.codigo)}</span>${r.mercado && r.mercado !== E.fuentes[r.fuente] ? `<span>${esc(r.mercado)}</span>` : ""}<span>${esc(E.fuentes[r.fuente])}</span></span></span>
-          <span class="pre">${num(r.precio)} ${esc(r.moneda)}<small>${fecha(r.fecha)}</small></span></button>`).join("");
-        res.querySelectorAll(".bItem").forEach(b => {
-          b.onclick = () => {
-            const r = j.resultados[+b.dataset.i];
-            const n = r.nombre || r.codigo;
-            const fi = r.ficha || {};
-            rellena(f, {
-              nombre: n, corto: n.slice(0, 24).trim(), tipo: r.tipo, identificador: r.identificador,
-              fuente: r.fuente, codigo: r.codigo, moneda: r.moneda || "EUR", vivo: r.vivo || "",
-              ter: decimal(fi.ter), riesgo: fi.riesgo || "", gestora: fi.gestora || "",
-            });
-            if (fi.clase) f.elements.clase.value = fi.clase;
-            const rell = [fi.ter != null && `comisión ${decimal(fi.ter)} %`, fi.riesgo && `riesgo ${fi.riesgo}/7`,
-              fi.clase && "categoría", fi.gestora && "gestora"].filter(Boolean);
-            const aviso = $("#bRelleno");
-            aviso.hidden = !rell.length;
-            aviso.textContent = rell.length ? `✓ Ficha rellenada desde Morningstar: ${rell.join(", ")}.` : "";
-            res.querySelectorAll(".bItem").forEach(x => x.classList.toggle("sel", x === b));
-            ajusta();
-          };
-        });
-      } catch (x) { res.innerHTML = `<p class="neg">${esc(x.message)}</p>`; }
-    };
-    $("#bBuscar").onclick = buscar;
-    $("#bq").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); buscar(); } };
-    if (nuevo) $("#bq").focus();
+    montaBuscador(f.querySelector(".buscador"), (r, b, res) => {
+      const n = r.nombre || r.codigo;
+      const fi = r.ficha || {};
+      rellena(f, {
+        nombre: n, corto: n.slice(0, 24).trim(), tipo: r.tipo, identificador: r.identificador,
+        fuente: r.fuente, codigo: r.codigo, moneda: r.moneda || "EUR", vivo: r.vivo || "",
+        ter: decimal(fi.ter), riesgo: fi.riesgo || "", gestora: fi.gestora || "",
+      });
+      if (fi.clase) f.elements.clase.value = fi.clase;
+      const rell = [fi.ter != null && `comisión ${decimal(fi.ter)} %`, fi.riesgo && `riesgo ${fi.riesgo}/7`,
+        fi.clase && "categoría", fi.gestora && "gestora"].filter(Boolean);
+      const aviso = $("#bRelleno");
+      aviso.hidden = !rell.length;
+      aviso.textContent = rell.length ? `✓ Ficha rellenada desde Morningstar: ${rell.join(", ")}.` : "";
+      res.querySelectorAll(".bItem").forEach(x => x.classList.toggle("sel", x === b));
+      ajusta();
+    }, {
+      nota: `<p class="ayuda">¿No aparece o no tiene precio en internet (un piso, oro físico, un plan de pensiones)?
+        Rellénalo abajo y elige <b>«Valor anotado a mano»</b> como fuente del precio.</p>`,
+      foco: nuevo,
+    });
   }
 
   async function borrarProducto(id) {
@@ -1300,7 +1314,8 @@
 
   /* ---------------------------------------------- importar */
   const IMP = { origen: "myinvestor", informe: null, token: null, hecho: null, prompt: null, archivos: [],
-                tipos: {}, fueraCta: new Set(), fueraProd: new Set(), recalc: 0, timer: null };
+                tipos: {}, fueraCta: new Set(), fueraProd: new Set(), recalc: 0, timer: null,
+                vinculos: {}, buscando: null };
   const ICONOS = {
     portfolio: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11M14 9v11"/></svg>',
     myinvestor: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-5 7 5v11M9 21v-6h6v6"/></svg>',
@@ -1379,6 +1394,8 @@
     IMP.tipos = {};
     IMP.fueraCta = new Set();
     IMP.fueraProd = new Set();
+    IMP.vinculos = {};
+    IMP.buscando = null;
   }
 
   function conectaImportar() {
@@ -1403,6 +1420,7 @@
       api("GET", "api/prompt").then(j => { IMP.prompt = j.texto; const pre = $("#imPrompt"); if (pre) pre.textContent = j.texto; });
     }
     conectaExclusiones();
+    conectaVinculos();
   }
 
   async function imRevisar() {
@@ -1470,7 +1488,8 @@
     clearTimeout(IMP.timer);
     const mio = ++IMP.recalc;
     IMP.timer = setTimeout(() => {
-      const cuerpo = { token: IMP.token, cuentas: tiposCambiados(), ...exclusiones() };
+      const cuerpo = { token: IMP.token, cuentas: tiposCambiados(), ...exclusiones(),
+                       vinculos: vinculosElegidos() };
       api("POST", "api/importar/excluir", cuerpo).then(r => {
         if (mio !== IMP.recalc) return;        // llegó tarde: hay otro cálculo en curso
         if (r && r.informe) { IMP.informe = r.informe; pinta(); }
@@ -1546,14 +1565,58 @@
       <tbody>${lista.map(filaCuentaDetectada).join("")}</tbody></table></div></div>`;
   }
 
-  /** Una fila de «Productos nuevos que se crean», con su casilla. */
+  /** Una fila de «Productos nuevos que se crean», con su casilla y su buscador.
+      El panel de búsqueda FLOTA sobre las filas de abajo (absolute): así no
+      descuadra la tabla de la vista previa. */
   function filaProducto(p) {
     const fuera = productoFuera(p), arrastrado = productoArrastrado(p);
-    return `<div class="imProd"><label class="impChk"><input type="checkbox" data-impprod="${esc(p.ref)}"${
+    const vinc = IMP.vinculos[p.ref];
+    const etq = vinc
+      ? `<span class="etqImp">✓ ${esc(E.fuentes[vinc.fuente] || vinc.fuente)} · ${esc(vinc.codigo)}</span>` : "";
+    const accion = vinc
+      ? `<button type="button" class="btnMini" data-quitarvinc="${esc(p.ref)}">Quitar vínculo</button>`
+      : `<button type="button" class="btnMini" data-buscarvinc="${esc(p.ref)}">Buscar precio</button>`;
+    const panel = IMP.buscando === p.ref
+      ? `<div class="imBusca" data-cajabusca="${esc(p.ref)}"><div class="buscador"></div></div>` : "";
+    return `<div class="imProdFila"><div class="imProd"><label class="impChk"><input type="checkbox" data-impprod="${esc(p.ref)}"${
       fuera ? "" : " checked"}${arrastrado ? " disabled" : ""} title="Importar este producto"></label>
       <b>${esc(p.nombre)}</b>${arrastrado ? ' <span class="subt">se excluye con su cuenta</span>' : ""}
       <span class="meta"><span>${esc(E.tipos[p.tipo] || p.tipo)}</span><span>${esc(p.codigo || "valor a mano")}</span>
-      <span>${esc(E.fuentes[p.fuente])}</span>${p.precio ? `<span>${num(p.precio)} ${esc(p.monedaPrecio)} · ${fecha(p.fechaPrecio)}</span>` : ""}</span></div>`;
+      <span>${esc(E.fuentes[p.fuente])}</span>${p.precio ? `<span>${num(p.precio)} ${esc(p.monedaPrecio)} · ${fecha(p.fechaPrecio)}</span>` : ""}</span>
+      ${etq}<span class="imAcc">${accion}</span></div>${panel}</div>`;
+  }
+
+  /** Vínculos de precio elegidos en la vista previa, tal y como los espera el servidor. */
+  function vinculosElegidos() { return IMP.vinculos; }
+
+  /** Guarda el código elegido para un producto de la importación. */
+  function eligeVinculo(ref, r) {
+    IMP.vinculos[ref] = {
+      fuente: r.fuente, codigo: r.codigo, nombre: r.nombre || r.codigo,
+      moneda: r.moneda || "EUR", identificador: r.identificador || "", tipo: r.tipo,
+    };
+    IMP.buscando = null;
+    pinta();            // la fila ya enseña el código elegido
+    recalcula();        // y los totales reflejan que ese producto ya cotiza
+  }
+
+  /** Botones de «Buscar precio» y el buscador abierto, si lo hay. */
+  function conectaVinculos() {
+    document.querySelectorAll("[data-buscarvinc]").forEach(b => {
+      b.onclick = () => { IMP.buscando = b.dataset.buscarvinc; pinta(); };
+    });
+    document.querySelectorAll("[data-quitarvinc]").forEach(b => {
+      b.onclick = () => { delete IMP.vinculos[b.dataset.quitarvinc]; pinta(); recalcula(); };
+    });
+    const caja = document.querySelector("[data-cajabusca]");
+    if (!caja) return;
+    montaBuscador(caja.querySelector(".buscador"), r => eligeVinculo(caja.dataset.cajabusca, r), {
+      titulo: "Busca el precio de este producto",
+      subtitulo: "Por ISIN, ticker o nombre. Al elegirlo, el producto se importará ya con ese código.",
+      nota: `<p class="ayuda">Si no lo vinculas, se importará con el código que traiga el CSV
+        (o sin precio, si no trae ninguno).</p>`,
+      foco: true,
+    });
   }
 
   function vistaPrevia() {
@@ -1604,7 +1667,8 @@
     const { omitirCuentas, omitirProductos } = exclusiones();
     try {
       const j = await api("POST", "api/importar/confirmar",
-                          { token: IMP.token, cuentas, omitirCuentas, omitirProductos });
+                          { token: IMP.token, cuentas, omitirCuentas, omitirProductos,
+                            vinculos: vinculosElegidos() });
       E.cfg = j.cartera;
       window.EDITOR_SUCIO = true;
       const i = j.informe;
@@ -1614,9 +1678,7 @@
         (i.repetidos ? `. ${pl(i.repetidos, "ya estaba y se ha omitido", "ya estaban y se han omitido")}` : "") + ".";
       IMP.informe = null;
       IMP.token = null;
-      IMP.tipos = {};
-      IMP.fueraCta = new Set();
-      IMP.fueraProd = new Set();
+      limpiaImportacion();
       pinta();
       avisa(j.avisos);
     } catch (x) {

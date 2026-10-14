@@ -15,6 +15,45 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.01 — 14 de octubre de 2026
+
+**Fase 3**: vincular un producto a Yahoo/Morningstar **desde la propia vista previa**
+de la importación de Portfolio Performance, antes de confirmar.
+
+### Importación PP — vincular precios en la vista previa
+
+- Cada producto de «Productos nuevos que se crean» tiene un botón **«Buscar precio»**.
+- Al pulsarlo se abre **el mismo buscador** que usa el modal de producto (mismo campo
+  «IE00BYX5NX33, AAPL, bitcoin, oro…», mismo botón «Buscar», mismas tarjetas de
+  resultado y mismos mensajes).
+- **El panel flota** sobre las filas de abajo, así no descuadra la tabla de la vista previa.
+- Al elegir un resultado, ese producto queda **vinculado** en la vista previa (la fila
+  muestra `✓ Yahoo Finance · 500.PA`), con un botón **«Quitar vínculo»** para deshacerlo.
+- Al confirmar, los productos vinculados **nacen ya con ese código y esa fuente**, y se
+  les **descarga el precio** con la lógica que ya existía (`recalcula(descargar="faltan")`).
+- Se toma el **nombre canónico** del resultado, y el nombre original del CSV **no se
+  pierde**: queda en la descripción (`papel`) del producto, que es editable.
+- El nombre canónico pasa por el **deduplicado por familia**, así que si en la cartera ya
+  hay un producto con ese nombre se reutiliza en vez de crear un duplicado.
+- Los productos que no se vinculan **conservan el comportamiento anterior**: el código del
+  CSV si lo trae, o el del catálogo (el plan Naranja 2040 sigue con `0P00008571.F`).
+- Los vínculos se envían tanto al **recálculo de la vista previa** (para que los totales
+  reflejen que ese producto ya cotiza) como a la **confirmación**.
+- Los vínculos, los tipos de cuenta y las exclusiones llegan como parámetros: `aplicar()`
+  **sigue sin modificar el plan**, así que recalcular la vista previa da siempre el mismo
+  resultado.
+
+### Refactor interno
+
+- El buscador, que estaba incrustado en `formProducto()`, se extrae a **`montaBuscador()`**,
+  reutilizable desde el modal y desde la vista previa. Dentro del contenedor se busca por
+  **clases** (`.bq`, `.bBuscar`, `.bRes`) en vez de por ids: el modal y la vista previa
+  pueden estar a la vez en el DOM y los ids chocarían. **El modal se comporta igual**
+  (mismos mensajes, mismas tarjetas, mismo relleno del formulario y misma ficha de
+  Morningstar).
+
+---
+
 ## V1.00 — 13 de octubre de 2026
 
 Primera versión con control de versiones. Recoge todo lo construido hasta aquí.

@@ -1160,8 +1160,11 @@ ORDEN_PP = {"apertura": 0, "deposito": 1, "compra": 2, "entrega": 2, "comision":
 
 # ---------------------------------------------------------------- aplicar
 
-def aplicar(cfg, plan, excluir=None, tipos=None):
+def aplicar(cfg, plan, excluir=None, tipos=None, vinculos=None):
     """Ejecuta el plan sobre cfg (la real o una copia) y devuelve el informe.
+
+    `vinculos` es lo que el usuario ha vinculado a un precio en la vista previa:
+    {ref del producto: {fuente, codigo, nombre, moneda, identificador, tipo}}.
 
     No modifica `plan`: la vista previa llama a esta función y después la
     confirmación la vuelve a llamar, así que todo lo que se añada va en listas
@@ -1278,6 +1281,27 @@ def aplicar(cfg, plan, excluir=None, tipos=None):
             continue                        # excluido: no se crea ni se actualiza
         datos = dict(n["datos"])
         datos.update(ajustes.get(n["ref"], {}))
+        # Lo que el usuario haya vinculado a un precio en la vista previa manda
+        # sobre lo que traiga el CSV, y va ANTES de buscar el producto existente:
+        # así el nombre canónico entra en el deduplicado por familia.
+        vinc = (vinculos or {}).get(n["ref"]) or {}
+        if not (vinc.get("fuente") and vinc.get("codigo")):
+            vinc = {}                       # sin fuente y código no es un vínculo
+        if vinc:
+            nombre_vinc = (vinc.get("nombre") or "").strip()
+            if nombre_vinc and nombre_vinc != datos.get("nombre"):
+                # El nombre del CSV no se pierde: queda en la descripción.
+                datos.setdefault("papel", "")
+                if not datos["papel"]:
+                    datos["papel"] = f"Importado del CSV como «{datos.get('nombre', '')}»."
+                datos["nombre"] = nombre_vinc
+                datos["corto"] = " ".join(nombre_vinc.split())[:24]
+            for campo in ("fuente", "codigo", "moneda", "identificador"):
+                if vinc.get(campo):
+                    datos[campo] = vinc[campo]
+            if vinc.get("tipo") and not datos.get("tipo"):
+                datos["tipo"] = vinc["tipo"]
+            datos.pop("revision", None)     # ya cotiza: el aviso sobra
         if datos.get("fuente") not in (None, "", "manual"):
             datos.pop("revision", None)
         if datos.get("cuenta"):
@@ -1421,6 +1445,6 @@ def aplicar(cfg, plan, excluir=None, tipos=None):
     }
 
 
-def vista_previa(cfg, plan, excluir=None, tipos=None):
+def vista_previa(cfg, plan, excluir=None, tipos=None, vinculos=None):
     """El mismo informe que dará aplicar(), sin tocar la cartera de verdad."""
-    return aplicar(copy.deepcopy(cfg), plan, excluir=excluir, tipos=tipos)
+    return aplicar(copy.deepcopy(cfg), plan, excluir=excluir, tipos=tipos, vinculos=vinculos)

@@ -613,3 +613,85 @@ def test_los_tipos_elegidos_no_tocan_el_plan(tmp_path):
     inf = importar.vista_previa(_cartera(), plan, tipos={ref: "broker"})
     assert plan.cuentas[0]["datos"]["tipo"] == "pension"     # el plan sigue igual
     assert [c["datos"]["tipo"] for c in inf["cuentasNuevas"]] == ["pension"]  # el informe sí lo refleja
+
+
+# ------------------------------------- vincular un precio en la vista previa (Fase 3)
+# Un activo que NO está en el catálogo: así el código solo puede venir del vínculo.
+INVENTADO = ("2025-03-03 00:00:00;Compra;INVENTADO SA;10;10,00;100,00;;;100,00;"
+             "REVOLUT_EUR;REVOLUT_EUROS;;")
+FINCA = ("2025-04-01 00:00:00;Compra;FINCA DEL PUEBLO;1;90000,00;90000,00;;;90000,00;"
+         "REVOLUT_EUR;REVOLUT_EUROS;;")
+
+
+def test_vincular_un_producto_le_pone_codigo_fuente_y_nombre(tmp_path):
+    """Lo que el usuario vincula en la vista previa manda: el producto nace ya con
+    ese código y esa fuente, y sin el aviso de «valor a coste»."""
+    cfg, plan = prepara(tmp_path, INVENTADO)
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    importar.aplicar(cfg, plan, vinculos={ref: {
+        "fuente": "yahoo", "codigo": "INV.MC", "nombre": "Inventado, S.A.",
+        "moneda": "EUR", "identificador": "ES0000000001", "tipo": "accion"}})
+    p = producto(cfg, "Inventado, S.A.")
+    assert (p["fuente"], p["codigo"]) == ("yahoo", "INV.MC")
+    assert p["identificador"] == "ES0000000001"
+    assert not p.get("revision")
+
+
+def test_vincular_guarda_el_nombre_del_csv_en_la_descripcion(tmp_path):
+    """Al tomar el nombre canónico, el del CSV no se pierde: queda en la descripción
+    del producto, que se puede leer y editar en su ficha."""
+    cfg, plan = prepara(tmp_path, INVENTADO)
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    importar.aplicar(cfg, plan, vinculos={ref: {
+        "fuente": "yahoo", "codigo": "INV.MC", "nombre": "Inventado, S.A."}})
+    assert "INVENTADO SA" in producto(cfg, "Inventado, S.A.").get("papel", "")
+
+
+def test_vincular_no_duplica_si_el_nombre_canonico_ya_existe(tmp_path):
+    """El nombre canónico entra en el deduplicado por familia de la Fase 2: si en la
+    cartera ya hay un producto con ese nombre, se reutiliza en vez de crear otro."""
+    cfg = _cartera()
+    _cache_cambio(str(tmp_path))
+    existente, _ = almacen.guarda_producto(cfg, {
+        "nombre": "Inventado, S.A.", "corto": "Inventado", "tipo": "accion",
+        "fuente": "yahoo", "codigo": "INV.MC", "moneda": "EUR"})
+    antes = len(cfg["productos"])
+    plan = importar.preparar_portfolio(cfg, csv_pp(INVENTADO), str(tmp_path))
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    importar.aplicar(cfg, plan, vinculos={ref: {
+        "fuente": "yahoo", "codigo": "INV.MC", "nombre": "Inventado, S.A."}})
+    iguales = [p for p in cfg["productos"] if p["nombre"] == "Inventado, S.A."]
+    assert len(iguales) == 1                                   # no se ha creado otro
+    assert iguales[0]["id"] == existente["id"]
+    assert len(cfg["productos"]) == antes + 2                  # solo las cuentas de efectivo
+
+
+def test_los_productos_sin_vincular_conservan_su_codigo(tmp_path):
+    """Vincular uno no toca a los demás: el plan de pensiones sigue naciendo con el
+    código del catálogo."""
+    cfg, plan = prepara(tmp_path, PLAN_DEPOSITO, PLAN2040, INVENTADO)
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    importar.aplicar(cfg, plan, vinculos={ref: {
+        "fuente": "yahoo", "codigo": "INV.MC", "nombre": "Inventado, S.A."}})
+    assert producto(cfg, "PLAN2040 ING")["codigo"] == "0P00008571.F"
+    assert producto(cfg, "Inventado, S.A.")["codigo"] == "INV.MC"
+
+
+def test_un_vinculo_sin_codigo_no_cambia_nada(tmp_path):
+    """Sin código no es un vínculo: el producto se queda como estaba."""
+    cfg, plan = prepara(tmp_path, INVENTADO)
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    importar.aplicar(cfg, plan, vinculos={ref: {"nombre": "Otro nombre"}})
+    assert not any(p["nombre"] == "Otro nombre" for p in cfg["productos"])
+    assert any(p["nombre"] == "INVENTADO SA" for p in cfg["productos"])
+
+
+def test_la_vista_previa_con_vinculos_no_toca_el_plan(tmp_path):
+    """La vista previa se recalcula cada vez que el usuario vincula algo: si `aplicar`
+    modificara el plan, el segundo cálculo daría otro resultado."""
+    _, plan = prepara(tmp_path, INVENTADO)
+    ref = _ref_de_producto(plan, "INVENTADO SA")
+    antes = copy.deepcopy(plan.productos_nuevos)
+    importar.vista_previa(_cartera(), plan, vinculos={ref: {
+        "fuente": "yahoo", "codigo": "INV.MC", "nombre": "Inventado, S.A."}})
+    assert plan.productos_nuevos == antes

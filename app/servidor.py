@@ -1267,14 +1267,14 @@ def api_importar_confirmar():
     plan = PLANES.pop(datos_req.get("token"), None)
     if plan is None:
         return jsonify(ok=False, errores=["Esa vista previa ya no vale: vuelve a revisar el archivo."]), 400
-    # Tipos de cuenta elegidos en la vista previa y entidades desmarcadas. Llegan
-    # como parámetros (no se toca el plan): así volver a recalcular la vista previa
-    # da el mismo resultado y la confirmación no depende del orden de las llamadas.
-    tipos, excluir = _cambios_de_importacion(datos_req)
+    # Tipos de cuenta, entidades desmarcadas y precios vinculados en la vista previa.
+    # Llegan como parámetros (no se toca el plan): así volver a recalcular la vista
+    # previa da el mismo resultado y la confirmación no depende del orden.
+    tipos, excluir, vinculos = _cambios_de_importacion(datos_req)
     informe = {}
 
     def fn(cfg):
-        informe.update(importar.aplicar(cfg, plan, excluir=excluir, tipos=tipos))
+        informe.update(importar.aplicar(cfg, plan, excluir=excluir, tipos=tipos, vinculos=vinculos))
         return None
     respuesta = cambia(fn)
     if isinstance(respuesta, tuple):
@@ -1293,21 +1293,31 @@ def _cambios_de_importacion(datos_req):
             tipos[ref] = tipo
     excluir = {"cuentas": [r for r in (datos_req.get("omitirCuentas") or []) if r],
                "productos": [r for r in (datos_req.get("omitirProductos") or []) if r]}
-    return tipos, excluir
+    vinculos = {}
+    for ref, v in (datos_req.get("vinculos") or {}).items():
+        if not ref or not isinstance(v, dict):
+            continue
+        ficha = {k: v.get(k) for k in ("fuente", "codigo", "nombre", "moneda", "identificador", "tipo")
+                 if v.get(k)}
+        if ficha.get("fuente") and ficha.get("codigo"):
+            vinculos[ref] = ficha
+    return tipos, excluir, vinculos
 
 
 @app.post("/api/importar/excluir")
 def api_importar_excluir():
-    """Recalcula la vista previa con lo que el usuario ha ido desmarcando, para que
-    vea el impacto de verdad (totales y movimientos), no solo un contador. No
-    consume el token: sigue valiendo para confirmar."""
+    """Recalcula la vista previa con lo que el usuario ha ido ajustando (entidades
+    desmarcadas y precios vinculados), para que vea el impacto de verdad (totales y
+    movimientos), no solo un contador. No consume el token: sigue valiendo para
+    confirmar."""
     datos_req = request.get_json(silent=True) or {}
     plan = PLANES.get(datos_req.get("token"))
     if plan is None:
         return jsonify(ok=False, errores=["Esa vista previa ya no vale: vuelve a revisar el archivo."]), 400
-    tipos, excluir = _cambios_de_importacion(datos_req)
+    tipos, excluir, vinculos = _cambios_de_importacion(datos_req)
     cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
-    return jsonify(ok=True, informe=importar.vista_previa(cfg, plan, excluir=excluir, tipos=tipos))
+    return jsonify(ok=True, informe=importar.vista_previa(
+        cfg, plan, excluir=excluir, tipos=tipos, vinculos=vinculos))
 
 
 @app.get("/api/plantilla.xlsx")

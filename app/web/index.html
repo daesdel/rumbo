@@ -554,6 +554,14 @@ body.video .tarjeta{padding:22px 24px}
 .imProd{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--borde);font-size:13.5px}
 .imProd .meta{display:flex;gap:5px;flex-wrap:wrap}
 .imProd .meta span{font-size:11.5px;color:var(--tinta3);background:var(--sup2);border-radius:6px;padding:1px 8px}
+/* El buscador de la vista previa FLOTA sobre las filas de abajo: no descuadra la tabla. */
+.imProdFila{position:relative}
+.imBusca{position:absolute;left:0;right:0;top:100%;z-index:30;padding:0 0 10px}
+.imBusca .buscador{margin:0;box-shadow:0 18px 50px rgba(0,0,0,.28)}
+.imAcc{margin-left:auto}
+.btnMini{border:1px solid var(--borde);background:var(--sup2);color:var(--tinta2);font:inherit;font-size:12px;
+  padding:4px 11px;border-radius:8px;cursor:pointer;white-space:nowrap}
+.btnMini:hover{border-color:var(--s1);color:var(--tinta)}
 .etqImp{display:inline-block;font-size:11px;color:var(--tinta3);background:var(--sup2);border-radius:6px;padding:1px 7px;margin-right:4px}
 .estado{display:inline-block;font-size:11.5px;font-weight:600;border-radius:6px;padding:2px 8px}
 .est-nuevo .estado{color:var(--bien);background:color-mix(in srgb,var(--bien) 13%,transparent)}
