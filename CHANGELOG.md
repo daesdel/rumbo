@@ -15,6 +15,38 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.02 — 15 de octubre de 2026
+
+**Buscador en la pestaña Productos**: encontrar un producto sin recorrer la lista
+entera (60 productos hoy).
+
+- **Campo de búsqueda encima de la tabla**, en el flujo normal: empuja las filas hacia
+  abajo, no flota por encima.
+- **Filtra en vivo mientras se escribe**, sin pulsar Enter. No vuelve a pintar la tabla
+  (solo oculta filas), así no se pierde el foco ni el cursor.
+- Busca **a la vez** por **nombre, nombre corto, código/ticker, ISIN (identificador) y
+  entidad (banco o bróker)**, sin selector de campo. Buscar «Trade Republic» encuentra
+  sus 5 productos; «MyInvestor», sus 12.
+- **Sin distinguir mayúsculas ni tildes** («AMUNDI» = «amundi»; «dolar» encuentra
+  «DÓLAR»), y con los espacios de más colapsados.
+- **Contador «X de Y productos»** cuando hay filtro activo; sin filtro no se muestra nada.
+- **Limpiar** con la **×** del campo o con **Escape**.
+- **Reset al salir de Productos**: al volver, la lista completa.
+- **Sin auto-selección**: si el filtro deja un solo producto, no se selecciona solo.
+- **Etiqueta de entidad** visible bajo cada nombre (junto al ISIN, cuando lo tiene).
+- La búsqueda es **ortogonal al filtro de propietario** (David/Gina/Compartido): ese es
+  un filtro del panel de Patrimonio y sigue igual.
+
+### Detalle interno
+
+- `buscaDe(p)` construye el texto indexado con `p.nombre` **y** `p.corto` por separado:
+  `nombre(p)` devuelve el corto cuando existe, así que el nombre largo —donde suele estar
+  la tilde— se perdía y la búsqueda sin tildes no lo encontraba.
+- `tr[hidden]{display:none}`: en las filas de una tabla, el atributo `hidden` no basta
+  porque `display:table-row` lo pisa.
+
+---
+
 ## V1.01 — 14 de octubre de 2026
 
 **Fase 3**: vincular un producto a Yahoo/Morningstar **desde la propia vista previa**

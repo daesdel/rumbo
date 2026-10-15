@@ -9,10 +9,15 @@
   const D = window.DATOS;
   const SOLO_SALDO = ["efectivo", "deuda"];
   const E = { cfg: null, modo: "demo", tipos: {}, fuentes: {}, tiposMov: {}, tiposCuenta: {}, vista: "productos",
-              filtro: "todos", filtroCuenta: "todos", cuenta: null };
+              filtro: "todos", filtroCuenta: "todos", cuenta: null, busqueda: "" };
 
   /* ---------------------------------------------- utilidades */
   const esc = window.escapar;   // escapado unificado (una sola copia, en graficos.js)
+  /** Para buscar: sin mayúsculas, sin tildes («accion» encuentra «Acción») y con
+      los espacios de más colapsados. */
+  const norm = s => String(s == null ? "" : s).toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ").trim();
   const eur = v => v == null ? "—" : Number(v).toLocaleString("es-ES", { style: "currency", currency: "EUR" });
   const num = (v, d = 4) => v == null ? "—" : Number(v).toLocaleString("es-ES", { maximumFractionDigits: d });
   const fecha = iso => iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "—";
@@ -214,7 +219,9 @@
       b.textContent = et;
       b.setAttribute("aria-pressed", String(id === E.vista));
       // Cambiar de pantalla cierra la ficha de cuenta y descarta los avisos.
+      // Al salir de Productos se limpia la búsqueda: al volver, la lista entera.
       b.onclick = () => { E.vista = id; E.cuenta = null; limpiaAvisos();
+                          if (id !== "productos") E.busqueda = "";
                           recuerda.guarda("patrimonio.editor", id); pinta(); };
       seg.appendChild(b);
     });
@@ -223,6 +230,7 @@
       importar: vistaImportar, copias: vistaCopias }[E.vista] || vistaProductos)();
     if (E.vista === "importar" || E.vista === "copias") conectaImportar();
     if (E.vista === "saldos") conectaSaldos();
+    if (E.vista === "productos") conectaBuscaProductos();
     ["#edFiltro", "#edFiltroCuenta"].forEach(sel => {
       const el = $(sel);
       if (!el) return;
@@ -244,13 +252,23 @@
     const c = D && (D.productos || []).find(x => x.id === p.id);
     return c && c.nav ? `${num(c.nav)} € <small>${fecha(c.navFecha)}</small>` : '<small>tras guardar</small>';
   }
+  /** Todo por lo que se puede encontrar un producto en el buscador: nombre, nombre
+      corto, código/ticker, ISIN y entidad (banco o bróker).
+      Van `p.nombre` y `p.corto` por separado a propósito: `nombre(p)` devuelve el
+      corto cuando existe, y el nombre largo (donde suele estar la tilde) se perdería. */
+  function buscaDe(p) {
+    return norm([p.nombre, p.corto, p.codigo, p.identificador, p.entidad].filter(Boolean).join(" "));
+  }
+
   function vistaProductos() {
     const filas = E.cfg.productos.map(p => {
       const n = soloSaldo(p) || manual(p)
         ? E.cfg.valoraciones.filter(v => v.producto === p.id).length + " valores"
         : E.cfg.movimientos.filter(m => m.producto === p.id).length + " movs.";
-      return `<tr><td><i class="pt" style="background:var(--s${p.slot || 1})"></i>${esc(nombre(p))}
-          ${p.identificador ? `<small class="idp">${esc(p.identificador)}</small>` : ""}</td>
+      const etq = [p.identificador, p.entidad].filter(Boolean)
+        .map(x => `<small class="idp">${esc(x)}</small>`).join(" ");
+      return `<tr data-busca="${esc(buscaDe(p))}"><td><i class="pt" style="background:var(--s${p.slot || 1})"></i>${esc(nombre(p))}
+          ${etq}</td>
         <td>${esc(E.tipos[p.tipo] || p.tipo)}</td><td>${precioDe(p)}</td>
         <td>${esc(E.fuentes[p.fuente] || "")}${p.codigo ? ` <small>${esc(p.codigo)}</small>` : ""}</td>
         <td>${n}</td>
@@ -258,13 +276,50 @@
           <button data-acc="editarProducto" data-id="${esc(p.id)}">Editar</button>
           <button data-acc="borrarProducto" data-id="${esc(p.id)}">Borrar</button></td></tr>`;
     }).join("");
+    const barra = `<div class="buscaProd">
+        <input type="text" class="buscaProdInput" autocomplete="off"
+          placeholder="Buscar por nombre, ticker, ISIN o banco…" value="${esc(E.busqueda)}"
+          aria-label="Buscar producto">
+        <button type="button" class="limpiar" hidden title="Limpiar la búsqueda" aria-label="Limpiar la búsqueda">×</button>
+        <span class="cuenta"></span>
+      </div>`;
     return `<section class="tarjeta"><header><h2>Productos</h2>
         <span class="subt">Todo lo que tienes: fondos, acciones, cripto, cuentas, planes, inmuebles…</span>
         <span class="sp"></span>${E.cfg.productos.length > 1 ? '<button class="btn" data-acc="repartirColores" title="Da a cada producto un color distinto">Repartir colores</button>' : ""}
         <button class="btn prim" data-acc="nuevoProducto">+ Añadir producto</button></header>
+      ${filas ? barra : ""}
       ${filas ? `<div class="tablaEnv"><table class="dt"><thead><tr><th>Producto</th><th>Tipo</th><th>Último precio</th>
         <th>Fuente del precio</th><th>Datos</th><th></th></tr></thead><tbody>${filas}</tbody></table></div>`
         : '<p class="subt">Todavía no has añadido ningún producto.</p>'}</section>`;
+  }
+
+  /** Filtra la tabla de productos EN VIVO mientras se escribe. No vuelve a pintar
+      la tabla: solo oculta filas, así no se pierde el foco ni el cursor. */
+  function conectaBuscaProductos() {
+    const barra = $(".buscaProd");
+    if (!barra) return;
+    const entrada = barra.querySelector(".buscaProdInput");
+    const boton = barra.querySelector(".limpiar");
+    const cuenta = barra.querySelector(".cuenta");
+    const filas = [...document.querySelectorAll("#edCuerpo table.dt tbody tr")];
+    const aplica = () => {
+      const q = norm(entrada.value);
+      let dentro = 0;
+      filas.forEach(tr => {
+        const si = !q || (tr.dataset.busca || "").includes(q);
+        tr.hidden = !si;
+        if (si) dentro++;
+      });
+      boton.hidden = !entrada.value;
+      cuenta.textContent = q ? `${dentro} de ${filas.length} productos` : "";
+      E.busqueda = entrada.value;
+    };
+    entrada.oninput = aplica;
+    entrada.onkeydown = e => {
+      if (e.key === "Escape") { entrada.value = ""; aplica(); }
+    };
+    boton.onclick = () => { entrada.value = ""; aplica(); entrada.focus(); };
+    aplica();
   }
 
   function siguienteColor() {
