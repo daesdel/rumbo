@@ -178,7 +178,18 @@ body.sinDatos .filtrosGlobales{display:none}
 .chip.apagado .vl{text-decoration:line-through;text-decoration-thickness:1px}
 
 /* ============================ detalle de fondo ============================ */
+/* Buscador de la pestaña «Productos» (los chips). Va ENCIMA de los chips, en el
+   flujo normal: empuja la rejilla hacia abajo, no flota por encima. */
+.buscaFondos{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:24px}
+.buscaFondos input{flex:0 1 340px;border:1px solid var(--borde);border-radius:9px;padding:8px 11px;
+  background:var(--sup);color:var(--tinta);font:inherit;font-size:13.5px}
+.buscaFondos input:focus{outline:none;border-color:var(--s1)}
+.buscaFondos .limpiar{border:1px solid var(--borde);background:var(--sup2);color:var(--tinta2);font:inherit;
+  font-size:13px;line-height:1;padding:6px 10px;border-radius:8px;cursor:pointer}
+.buscaFondos .limpiar:hover{border-color:var(--s1);color:var(--tinta)}
+.buscaFondos .cuenta{color:var(--tinta3);font-size:12.5px;font-variant-numeric:tabular-nums}
 .selFondo{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:18px}
+.selFondo button[hidden]{display:none}
 .selFondo button{
   display:inline-flex;align-items:center;gap:8px;border:1px solid var(--borde);background:var(--sup);
   border-radius:999px;padding:7px 14px;font:inherit;font-size:13px;color:var(--tinta2);cursor:pointer;transition:.13s;
@@ -850,7 +861,13 @@ body.video .tarjeta{padding:22px 24px}
 
 <!-- ==================================================== FONDOS -->
 <div class="panel" id="tab-fondos" role="tabpanel" hidden>
-  <div class="selFondo" id="selFondo" style="margin-top:24px"></div>
+  <div class="buscaFondos" id="buscaFondos">
+    <input type="text" class="buscaFondosInput" autocomplete="off"
+      placeholder="Buscar por nombre, ticker, ISIN o banco…" aria-label="Buscar producto">
+    <button type="button" class="limpiar" hidden title="Limpiar la búsqueda" aria-label="Limpiar la búsqueda">×</button>
+    <span class="cuenta"></span>
+  </div>
+  <div class="selFondo" id="selFondo" style="margin-top:18px"></div>
   <section class="tarjeta" id="fondoFicha"></section>
   <section class="tarjeta" id="fondoExpo" hidden></section>
   <section class="tarjeta" id="fondoTabla"></section>

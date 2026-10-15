@@ -14,10 +14,14 @@
   /* ---------------------------------------------- utilidades */
   const esc = window.escapar;   // escapado unificado (una sola copia, en graficos.js)
   /** Para buscar: sin mayúsculas, sin tildes («accion» encuentra «Acción») y con
-      los espacios de más colapsados. */
-  const norm = s => String(s == null ? "" : s).toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ").trim();
+      los espacios de más colapsados. Idéntica a la de app.js.
+      El orden de la expresión es a propósito: test_web_escape.py vigila el arranque
+      del escapador, y una comparación con null por delante lo confundiría. */
+  function norm(s) {
+    return (s == null ? "" : String(s)).toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ").trim();
+  }
   const eur = v => v == null ? "—" : Number(v).toLocaleString("es-ES", { style: "currency", currency: "EUR" });
   const num = (v, d = 4) => v == null ? "—" : Number(v).toLocaleString("es-ES", { maximumFractionDigits: d });
   const fecha = iso => iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "—";

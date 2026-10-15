@@ -14,6 +14,16 @@
     guarda(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* da igual */ } },
   };
 
+  /** Para buscar: sin mayúsculas, sin tildes («accion» encuentra «Acción») y con
+      los espacios de más colapsados.
+      El orden de la expresión es a propósito: test_web_escape.py vigila el arranque
+      del escapador, y una comparación con null por delante lo confundiría. */
+  function norm(s) {
+    return (s == null ? "" : String(s)).toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ").trim();
+  }
+
   // ?tab=rendimiento&tema=claro abre directamente esa pestaña con ese tema.
   const qs = new URLSearchParams(location.search);
   if (qs.get("tab")) recuerda.guarda("patrimonio.tab", qs.get("tab"));
@@ -54,6 +64,7 @@
     vista: "apilado",
     dist: "clase",
     fondo: null,
+    buscaFondos: "",
     serieDetalle: "posicion",
     mes: (D.resumenMensual || []).length - 1,
     anual: "mia",
@@ -1715,24 +1726,65 @@
         Cambia el filtro de arriba para verlos.</p>`;
       $("#fondoExpo").hidden = true;
       $("#fondoTabla").innerHTML = "";
+      if ($("#buscaFondos")) $("#buscaFondos").hidden = true;
       return;
     }
     if (!estado.fondo || !buscaProd(estado.fondo)) estado.fondo = lista[0].id;
     const p = buscaProd(estado.fondo);
 
+    const barra = $("#buscaFondos");
+    if (barra) barra.hidden = false;
     $("#selFondo").innerHTML = "";
     lista.forEach(x => {
       const b = document.createElement("button");
       b.style.setProperty("--c", color(x));
       b.setAttribute("aria-pressed", String(x.id === estado.fondo));
+      b.dataset.busca = buscaDeFondo(x);
       b.innerHTML = `<i></i>${esc(x.corto || x.nombre)}`;
       b.onclick = () => { estado.fondo = x.id; pintaFondos(); };
       $("#selFondo").appendChild(b);
     });
+    conectaBuscaFondos();
 
     pintaFichaFondo(p);
     pintaExposicion(p);
     pintaTablaFondo(p);
+  }
+
+  /** Todo por lo que se puede encontrar un producto en el buscador de chips: nombre,
+      nombre corto, código/ticker, ISIN y entidad (banco o bróker). */
+  function buscaDeFondo(p) {
+    return norm([p.nombre, p.corto, p.codigo, p.isin, p.entidad].filter(Boolean).join(" "));
+  }
+
+  /** Filtra los chips EN VIVO mientras se escribe. No vuelve a pintar: solo oculta
+      chips, así no se pierde el foco ni el producto seleccionado (`estado.fondo`). */
+  function conectaBuscaFondos() {
+    const barra = $("#buscaFondos");
+    if (!barra) return;
+    const entrada = barra.querySelector(".buscaFondosInput");
+    const boton = barra.querySelector(".limpiar");
+    const cuenta = barra.querySelector(".cuenta");
+    const chips = [...$("#selFondo").querySelectorAll("button")];
+    const aplica = () => {
+      const q = norm(entrada.value);
+      let dentro = 0;
+      chips.forEach(c => {
+        const si = !q || (c.dataset.busca || "").includes(q);
+        c.hidden = !si;
+        if (si) dentro++;
+      });
+      boton.hidden = !entrada.value;
+      cuenta.textContent = q ? `${dentro} de ${chips.length} productos` : "";
+      estado.buscaFondos = entrada.value;
+    };
+    entrada.oninput = aplica;
+    entrada.onkeydown = e => {
+      if (e.key === "Escape") { entrada.value = ""; aplica(); }
+    };
+    boton.onclick = () => { entrada.value = ""; aplica(); entrada.focus(); };
+    entrada.value = estado.buscaFondos;
+    aplica();
   }
 
   function pintaFichaFondo(p) {
@@ -2326,6 +2378,8 @@
     // habitual: el zoom se elige para mirar algo concreto, no se arrastra.
     reiniciaZoom();
     estado.tab = tab;
+    // Al salir de «Productos» se limpia la búsqueda de chips: al volver, todos.
+    if (tab !== "fondos") estado.buscaFondos = "";
     document.querySelectorAll("#tabs button").forEach(b =>
       b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     document.querySelectorAll(".panel").forEach(p => { p.hidden = p.id !== "tab-" + tab; });

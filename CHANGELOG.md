@@ -15,6 +15,40 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.03 — 15 de octubre de 2026
+
+**Buscador en la pestaña superior «Productos»** (la de los **chips de colores**, junto a
+Patrimonio / El mes / Periodo). En V1.02 el buscador se añadió a la tabla de
+**Mis datos → Productos**; esta es la otra vista, que aún no lo tenía.
+
+- **Campo encima de la fila de chips**, en el flujo normal (`position:static`): empuja
+  los chips hacia abajo, no flota.
+- **Filtra en vivo** al escribir, sin repintar: solo oculta chips, así no se pierde el
+  foco ni la selección.
+- Busca por **nombre, nombre corto, código/ticker, ISIN y entidad**. En local:
+  «Trade Republic» → 5 de 50 · «500.PA» → 1 de 50 · «amundi» → 4 de 50.
+- **Sin mayúsculas ni tildes** y espacios colapsados.
+- **Contador «X de Y productos»** solo con filtro activo.
+- **Limpiar** con la **×** o con **Escape**. **Reset al salir de la pestaña.**
+- **La selección se mantiene al filtrar**: si el chip elegido sigue visible, sigue
+  marcado; si el filtro lo oculta, **sigue seleccionado internamente** (su ficha se
+  mantiene abajo) y **no se auto-selecciona** el único resultado visible.
+
+> El contador cuenta los **chips** visibles («de 50»), no los productos de
+> `cartera.json` (60): los chips salen de `TODOS()` = `D.productos` + `otrosActivos` +
+> `pasivos`, y el panel no incluye los productos de efectivo de cada cuenta —esos se
+> ven como *cuentas*—. Es el comportamiento previo del panel.
+
+### Arreglos internos
+
+- **Alineado el `norm` de `editor.js` con el de `app.js`**: eran la misma función escrita
+  de dos formas, y la de `editor.js` empezaba por el arranque del escapador. No fallaba
+  hoy (en `editor.js` no hay ningún `&amp;`), pero era una mina latente para
+  `test_web_escape.py`, que usa `re.S` y busca ese arranque seguido de cualquier `&amp;`
+  del fichero. Ahora las dos son idénticas y ninguna dispara la guarda.
+
+---
+
 ## V1.02 — 15 de octubre de 2026
 
 **Buscador en la pestaña Productos**: encontrar un producto sin recorrer la lista
