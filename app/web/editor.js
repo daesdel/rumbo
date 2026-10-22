@@ -795,6 +795,127 @@
     formMovimiento(m, null, true);
   }
 
+  /* ------------------------------- movimientos de UN producto desde un CSV */
+
+  /** El nombre de la cuenta de efectivo del producto, o un aviso si no tiene. */
+  const nombreCuentaDe = p => {
+    const c = cuentaDe(p && p.cuenta);
+    return c ? c.nombre : "sin cuenta asignada";
+  };
+
+  /** Resumen + tabla de los válidos + lista de los errores. Piezas pequeñas, sin
+      plantillas enormes anidadas. */
+  const filaCsv = (m, i) =>
+    `<tr><td>${i + 1}</td><td>${fecha(m.fecha)}</td>
+      <td>${esc(E.tiposMov[m.tipo] || m.tipo)}</td>
+      <td>${m.unidades != null ? num(m.unidades) : "—"}</td>
+      <td>${eur(m.importe)}</td><td>${esc(m.nota || "")}</td></tr>`;
+
+  const errorCsv = e => `<li><b>Línea ${e.linea}:</b> ${esc(e.motivo)}</li>`;
+
+  function htmlPreviaCsv(j) {
+    const uno = n => n === 1 ? "" : "s";
+    const resumen = `<div class="csvRes"><b>${j.validos} movimiento${uno(j.validos)} válido${uno(j.validos)}</b>` +
+      (j.errores_totales ? ` · <span class="neg">${j.errores_totales} con error${uno(j.errores_totales)}</span>` : "") + `</div>`;
+    const tabla = j.filas.length
+      ? `<div class="tablaEnv"><table class="dt"><thead><tr><th>#</th><th>Fecha</th><th>Tipo</th>
+          <th>Unidades</th><th>Importe</th><th>Nota</th></tr></thead>
+          <tbody>${j.filas.map(filaCsv).join("")}</tbody></table></div>`
+      : "";
+    const errores = j.errores.length ? `<ul class="csvErr">${j.errores.map(errorCsv).join("")}</ul>` : "";
+    const ahora = `<p class="ayuda">Ahora mismo este producto tiene ${j.existentes} movimiento${uno(j.existentes)}.</p>`;
+    return resumen + tabla + errores + ahora;
+  }
+
+  function cuerpoCsv(p) {
+    return `<div class="csvCab">
+        <p class="subt">Producto: <b>${esc(nombre(p))}</b> · Cuenta: <b>${esc(nombreCuentaDe(p))}</b></p>
+        <div class="fila">
+          <input type="file" class="csvArchivo" accept=".csv,text/csv">
+          <button type="button" class="btn csvPlantilla">Descargar plantilla CSV</button>
+        </div>
+        <p class="ayuda">Columnas: <code>fecha,tipo,unidades,importe,comision,impuestos,nota</code>.
+          La fecha en AAAA-MM-DD, los números con punto o coma, y la cabecera es obligatoria.</p>
+      </div>
+      <div class="csvPrev"></div>
+      <div class="csvModo">
+        <label><input type="radio" name="modo" value="anadir" checked> Añadir a los movimientos existentes</label>
+        <label><input type="radio" name="modo" value="sustituir"> Sustituir los movimientos existentes</label>
+      </div>`;
+  }
+
+  /** Carga los movimientos de UN producto desde un CSV. Solo toca ese producto: los
+      de los demás no se leen ni se escriben. */
+  function movimientosCsv(pid) {
+    const p = prod(pid);
+    if (!p) { alert("Ese producto ya no existe: recarga la página."); return; }
+    const est = { texto: "", previa: null };
+    const f = abreModal("Importar movimientos (CSV)", cuerpoCsv(p), async (form) => {
+      if (!est.texto) throw new Error("Elige primero un archivo CSV.");
+      if (!est.previa || !est.previa.validos) {
+        throw new Error("No hay ningún movimiento válido que importar.");
+      }
+      const modo = (form.querySelector('input[name="modo"]:checked') || {}).value || "anadir";
+      if (modo === "sustituir") {
+        const n = est.previa.existentes;
+        const uno = n === 1 ? "" : "s";
+        if (!confirm(`Esto borrará ${n} movimiento${uno} del producto «${nombre(p)}» ` +
+                     `y los reemplazará por los del CSV. ¿Continuar?`)) {
+          throw new Error("Has cancelado la sustitución.");
+        }
+      }
+      await api("POST", `api/productos/${encodeURIComponent(p.id)}/movimientos/csv/importar`,
+                { texto: est.texto, modo });
+      // La ficha del producto (pestaña Productos) se rehace al recargar.
+      return () => location.reload();
+    }, "Confirmar importación");
+    conectaCsv(f, p, est);
+  }
+
+  function conectaCsv(f, p, est) {
+    const archivo = f.querySelector(".csvArchivo");
+    const previa = f.querySelector(".csvPrev");
+    const plantilla = f.querySelector(".csvPlantilla");
+    const modo = () => (f.querySelector('input[name="modo"]:checked') || {}).value || "anadir";
+
+    plantilla.onclick = () => {
+      const a = document.createElement("a");
+      a.href = "api/movimientos/plantilla.csv";
+      a.download = "movimientos.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+
+    const pidePrevia = async () => {
+      if (!est.texto) { previa.innerHTML = ""; est.previa = null; return; }
+      previa.innerHTML = '<p class="cargando">Leyendo el CSV…</p>';
+      try {
+        const j = await api("POST", `api/productos/${encodeURIComponent(p.id)}/movimientos/csv/previsualizar`,
+                            { texto: est.texto, modo: modo() });
+        est.previa = j;
+        previa.innerHTML = htmlPreviaCsv(j);
+      } catch (x) {
+        est.previa = null;
+        previa.innerHTML = `<p class="neg">${esc(x.message)}</p>`;
+      }
+    };
+
+    archivo.onchange = async () => {
+      const file = (archivo.files || [])[0];
+      if (!file) { est.texto = ""; est.previa = null; previa.innerHTML = ""; return; }
+      try {
+        est.texto = await file.text();
+      } catch (x) {
+        est.texto = ""; est.previa = null;
+        previa.innerHTML = `<p class="neg">No he podido leer el archivo: ${esc(x.message)}</p>`;
+        return;
+      }
+      await pidePrevia();
+    };
+    f.querySelectorAll('input[name="modo"]').forEach(r => { r.onchange = pidePrevia; });
+  }
+
   /** `trasGuardar`, si viene, sustituye al final de siempre (dejar la vista en
       «Movimientos»): así la ficha del producto puede recargar el panel en vez de
       cambiar de pestaña. */
@@ -1948,6 +2069,10 @@
         botón de la ficha del producto (pestaña Productos): al guardar recarga el
         panel, porque las cifras de esa pestaña ya no son las mismas. */
     movimiento: soloPropio(id => formMovimiento(null, id, false, () => location.reload())),
+    /** Carga los movimientos de UN producto desde un CSV. Lo usa la ficha del
+        producto (pestaña Productos). Al terminar recarga, para que la ficha y las
+        cifras salgan ya con lo nuevo. */
+    movimientosCsv: soloPropio(id => movimientosCsv(id)),
   };
   carga().then(pinta).catch(x => {
     const cont = $("#editor");

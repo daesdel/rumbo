@@ -15,6 +15,58 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.04 — 22 de octubre de 2026
+
+**Cargar movimientos desde un CSV para UN producto concreto.** Para cuando el bróker
+te da un extracto de un fondo suelto y no quieres pasar por el importador global de
+Portfolio Performance.
+
+- **Botón «Importar movimientos (CSV)»** en la ficha del producto (pestaña **Productos**),
+  junto a «+ Anotar movimiento». Abre un modal con la estética de los demás.
+- **Formato**: `fecha,tipo,unidades,importe,comision,impuestos,nota`, con la fecha en
+  AAAA-MM-DD, los números con **punto o coma** decimal, y **cabecera obligatoria**.
+  Los tipos son los de siempre y se aceptan con tildes o con su etiqueta
+  («Interés», «Dividendo o cupón»).
+- **Botón «Descargar plantilla CSV»** con la cabecera y dos filas de ejemplo.
+- **Previsualización antes de tocar nada**: «X movimientos válidos · Y con error», la
+  tabla de los que entrarán y, por cada fila mala, su número de línea y el motivo
+  (fecha inválida, tipo desconocido, importe ilegible…). El ensayo se hace sobre una
+  **copia** de la cartera, así que las reglas son exactamente las de la importación real.
+- **Dos modos** (radios):
+  - **Añadir a los movimientos existentes** (por defecto).
+  - **Sustituir los movimientos existentes**, con confirmación que dice cuántos va a
+    borrar: «Esto borrará N movimientos del producto «X» y los reemplazará por los del
+    CSV. ¿Continuar?».
+- **Solo se toca ESE producto**: los movimientos de los demás no se leen ni se escriben.
+  El aislamiento está verificado con un producto testigo.
+- El tratamiento del dinero es **el mismo que al anotar a mano**: compra → resta de su
+  cuenta de efectivo, dividendo → suma, etc. (se reutiliza `guarda_movimiento` +
+  `refresca_efectivo`, sin tocar el importador de PP). Al sustituir, los días que se
+  quedan sin movimientos pierden su saldo automático, y los que cambian se rehacen.
+- **Todo o nada**: la operación va dentro de `cambia()`, que **no guarda si algo falla**;
+  y si en modo «Sustituir» ninguna fila es válida, se deja la cartera como estaba.
+  `almacen.guarda` escribe atómico y con copia de seguridad.
+- Si el producto **no tiene cuenta de efectivo** o la que apunta ya no existe, se avisa
+  y **no se crea nada automáticamente**.
+
+### Detalle
+
+- Nuevo `app/movcsv.py`: solo lee y valida texto (no conoce la app ni toca la cartera).
+  La aplicación vive en `servidor._aplica_movs_csv()`, junto a `refresca_efectivo`.
+- Rutas nuevas: `GET /api/movimientos/plantilla.csv`,
+  `POST /api/productos/<id>/movimientos/csv/previsualizar` y `.../importar`.
+- La previsualización contesta **200 con `ok:false`** cuando el CSV tiene problemas:
+  es un informe, no una orden, así el navegador no lo apunta como error de red.
+
+### Nota sobre los «errores» de consola
+
+Al cargar la pestaña Patrimonio, la consola del navegador muestra **dos errores CORS de
+`api.coingecko.com`** (el precio «en vivo» del Bitcoin). Son **preexistentes** a esta
+versión: están en `app/web/app.js` desde antes y **no** los introduce esta función. En la
+pestaña Productos, y usando la importación de CSV, la consola queda **limpia**.
+
+---
+
 ## V1.03 — 15 de octubre de 2026
 
 **Buscador en la pestaña superior «Productos»** (la de los **chips de colores**, junto a

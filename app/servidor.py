@@ -27,7 +27,7 @@ from werkzeug.serving import make_server
 import math
 import copy
 
-from . import almacen, buscar, exportar, importar, motor, plantilla, seguro
+from . import almacen, buscar, exportar, importar, motor, movcsv, plantilla, seguro
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB = os.path.join(RAIZ, "app", "web")
@@ -1203,6 +1203,139 @@ def api_repartir_colores():
     grandes = [p["id"] for p in sorted(calc.get("productos", []) + calc.get("otrosActivos", []),
                                        key=lambda p: -(p.get("valor") or 0))]
     return cambia(lambda cfg: almacen.reparte_colores(cfg, grandes))
+
+
+# ------------------------------------------------ movimientos de UN producto desde CSV
+def _prod_o_error(cfg, ident):
+    """El producto de la URL, o ErrorValidacion con un mensaje que se entienda."""
+    prod = almacen.producto(cfg, ident)
+    if not prod:
+        raise almacen.ErrorValidacion([f"El producto «{ident}» no existe."])
+    return prod
+
+
+def _aplica_movs_csv(cfg, prod, filas, modo, avisos):
+    """Anota en `prod` los movimientos del CSV. **Solo toca los de ese producto.**
+
+    - `modo="anadir"`: los añade a los que ya hay.
+    - `modo="sustituir"`: borra antes los de ESTE producto (nunca los de otros).
+      Si al final no ha entrado ninguno, lanza: `cambia()` entonces NO guarda, así
+      que en disco siguen estando los antiguos (no se pierde nada).
+
+    Devuelve `(hechos, fallos)`, con `fallos` como `[{"linea", "motivo"}]`.
+    """
+    pid = prod["id"]
+    cid = prod.get("cuenta") or ""
+    if not cid:
+        raise almacen.ErrorValidacion([
+            f"«{prod.get('corto') or prod['nombre']}» no tiene una cuenta de efectivo asignada, "
+            "así que no sé de dónde restar ni sumar el dinero. Asígnala en el producto "
+            "(Editar → Cuenta) y vuelve a importar."])
+    if not almacen.cuenta(cfg, cid):
+        raise almacen.ErrorValidacion([
+            f"La cuenta «{cid}» a la que apunta el producto ya no existe. Corrige el producto "
+            "antes de importar: no la creo sola para no dejar el dinero en un sitio raro."])
+
+    # Al borrar hay que rehacer el saldo de los días que se quedan sin movimientos.
+    # Se guarda la lista original para poder dejarla tal cual si al final no entra
+    # ninguna fila: así `cfg` queda consistente aunque el llamante no la guarde.
+    original = list(cfg.get("movimientos", []))
+    dias = set()
+    if modo == "sustituir":
+        for m in original:
+            if m.get("producto") != pid:
+                continue
+            for c in {m.get("cuenta"), m.get("contrapartida")} - {None, ""}:
+                if motor.efecto_de(m, c):
+                    dias.add((c, m.get("fecha")))
+        cfg["movimientos"] = [m for m in original if m.get("producto") != pid]
+
+    hechos, fallos = [], []
+    for f in filas:
+        datos = {"producto": pid, "cuenta": cid, "fecha": f["fecha"], "tipo": f["tipo"],
+                 "unidades": f["unidades"], "importe": f["importe"],
+                 "comision": f["comision"], "impuestos": f["impuestos"],
+                 "nota": f["nota"], "moneda": "EUR"}
+        try:
+            mov = almacen.guarda_movimiento(cfg, _importe_en_eur(datos))
+        except almacen.ErrorValidacion as e:
+            fallos.append({"linea": f["linea"], "motivo": " ".join(e.errores)})
+            continue
+        refresca_efectivo(cfg, mov, avisos)
+        for c in {mov.get("cuenta"), mov.get("contrapartida")} - {None, ""}:
+            if motor.efecto_de(mov, c):
+                dias.add((c, mov.get("fecha")))
+        hechos.append(mov)
+
+    if modo == "sustituir" and not hechos:
+        cfg["movimientos"] = original          # se deja la cartera como estaba
+        raise almacen.ErrorValidacion([
+            "Ningún movimiento del CSV se puede anotar, así que no se ha sustituido nada: "
+            "los movimientos que tenías siguen como estaban."])
+
+    # Se rehacen los días afectados: un día que se queda sin movimientos pierde su
+    # saldo automático (lo hace _refresca_cuenta al no encontrar ninguno).
+    for c, f in sorted(dias):
+        _refresca_cuenta(cfg, c, f, avisos)
+    return hechos, fallos
+
+
+@app.get("/api/movimientos/plantilla.csv")
+def api_plantilla_movimientos():
+    return Response(movcsv.plantilla(), mimetype="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="movimientos.csv"'})
+
+
+@app.post("/api/productos/<ident>/movimientos/csv/previsualizar")
+def api_movs_csv_previsualizar(ident):
+    """Lee el CSV y dice qué entraría, SIN tocar nada. El ensayo se hace sobre una
+    copia de la cartera, así que las reglas son exactamente las de la importación.
+
+    Los problemas del fichero se contestan con 200 y `ok:false`: esto es un informe,
+    no una orden, y así el navegador no lo apunta como error de red."""
+    datos_req = request.get_json(silent=True) or {}
+    filas, errores = movcsv.lee(datos_req.get("texto"))
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]])
+    cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
+    try:
+        prod = _prod_o_error(cfg, ident)
+        modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
+        ensayo = copy.deepcopy(cfg)
+        ensayo_prod = almacen.producto(ensayo, ident)
+        hechos, fallos = _aplica_movs_csv(ensayo, ensayo_prod, filas, modo, [])
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores)
+    return jsonify(ok=True, validos=len(hechos), errores_totales=len(errores) + len(fallos),
+                   filas=hechos, errores=errores + fallos,
+                   existentes=len([m for m in cfg.get("movimientos", [])
+                                   if m.get("producto") == ident]),
+                   producto={"id": prod["id"], "nombre": prod.get("corto") or prod["nombre"],
+                             "cuenta": prod.get("cuenta") or ""})
+
+
+@app.post("/api/productos/<ident>/movimientos/csv/importar")
+def api_movs_csv_importar(ident):
+    """Anota el CSV en el producto. Todo o nada: si algo va mal, `cambia()` no guarda."""
+    datos_req = request.get_json(silent=True) or {}
+    filas, errores = movcsv.lee(datos_req.get("texto"))
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]]), 400
+    modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
+    avisos, informe = [], {}
+
+    def fn(cfg):
+        prod = _prod_o_error(cfg, ident)
+        previos = len([m for m in cfg.get("movimientos", []) if m.get("producto") == ident])
+        hechos, fallos = _aplica_movs_csv(cfg, prod, filas, modo, avisos)
+        informe.update({"anadidos": len(hechos), "fallos": fallos,
+                        "borrados": previos if modo == "sustituir" else 0})
+        return None
+    respuesta = cambia(fn, avisos)
+    if isinstance(respuesta, tuple):        # demo o error de validación: tal cual
+        return respuesta
+    cuerpo = respuesta.get_json() or {}
+    return jsonify(ok=True, informe=informe, avisos=cuerpo.get("avisos", []))
 
 
 @app.post("/api/empezar")

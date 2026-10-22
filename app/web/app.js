@@ -1825,6 +1825,7 @@
         <div class="segm" id="segRangoFondo"></div>
         ${hayVL ? '<div class="sep"></div><div class="segm" id="segSerie"></div>' : ""}
         ${puedeMov ? '<button class="btn prim" id="btnMovFicha" title="Abre el formulario de siempre con este producto ya elegido">+ Anotar movimiento</button>' : ""}
+        ${puedeMov ? '<button class="btn" id="btnMovCsv" title="Carga los movimientos de este producto desde un CSV, sin tocar los de los demás">Importar movimientos (CSV)</button>' : ""}
         ${puedeAct ? '<button class="btn" id="btnActPrecio" title="Baja solo el precio de este producto, sin tocar los demás">↻ Actualizar precio</button>' : ""}
       </header>
       ${p.papel ? `<div class="papel">${esc(p.papel)}</div>` : ""}
@@ -1841,6 +1842,13 @@
     const bMov = $("#btnMovFicha");
     if (bMov) bMov.onclick = () => {
       if (window.Editor && window.Editor.movimiento) window.Editor.movimiento(p.id);
+    };
+
+    // Movimientos de ESTE producto desde un CSV. El modal vive en editor.js (es el
+    // que tiene el patrón de modales); aquí solo se abre con el producto ya elegido.
+    const bCsv = $("#btnMovCsv");
+    if (bCsv) bCsv.onclick = () => {
+      if (window.Editor && window.Editor.movimientosCsv) window.Editor.movimientosCsv(p.id);
     };
 
     // Precio de UN solo producto: lo baja y repinta el panel sin tocar los demás.
