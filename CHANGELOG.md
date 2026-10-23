@@ -15,6 +15,46 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.05 — 23 de octubre de 2026
+
+**Selector de moneda al importar movimientos de un producto desde CSV.** Hasta ahora
+esos importes entraban siempre como euros, así que un extracto en dólares se anotaba mal.
+
+- **Desplegable «Moneda de los movimientos»** en el modal de importación, junto al
+  selector de archivo. Trae las mismas monedas que el formulario de movimientos
+  (EUR, USD, GBP, CHF, JPY, SEK, NOK, DKK, PLN, CZK, CAD, AUD).
+- **Por defecto propone la moneda de la cuenta del producto** (si el producto está en una
+  cuenta en dólares, USD; si es en euros, EUR), y si no, la del producto o EUR.
+- Cada movimiento se guarda con **`monedaOriginal`, `importeOriginal` y `tipoCambio`**,
+  igual que al anotarlo a mano o al importar de Portfolio Performance; el `importe` en
+  euros se calcula **con el cambio del día del movimiento**.
+- **La previsualización enseña los importes en la moneda elegida** —la columna pasa a
+  «Importe (USD)» y el resumen avisa de que son dólares— y **se vuelve a calcular si
+  cambias la moneda** después de subir el archivo.
+- **Si no hay cambio del día, no se importa a ciegas**: esa fila se reporta con
+  «No encuentro el cambio de USD a euros del …» y en «Sustituir» no se borra nada.
+- Una moneda con un código que no son tres letras da un **error claro** y no entra nada.
+- **Sin regresión con EUR**: con euros seleccionados los movimientos quedan exactamente
+  como en V1.04 (sin campos de moneda original), y los movimientos que ya existieran no
+  se tocan.
+- Al **sustituir cambiando de moneda** no hay mezcla: los anteriores se borran y los
+  nuevos entran en la moneda nueva. Sigue afectando **solo a ese producto**.
+
+### Detalle
+
+- No hay matemáticas nuevas: se reutiliza `_importe_en_eur()` (y su `_tc_eur()`), que es
+  la misma ruta que usa el formulario manual y la importación de PP. La moneda viaja en
+  la petición y `_aplica_movs_csv()` la pasa a cada movimiento.
+- `app/movcsv.py` **no cambia**: el formato del CSV sigue sin columna de moneda; la elige
+  el usuario en el modal.
+- El modal pasa a usar el ancho grande (860 px): la tabla de la previsualización lleva
+  seis columnas y la de «Nota» se cortaba.
+- `guarda_movimiento()` redondea los campos extra a 4 decimales (comportamiento previo),
+  así que `tipoCambio` se guarda como `0,8828`; el `importe` en euros se calcula con la
+  precisión completa del cambio.
+
+---
+
 ## V1.04 — 22 de octubre de 2026
 
 **Cargar movimientos desde un CSV para UN producto concreto.** Para cuando el bróker

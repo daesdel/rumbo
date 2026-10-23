@@ -11,6 +11,8 @@ Aquí se prueba lo que de verdad importa: que **solo se toca el producto elegido
 que "sustituir" no se lleva por delante nada más y que si el CSV es una porquería
 no se borra lo que había.
 """
+import datetime as dt
+import json
 import os
 
 import pytest
@@ -344,7 +346,159 @@ def test_importar_anadir_y_luego_sustituir(cliente):
     r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
                      json={"texto": TRES, "modo": "sustituir"})
     assert r.status_code == 200
-    assert r.get_json()["informe"] == {"anadidos": 3, "fallos": [], "borrados": 3}
+    assert r.get_json()["informe"] == {"anadidos": 3, "fallos": [], "borrados": 3, "moneda": "EUR"}
     cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
     assert len(_movs_de(cfg, pid)) == 3
     assert _movs_de(cfg, cliente.otro["id"]) == []
+
+
+# ------------------------------------------------------------------ la moneda
+def _cache_usd(carpeta, valor=0.90, desde="2024-01-01", hasta="2026-12-31"):
+    """USDEUR diario en la caché (0,90 € por dólar): así no se sale a internet."""
+    ruta = os.path.join(carpeta, "cache")
+    os.makedirs(ruta, exist_ok=True)
+    serie, f = {}, dt.date.fromisoformat(desde)
+    fin = dt.date.fromisoformat(hasta)
+    while f <= fin:
+        serie[f.isoformat()] = valor
+        f += dt.timedelta(days=1)
+    with open(os.path.join(ruta, "USDEUR_X.json"), "w", encoding="utf-8") as g:
+        json.dump(serie, g)
+    return serie
+
+
+def _guardado(pid):
+    cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
+    return _movs_de(cfg, pid)
+
+
+def test_sin_moneda_se_asume_euro(cliente):
+    """El que no manda moneda (una app vieja, un script) se comporta como siempre."""
+    pid = cliente.producto["id"]
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar", json={"texto": TRES})
+    assert r.status_code == 200
+    assert r.get_json()["informe"]["moneda"] == "EUR"
+
+
+def test_en_euros_los_campos_de_moneda_quedan_vacios(cliente):
+    """SIN REGRESIÓN: con EUR no se guarda original ni cambio, igual que en V1.04."""
+    pid = cliente.producto["id"]
+    cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                 json={"texto": TRES, "moneda": "EUR"})
+    movs = _guardado(pid)
+    assert len(movs) == 3
+    for m in movs:
+        assert m.get("monedaOriginal") in ("", None)
+        assert m.get("importeOriginal") in ("", None)
+        assert m.get("tipoCambio") in ("", None)
+    assert movs[0]["importe"] == pytest.approx(1000.00, abs=0.01)      # tal cual el CSV
+
+
+def test_importar_en_dolares_guarda_el_original_y_el_cambio(cliente):
+    """En USD: importeOriginal en dólares, importe en euros y tipoCambio del día."""
+    _cache_usd(s.DATOS, 0.90)
+    pid = cliente.producto["id"]
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                     json={"texto": _csv("2026-10-01,compra,10,1000.00,0,0,en dolares"),
+                           "moneda": "USD"})
+    assert r.status_code == 200
+    assert r.get_json()["informe"]["moneda"] == "USD"
+    mov = _guardado(pid)[0]
+    assert mov["monedaOriginal"] == "USD"
+    assert float(mov["importeOriginal"]) == pytest.approx(1000.00, abs=0.01)
+    assert float(mov["importe"]) == pytest.approx(900.00, abs=0.01)  # 1000 USD × 0,90
+    assert float(mov["tipoCambio"]) == pytest.approx(0.90, abs=1e-6)
+
+
+def test_en_dolares_tambien_se_convierte_la_comision(cliente):
+    _cache_usd(s.DATOS, 0.50)
+    pid = cliente.producto["id"]
+    cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                 json={"texto": _csv("2026-10-01,compra,10,1000.00,10,0,comision en dolares"),
+                       "moneda": "USD"})
+    mov = _guardado(pid)[0]
+    assert float(mov["comision"]) == pytest.approx(5.00, abs=0.01)     # 10 USD × 0,50
+    assert float(mov["importe"]) == pytest.approx(500.00, abs=0.01)
+
+
+def test_la_previsualizacion_devuelve_la_moneda_y_los_importes_originales(cliente):
+    _cache_usd(s.DATOS, 0.90)
+    pid = cliente.producto["id"]
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/previsualizar",
+                     json={"texto": TRES, "moneda": "USD"})
+    j = r.get_json()
+    assert j["ok"] and j["moneda"] == "USD" and j["validos"] == 3
+    primera = j["filas"][0]
+    assert primera["monedaOriginal"] == "USD"
+    assert float(primera["importeOriginal"]) == pytest.approx(1000.00, abs=0.01)
+    assert float(primera["importe"]) == pytest.approx(900.00, abs=0.01)
+    # Y no ha tocado nada: sigue siendo un ensayo.
+    assert _guardado(pid) == []
+
+
+def test_una_moneda_invalida_da_un_error_claro(cliente):
+    pid = cliente.producto["id"]
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                     json={"texto": TRES, "moneda": "DOLARES"})
+    assert r.status_code == 400
+    assert "moneda" in r.get_json()["errores"][0].lower()
+    assert _guardado(pid) == []
+
+
+def test_sin_cambio_disponible_no_se_importa_nada(cliente, monkeypatch):
+    """Sin cambio del día no se inventa nada: cada fila se reporta y no entra ninguna."""
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda moneda, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    pid = cliente.producto["id"]
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                     json={"texto": TRES, "moneda": "USD"})
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"]
+    assert j["informe"]["anadidos"] == 0
+    assert len(j["informe"]["fallos"]) == 3
+    assert all("cambio" in f["motivo"] for f in j["informe"]["fallos"])
+    assert _guardado(pid) == []
+
+
+def test_sin_cambio_en_sustituir_tampoco_borra(cliente, monkeypatch):
+    pid = cliente.producto["id"]
+    cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                 json={"texto": TRES, "moneda": "EUR"})
+    antes = [m["id"] for m in _guardado(pid)]
+    assert len(antes) == 3
+    monkeypatch.setattr(s.motor, "serie_cambio", lambda moneda, carpeta: {})
+    monkeypatch.setattr(s.motor, "descargar_serie", lambda *a, **k: {})
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                     json={"texto": TRES, "modo": "sustituir", "moneda": "USD"})
+    assert r.status_code == 400
+    assert "no se ha sustituido nada" in " ".join(r.get_json()["errores"]).lower()
+    assert [m["id"] for m in _guardado(pid)] == antes      # los de euros siguen
+
+
+def test_sustituir_cambiando_de_moneda_no_mezcla(cliente):
+    _cache_usd(s.DATOS, 0.90)
+    pid = cliente.producto["id"]
+    cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                 json={"texto": TRES, "modo": "anadir", "moneda": "EUR"})
+    assert all(m.get("monedaOriginal") in ("", None) for m in _guardado(pid))
+    r = cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                     json={"texto": TRES, "modo": "sustituir", "moneda": "USD"})
+    assert r.get_json()["informe"]["borrados"] == 3
+    movs = _guardado(pid)
+    assert len(movs) == 3
+    assert all(m["monedaOriginal"] == "USD" for m in movs)   # sin mezcla
+    assert all(float(m["tipoCambio"]) == pytest.approx(0.90, abs=1e-6) for m in movs)
+    assert _guardado(cliente.otro["id"]) == []               # el testigo, intacto
+
+
+def test_una_cuenta_en_dolares_no_cambia_el_signo_del_efectivo(cliente):
+    """El saldo de efectivo se mueve en euros: la compra resta el importe ya convertido."""
+    _cache_usd(s.DATOS, 0.90)
+    pid = cliente.producto["id"]
+    cliente.post(f"/api/productos/{pid}/movimientos/csv/importar",
+                 json={"texto": _csv("2026-10-01,compra,10,1000.00,0,0,en dolares"),
+                       "moneda": "USD"})
+    cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
+    ef = almacen.producto_efectivo_de(cfg, cliente.producto["cuenta"])
+    vals = {v["fecha"]: v["valor"] for v in cfg["valoraciones"] if v["producto"] == ef["id"]}
+    assert vals["2026-10-01"] == pytest.approx(-900.00, abs=0.01)

@@ -1214,13 +1214,32 @@ def _prod_o_error(cfg, ident):
     return prod
 
 
-def _aplica_movs_csv(cfg, prod, filas, modo, avisos):
+def _moneda_csv(datos_req):
+    """La moneda elegida en el modal, ya normalizada. EUR si no viene.
+
+    Acepta cualquier código de tres letras (igual que el formulario de movimientos):
+    si no hay cambio para esa moneda, se avisa fila a fila, no se inventa nada.
+    """
+    crudo = str(datos_req.get("moneda") or "EUR").strip()
+    if crudo in ("GBp", "GBX"):
+        return crudo
+    mon = crudo.upper()
+    if not re.fullmatch(r"[A-Z]{3}", mon):
+        raise almacen.ErrorValidacion([
+            f"La moneda «{crudo}» no es válida: usa un código de tres letras, como EUR o USD."])
+    return mon
+
+
+def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR"):
     """Anota en `prod` los movimientos del CSV. **Solo toca los de ese producto.**
 
     - `modo="anadir"`: los añade a los que ya hay.
     - `modo="sustituir"`: borra antes los de ESTE producto (nunca los de otros).
       Si al final no ha entrado ninguno, lanza: `cambia()` entonces NO guarda, así
       que en disco siguen estando los antiguos (no se pierde nada).
+    - `moneda`: en qué moneda vienen los importes del CSV. Se pasa por
+      `_importe_en_eur()`, que convierte a euros con el cambio del día y deja
+      `importeOriginal`, `monedaOriginal` y `tipoCambio` como en el formulario manual.
 
     Devuelve `(hechos, fallos)`, con `fallos` como `[{"linea", "motivo"}]`.
     """
@@ -1255,7 +1274,7 @@ def _aplica_movs_csv(cfg, prod, filas, modo, avisos):
         datos = {"producto": pid, "cuenta": cid, "fecha": f["fecha"], "tipo": f["tipo"],
                  "unidades": f["unidades"], "importe": f["importe"],
                  "comision": f["comision"], "impuestos": f["impuestos"],
-                 "nota": f["nota"], "moneda": "EUR"}
+                 "nota": f["nota"], "moneda": moneda}
         try:
             mov = almacen.guarda_movimiento(cfg, _importe_en_eur(datos))
         except almacen.ErrorValidacion as e:
@@ -1299,14 +1318,16 @@ def api_movs_csv_previsualizar(ident):
         return jsonify(ok=False, errores=[errores[0]["motivo"]])
     cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
     try:
+        moneda = _moneda_csv(datos_req)
         prod = _prod_o_error(cfg, ident)
         modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
         ensayo = copy.deepcopy(cfg)
         ensayo_prod = almacen.producto(ensayo, ident)
-        hechos, fallos = _aplica_movs_csv(ensayo, ensayo_prod, filas, modo, [])
+        hechos, fallos = _aplica_movs_csv(ensayo, ensayo_prod, filas, modo, [], moneda)
     except almacen.ErrorValidacion as e:
         return jsonify(ok=False, errores=e.errores)
-    return jsonify(ok=True, validos=len(hechos), errores_totales=len(errores) + len(fallos),
+    return jsonify(ok=True, moneda=moneda, validos=len(hechos),
+                   errores_totales=len(errores) + len(fallos),
                    filas=hechos, errores=errores + fallos,
                    existentes=len([m for m in cfg.get("movimientos", [])
                                    if m.get("producto") == ident]),
@@ -1321,14 +1342,18 @@ def api_movs_csv_importar(ident):
     filas, errores = movcsv.lee(datos_req.get("texto"))
     if not filas and errores and errores[0]["linea"] == 1:
         return jsonify(ok=False, errores=[errores[0]["motivo"]]), 400
+    try:
+        moneda = _moneda_csv(datos_req)
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores), 400
     modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
     avisos, informe = [], {}
 
     def fn(cfg):
         prod = _prod_o_error(cfg, ident)
         previos = len([m for m in cfg.get("movimientos", []) if m.get("producto") == ident])
-        hechos, fallos = _aplica_movs_csv(cfg, prod, filas, modo, avisos)
-        informe.update({"anadidos": len(hechos), "fallos": fallos,
+        hechos, fallos = _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda)
+        informe.update({"anadidos": len(hechos), "fallos": fallos, "moneda": moneda,
                         "borrados": previos if modo == "sustituir" else 0})
         return None
     respuesta = cambia(fn, avisos)
