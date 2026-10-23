@@ -15,6 +15,56 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.06 — 23 de octubre de 2026
+
+**Cuatro recuadros de variación del patrimonio en la vista Patrimonio, con su gráfica
+vinculada.** Arriba a la derecha, al lado de la cifra grande y debajo de los filtros.
+
+- **Cuatro ventanas**: **Última sesión** (no «24h»: un lunes serían 72 horas), **7 días**,
+  **30 días** y **Mes actual** (desde el día 1; el día 1 marca 0).
+- Cada recuadro enseña **variación en euros y en porcentaje**, con signo, en verde si
+  sube, rojo si baja y **gris con `0,00 €`** si no cambia. El porcentaje sale `—` cuando
+  la base es 0 y no se puede dividir.
+- **Gráfica debajo**, con la evolución del periodo del recuadro elegido. **Activo por
+  defecto: 30 días**, que es la ventana más equilibrada.
+- El recuadro activo se distingue con **borde y fondo** (y `aria-pressed`).
+- **Respeta los filtros**: propietario (Total / David / Gina / Compartido) y los **dos**
+  selectores de moneda — el que **filtra** productos (Global / EUR / USD) y el que
+  **convierte** la visualización (€ / $).
+- **Sin datos suficientes** (por ejemplo una cartera de tres días con «30 días»
+  seleccionado): el recuadro enseña **`—`** y la gráfica «Sin datos suficientes para este
+  periodo». No se inventa un cero.
+- **Responsive**: en fila en escritorio, **2×2 en móvil** (375 px); si la columna derecha
+  no cabe (menos de 1180 px) el bloque baja debajo de la cifra grande.
+
+### Detalle
+
+- Los recuadros **no calculan patrimonio**: leen `m.serie`, la misma serie que dibuja el
+  gráfico grande, que ya viene filtrada por propietario y convertida a la divisa de
+  visualización **con el cambio de cada día** (`convSerie` → `fxEn(i)` desde `D.fxSerie`).
+  Solo se restan dos puntos, indexando **por fecha natural** en `D.fechas`.
+- **Gráfica pequeña nueva, no reutilizada**: acoplar el zoom del gráfico grande al
+  recuadro habría cambiado su comportamiento. Cada uno tiene su estado (`estado.varRango`
+  frente a `estado.rango`), así que tocar uno no toca el otro.
+- Se dibuja con el motor del proyecto (`graficos.js`, `G.lineaConEventos`), sin
+  dependencias nuevas.
+- **Cero desplazamiento** de lo que ya había: el bloque va en la columna derecha del hero,
+  en espacio que estaba vacío, y la gráfica se ajustó a **110 px** para no hacer crecer
+  esa fila (medido: los KPIs quedan en la misma `y` con el bloque y sin él).
+- **Ojo con los dos selectores de moneda**: `Global/EUR/USD` **filtra qué productos
+  entran**; `€/$` **convierte la visualización**. Los recuadros obedecen a los dos.
+
+### Por qué en dólares el signo puede cambiar (comprobado, no es un fallo)
+
+En la ventana de 30 días del 23-sep al 23-oct-2026: la cartera ganó **+1.000,36 €
+(+1,42 %)**, pero el euro cayó **−2,17 %** frente al dólar, así que en dólares el
+resultado es **−636,17 $ (−0,79 %)**: `(1 + 0,0142) × (1 − 0,0217) ≈ 0,992`. La serie se
+convierte **punto a punto con el cambio de su día**, no con el de hoy; si se convirtiera
+con el de hoy saldría +1.120,35 $, con el mismo signo que en euros. Un movimiento
+concreto (un dividendo, una compra) sí lleva el cambio de su fecha.
+
+---
+
 ## V1.05 — 23 de octubre de 2026
 
 **Selector de moneda al importar movimientos de un producto desde CSV.** Hasta ahora

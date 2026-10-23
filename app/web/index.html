@@ -78,6 +78,32 @@ code{background:var(--sup2);padding:1px 6px;border-radius:5px;font-size:.9em}
 .hEtq{color:var(--tinta3);font-size:12.5px;text-transform:uppercase;letter-spacing:.09em;font-weight:600}
 .hCifra{font-size:clamp(44px,7.2vw,76px);font-weight:700;letter-spacing:-.035em;line-height:1;margin:8px 0 10px;font-variant-numeric:tabular-nums}
 .hSub{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;color:var(--tinta2);font-size:14.5px}
+/* Hero a dos columnas: a la izquierda las cifras; a la derecha, la variación por
+   periodos y la evolución del periodo elegido. Así no se empuja hacia abajo nada
+   de lo que ya había (KPIs ni el gráfico grande). Si no cabe, se apilan. */
+.heroFila{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:26px;align-items:start}
+.heroDatos{min-width:0}
+.heroFila .hCifra{font-size:clamp(40px,5.4vw,72px)}
+.varBlock{min-width:0}
+.varBoxes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.varBox{display:flex;flex-direction:column;gap:2px;padding:9px 11px;min-width:0;
+  border:1px solid var(--borde);border-radius:12px;background:var(--sup);
+  font:inherit;color:inherit;text-align:left;cursor:pointer;transition:.12s}
+.varBox:hover{background:var(--sup2);border-color:var(--tinta3)}
+.varBox.activo{background:var(--sup2);border-color:var(--s1);box-shadow:inset 0 0 0 1px var(--s1)}
+.varBox .vEtq{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;font-weight:600;
+  color:var(--tinta3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.varBox .vEur{font-size:14.5px;font-weight:700;font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.varBox .vPct{font-size:12px;font-variant-numeric:tabular-nums;color:var(--tinta3)}
+.varBox.sube .vEur,.varBox.sube .vPct{color:var(--bien)}
+.varBox.baja .vEur,.varBox.baja .vPct{color:var(--mal)}
+.varGraf{margin-top:8px}
+@media(max-width:1180px){
+  .heroFila{grid-template-columns:1fr;gap:4px}
+  .varBlock{margin-top:18px}
+}
+@media(max-width:640px){.varBoxes{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .pill{
   display:inline-flex;align-items:center;gap:7px;border:1px solid var(--borde);
   background:var(--sup);border-radius:999px;padding:5px 12px;font-size:12.5px;color:var(--tinta2);
@@ -718,14 +744,22 @@ body.video .tarjeta{padding:22px 24px}
 <!-- ==================================================== PATRIMONIO -->
 <div class="panel" id="tab-patrimonio" role="tabpanel">
 
-  <section class="hero">
-    <div class="hEtq" id="heroEtq">Patrimonio neto</div>
-    <div class="hCifra" id="heroCifra">—</div>
-    <div class="hSub" id="heroSub"></div>
-    <div class="prog" id="progEnv" hidden>
-      <div class="progBarra"><div class="progRelleno" id="progRelleno" style="width:0"></div></div>
-      <div class="progPie"><span id="progIzq"></span><span id="progDer"></span></div>
+  <section class="hero heroFila">
+    <div class="heroDatos">
+      <div class="hEtq" id="heroEtq">Patrimonio neto</div>
+      <div class="hCifra" id="heroCifra">—</div>
+      <div class="hSub" id="heroSub"></div>
+      <div class="prog" id="progEnv" hidden>
+        <div class="progBarra"><div class="progRelleno" id="progRelleno" style="width:0"></div></div>
+        <div class="progPie"><span id="progIzq"></span><span id="progDer"></span></div>
+      </div>
     </div>
+    <!-- Variación por ventanas + la evolución de la ventana elegida. Va aquí, a la
+         derecha del hero, para no empujar hacia abajo el gráfico grande. -->
+    <section class="varBlock" id="varBlock" aria-label="Variación del patrimonio por periodo">
+      <div class="varBoxes" id="varBoxes"></div>
+      <div class="envGraf varGraf" id="varGraf"></div>
+    </section>
   </section>
 
   <p class="kpisNota subt" id="kpisNota"></p>

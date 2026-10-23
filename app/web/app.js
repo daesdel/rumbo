@@ -57,6 +57,7 @@
   const estado = {
     tab: "patrimonio",
     rango: "todo",
+    varRango: "30",                 // ventana activa del bloque de variación (30 días)
     rangoFondo: "todo",
     rangoAnual: "todo",
     rangoCompara: "todo",
@@ -1303,6 +1304,7 @@
     pintaFiltros();
     pintaHero(mVis, mTodo);
     pintaKPIs(mVis);
+    pintaVariaciones(mVis);
     pintaPrincipal(mVis);
     pintaChips();
     pintaCuentas();
@@ -1324,6 +1326,110 @@
       visibles().filter(p => (p.aportaciones || []).some(a => a.importe))
         .map(p => ({ id: p.id, et: p.corto || p.nombre }))),
       estado.tablaFiltro, id => { estado.tablaFiltro = id; pintaTabla(); });
+  }
+
+  /* ----------------------------------------------------------------
+     Variación del patrimonio por ventanas (bloque a la derecha del hero)
+     ----------------------------------------------------------------
+     Los cuatro recuadros leen SIEMPRE de la serie del motor (`m.serie`), la misma
+     que dibuja el gráfico grande, que ya viene filtrada por propietario y
+     convertida a la moneda elegida. Aquí sólo se restan dos puntos de esa serie:
+     ningún cálculo de patrimonio se rehace por nuestra cuenta. */
+  const VAR_RANGOS = [
+    { id: "sesion", et: "Última sesión" },
+    { id: "7", et: "7 días", dias: 7 },
+    { id: "30", et: "30 días", dias: 30 },
+    { id: "mes", et: "Mes actual" },
+  ];
+
+  /** La fecha `iso` menos `n` días naturales. */
+  const restaDias = (iso, n) =>
+    new Date(Date.parse(iso + "T00:00:00Z") - n * 86400000).toISOString().slice(0, 10);
+
+  /** Último índice de `D.fechas` con fecha <= `iso` (búsqueda binaria; -1 si no hay). */
+  function idxHasta(iso) {
+    let lo = 0, hi = D.fechas.length - 1, r = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (D.fechas[mid] <= iso) { r = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return r;
+  }
+
+  /** Índice donde arranca la ventana de `r`. `null` si no hay histórico suficiente;
+      `n-1` es una ventana de un solo día (variación 0: el caso «es día 1»). */
+  function inicioVentana(r) {
+    const n = D.fechas.length;
+    if (n < 2) return null;
+    const ultima = D.fechas[n - 1];
+    if (r.id === "sesion") return n - 2;
+    const i = r.id === "mes" ? idxHasta(ultima.slice(0, 8) + "01")
+                             : idxHasta(restaDias(ultima, r.dias));
+    if (i < 0 || i > n - 1) return null;
+    return i;                       // i === n-1 -> mismo día: variación 0, no «sin datos»
+  }
+
+  /** {sinDatos} o {i0, dif, pct, desde, hasta} para una ventana. */
+  function datosVar(r, m) {
+    const n = D.fechas.length;
+    const i0 = inicioVentana(r);
+    if (i0 === null || !m || !m.serie) return { sinDatos: true };
+    const fin = m.serie[n - 1], ini = m.serie[i0];
+    if (fin == null || ini == null) return { sinDatos: true };
+    const dif = fin - ini;
+    return { sinDatos: false, i0, dif, pct: ini > 0 ? dif / ini : null,
+             desde: D.fechas[i0], hasta: D.fechas[n - 1] };
+  }
+
+  /** Un recuadro. El color lo pone la clase (`sube`/`baja`), no el texto. */
+  function cajaVar(r, m) {
+    const d = datosVar(r, m);
+    const clases = ["varBox"];
+    if (estado.varRango === r.id) clases.push("activo");
+    if (!d.sinDatos) {
+      if (d.dif > 0.005) clases.push("sube");
+      else if (d.dif < -0.005) clases.push("baja");
+    }
+    // Un cero exacto se enseña sin signo («0,00 €», no «+0,00 €»).
+    const cero = !d.sinDatos && Math.abs(d.dif) < 0.005;
+    const eurTxt = d.sinDatos ? "—" : (cero ? G.fmtEur(0) : G.fmtEurSigno(d.dif));
+    const pctTxt = d.sinDatos ? "" : (d.pct == null ? "—" : G.fmtPctSigno(d.pct, 2));
+    const titulo = d.sinDatos
+      ? `${r.et}: todavía no hay histórico suficiente para este periodo`
+      : `${r.et}: del ${d.desde} al ${d.hasta}`;
+    return `<button type="button" class="${clases.join(" ")}" data-var="${r.id}"
+      title="${esc(titulo)}" aria-pressed="${estado.varRango === r.id}">
+      <span class="vEtq">${esc(r.et)}</span>
+      <span class="vEur">${eurTxt}</span>
+      <span class="vPct">${pctTxt}</span></button>`;
+  }
+
+  /** El gráfico del periodo elegido (mismo motor de dibujo que el gráfico grande). */
+  function pintaVarGraf(m) {
+    const cont = $("#varGraf");
+    if (!cont) return;
+    const r = VAR_RANGOS.find(x => x.id === estado.varRango) || VAR_RANGOS[2];
+    const i0 = inicioVentana(r);
+    if (i0 === null || !m || !m.serie || D.fechas.length < 2) {
+      cont.innerHTML = '<p class="vacio">Sin datos suficientes para este periodo.</p>';
+      return;
+    }
+    G.lineaConEventos(cont, {
+      fechas: D.fechas.slice(i0), valores: m.serie.slice(i0),
+      color: G.css("--s1"), alto: 110, desdeCero: false,
+    });
+  }
+
+  let mVar = null;                  // la última métrica filtrada, para repintar sin recalcular
+  function pintaVariaciones(m) {
+    if (m) mVar = m;
+    const cont = $("#varBoxes");
+    if (!cont || !mVar || !D.fechas || !D.fechas.length) return;
+    cont.innerHTML = VAR_RANGOS.map(r => cajaVar(r, mVar)).join("");
+    cont.querySelectorAll("[data-var]").forEach(b => {
+      b.onclick = () => { estado.varRango = b.dataset.var; pintaVariaciones(); };
+    });
+    pintaVarGraf(mVar);
   }
 
   /* ================================================================
