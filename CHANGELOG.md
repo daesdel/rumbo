@@ -15,6 +15,44 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.10 — 28 de octubre de 2026
+
+**Arreglado el saldo de las cuentas.** Con dos importaciones que se solapaban, el saldo
+podía quedarse con un déficit que no existía (en una cuenta real llegó a marcar
+**−800,69 €** cuando lo correcto era **0,00 €**).
+
+### Qué pasaba
+
+`_refresca_cuenta()` arreglaba **un solo día**, y lo hacía **heredando el valor del día
+anterior**: `valor = valor_previo + neto_del_día`. Cuando el día netea 0 —una compra y un
+depósito del mismo importe— el resultado es *una copia del valor anterior*, así que un
+valor equivocado **se quedaba pegado para siempre**. Al importar primero las compras y
+después los depósitos (o al revés), cada importación refrescaba los días con **su** neto y
+la última en pasar mandaba. No había nada que rehiciera la serie completa.
+
+### Qué hace ahora
+
+- **`rehacer_saldo_cuenta()`**: borra las valoraciones **calculadas** (`auto`) de la cuenta
+  y las **rehace desde el primer movimiento, en orden y empezando en 0**. También **rellena
+  los huecos**: días con movimientos que no tenían valoración.
+- **Los saldos anotados a mano no se tocan nunca**: son **anclas**. Donde hay uno, la serie
+  se fija a él y no se pinta nada encima; y los días **anteriores** a un saldo a mano
+  tampoco se pintan, porque ese saldo ya recoge ese dinero (la misma regla de siempre).
+- **Se recalcula entero al final de cada importación** que mueva efectivo: la de una
+  **cuenta**, la de un **producto con cuenta** y la de **Portfolio Performance**. Así dos
+  importaciones seguidas ya no pueden pisarse.
+- **Botón «↻ Recalcular saldo»** en la ficha de la cuenta, para arreglar las que ya
+  quedaron mal sin tocar nada a mano. Pide confirmación y dice cuántos días ha reescrito.
+
+### Sobre los datos reales
+
+Sobre la cartera de producción, el recálculo deja la cuenta afectada en **0,00 €**, con el
+**13,57 €** que sí estaba dentro entre junio y octubre, y **rellena los 6 días** que se
+habían quedado sin valoración. Para aplicarlo en producción: **Mis datos → Cuentas →
+REVOLUT GINA EUROS → ↻ Recalcular saldo**.
+
+---
+
 ## V1.09 — 28 de octubre de 2026
 
 **Importar movimientos CSV en una cuenta.** Lo mismo que ya se hacía con un producto,

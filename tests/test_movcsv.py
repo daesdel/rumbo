@@ -859,3 +859,56 @@ def test_ruta_previsualizar_en_una_cuenta_no_toca_nada(cliente_cuenta):
     assert "movimientos de producto" in j["errores"][0]["motivo"]
     cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
     assert [m for m in cfg["movimientos"] if m.get("cuenta") == cid] == []
+
+
+# ------------------------------------------- rehacer la serie de saldo de una cuenta
+def test_rehacer_saldo_rellena_los_huecos_y_pone_cada_dia_bien():
+    cfg, cta = _cartera_con_cuenta()
+    cid = cta["id"]
+    textos = _csv("2026-10-01,deposito,,100.00,0,0,a",
+                  "2026-10-02,retirada,,40.00,0,0,b",
+                  "2026-10-03,interes,,5.00,0,0,c")
+    filas, _ = movcsv.lee(textos)
+    s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    ef = almacen.producto_efectivo_de(cfg, cid)
+    vals = {v["fecha"]: round(float(v["valor"]), 2) for v in cfg["valoraciones"]
+            if v["producto"] == ef["id"]}
+    assert vals == {"2026-10-01": 100.00, "2026-10-02": 60.00, "2026-10-03": 65.00}
+
+
+def test_rehacer_saldo_arregla_un_valor_heredado():
+    """El caso del bug: un día con neto 0 hereda el valor anterior y se queda pegado."""
+    cfg, cta = _cartera_con_cuenta()
+    cid = cta["id"]
+    ef = almacen.crea_producto_efectivo(cfg, cid)
+    # valoración calculada falsa, como las que dejó el import pisado
+    v = almacen.guarda_valoracion(cfg, {"producto": ef["id"], "fecha": "2026-10-02",
+                                        "valor": -800.69})
+    v["auto"] = True
+    filas, _ = movcsv.lee(_csv("2026-10-01,deposito,,50.00,0,0,a",
+                               "2026-10-02,retirada,,50.00,0,0,b"))
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert fallos == []
+    vals = {x["fecha"]: round(float(x["valor"]), 2) for x in cfg["valoraciones"]
+            if x["producto"] == ef["id"]}
+    assert vals == {"2026-10-01": 50.00, "2026-10-02": 0.00}     # ya no hay 800,69
+
+
+def test_rehacer_saldo_no_toca_los_saldos_anotados_a_mano():
+    cfg, cta = _cartera_con_cuenta()
+    cid = cta["id"]
+    ef = almacen.crea_producto_efectivo(cfg, cid)
+    manual = almacen.guarda_valoracion(cfg, {"producto": ef["id"], "fecha": "2026-10-02",
+                                             "valor": 1234.56})
+    manual["auto"] = False
+    antes = dict(manual)
+    filas, _ = movcsv.lee(_csv("2026-10-01,deposito,,50.00,0,0,a",
+                               "2026-10-03,retirada,,10.00,0,0,b"))
+    s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    sigue = next(x for x in cfg["valoraciones"] if x["id"] == manual["id"])
+    assert float(sigue["valor"]) == 1234.56            # intacto
+    assert not sigue.get("auto")
+    vals = {x["fecha"]: round(float(x["valor"]), 2) for x in cfg["valoraciones"]
+            if x["producto"] == ef["id"]}
+    assert "2026-10-01" not in vals                    # anterior al saldo a mano: no se pinta
+    assert vals["2026-10-03"] == 1224.56               # después: sube y baja desde él

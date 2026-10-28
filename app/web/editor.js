@@ -648,6 +648,9 @@
         <h2>${esc(c.nombre)}</h2>
         <span class="subt">${esc(etqTipoCuenta(c))}${c.entidad ? " · " + esc(c.entidad) : ""} · ${esc(mon)}${
           pr ? " · " + esc(pr.nombre) : ""}</span><span class="sp"></span>
+        <button class="btn" data-acc="recalcularSaldo" data-id="${esc(c.id)}"
+          title="Vuelve a calcular la serie de saldo desde cero con sus movimientos. No toca los saldos que hayas anotado a mano."
+          ${ms.length ? "" : "disabled"}>↻ Recalcular saldo</button>
         <button class="btn" data-acc="movsCuenta" data-id="${esc(c.id)}">Ver en Movimientos</button>
         <button class="btn" data-acc="nuevoMovCuenta" data-id="${esc(c.id)}">+ Movimiento</button>
         <button class="btn prim" data-acc="nuevoValorCuenta" data-id="${esc(p ? p.id : "")}"
@@ -2210,6 +2213,25 @@
     nuevaCuenta: soloPropio(() => formCuenta(null)),
     editarCuenta: soloPropio(id => formCuenta(cuentaDe(id))),
     importarCsvCuenta: soloPropio(id => movimientosCsvCuenta(id)),
+    /** Rehace la serie de saldo de una cuenta desde cero (arregla valores heredados
+        de imports antiguos). Solo borra las valoraciones calculadas. */
+    recalcularSaldo: soloPropio(async id => {
+      const c = cuentaDe(id);
+      if (!c) return;
+      if (!confirm(`Se volverá a calcular el saldo de «${c.nombre}» desde cero con sus `
+                   + "movimientos. Los saldos que hayas anotado a mano no se tocan. "
+                   + "¿Continuar?")) return;
+      try {
+        const j = await api("POST", `api/cuentas/${encodeURIComponent(id)}/recalcular-saldo`, {});
+        avisa([`Saldo de «${c.nombre}» recalculado: ${j.escritas} día`
+               + (j.escritas === 1 ? "" : "s") + " reescritos."]);
+        await carga();
+        pinta();
+      } catch (x) {
+        avisa([`No he podido recalcular el saldo: ${x.message}`]);
+        pinta();
+      }
+    }),
     cierraAviso,
     cierraTodosAvisos: limpiaAvisos,
     editarMov: soloPropio(id => formMovimiento(E.cfg.movimientos.find(m => m.id === id))),

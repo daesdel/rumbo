@@ -26,6 +26,7 @@ from werkzeug.serving import make_server
 
 import math
 import copy
+from collections import defaultdict
 
 from . import almacen, buscar, exportar, importar, motor, movcsv, plantilla, seguro
 
@@ -1128,6 +1129,54 @@ def _refresca_cuenta(cfg, cid, f, avisos=None):
     return True
 
 
+def rehacer_saldo_cuenta(cfg, cid, avisos=None):
+    """Rehace DESDE CERO la serie de saldo automática de una cuenta.
+
+    - Borra solo las valoraciones **calculadas** (`auto`). Las anotadas a mano se
+      quedan y mandan: donde hay una, la serie se ancla a ella y no se pinta nada.
+    - Recorre **todos** los días con movimientos de dinero, en orden, empezando en
+      0 (el primer día vale lo que muevan sus movimientos), así que también rellena
+      los días que no tenían valoración.
+    - Los días anteriores a un saldo anotado a mano no se pintan: ese saldo ya
+      recoge ese dinero y duplicarlo sería mentir.
+
+    Hace falta porque `_refresca_cuenta` arregla **un día** heredando el valor del
+    anterior: con un día cuyo neto es 0 copia el valor de antes, de modo que un
+    error se queda pegado para siempre. Devuelve cuántas valoraciones ha escrito.
+    """
+    p = almacen.producto_efectivo_de(cfg, cid)
+    if not p:
+        return 0
+    vals = [v for v in cfg.get("valoraciones", []) if v.get("producto") == p["id"]]
+    for v in [x for x in vals if x.get("auto")]:
+        almacen.borra_valoracion(cfg, v["id"])
+    manuales = sorted((x for x in vals if not x.get("auto")), key=lambda x: x["fecha"])
+
+    por_dia = defaultdict(float)
+    for m in cfg.get("movimientos", []):
+        if not motor.efecto_de(m, cid):
+            continue
+        x = _importe_en_producto(cfg, m, cid)
+        if x is None:
+            continue                       # sin cambio: ese día no se inventa
+        por_dia[m.get("fecha")] += motor.efecto_de(m, cid) * x
+    manual_dia = {v["fecha"]: float(v["valor"]) for v in manuales}
+
+    saldo, escritas = 0.0, 0
+    for f in sorted(set(por_dia) | set(manual_dia)):
+        if f in manual_dia:
+            saldo = round(manual_dia[f], 2)     # el saldo real del banco manda
+            continue
+        saldo = round(saldo + por_dia.get(f, 0.0), 2)
+        if any(v["fecha"] > f for v in manuales):
+            continue                            # ya lo recoge un saldo a mano posterior
+        val = almacen.guarda_valoracion(cfg, {"producto": p["id"], "fecha": f,
+                                              "valor": saldo})
+        val["auto"] = True
+        escritas += 1
+    return escritas
+
+
 def refresca_efectivo(cfg, mov, avisos=None):
     """Recalcula el saldo del día en TODAS las cuentas que mueve este movimiento
     (su `cuenta` y su `contrapartida`). Devuelve True si ha tocado algún saldo."""
@@ -1307,10 +1356,13 @@ def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR", estricto=True
                 "Ningún movimiento del CSV se puede anotar, así que no se ha sustituido "
                 "nada: los movimientos que tenías siguen como estaban."])
 
-    # Se rehacen los días afectados: un día que se queda sin movimientos pierde su
-    # saldo automático (lo hace _refresca_cuenta al no encontrar ninguno).
+    # Se rehacen los días afectados (un día que se queda sin movimientos pierde su
+    # saldo) y, al final, la serie entera de cada cuenta tocada: así no queda ningún
+    # hueco ni un valor heredado de antes.
     for c, f in sorted(dias):
         _refresca_cuenta(cfg, c, f, avisos)
+    for c in sorted({c for c, _ in dias}):
+        rehacer_saldo_cuenta(cfg, c, avisos)
     return hechos, fallos
 
 
@@ -1355,6 +1407,9 @@ def _aplica_movs_cuenta(cfg, cta, filas, avisos, moneda="EUR"):
             validas.append(f)
 
     hechos, mas_fallos = _anota_filas(cfg, validas, {"cuenta": cid}, avisos, dias, moneda)
+    # La serie entera de la cuenta, desde cero: un import no debe heredar valores
+    # viejos ni dejar huecos.
+    rehacer_saldo_cuenta(cfg, cid, avisos)
     return hechos, sorted(fallos + mas_fallos, key=lambda x: x["linea"])
 
 
@@ -1396,6 +1451,23 @@ def api_cuenta_csv_previsualizar(ident):
                                    if m.get("cuenta") == ident and not m.get("producto")]),
                    producto={"id": cta["id"], "nombre": cta.get("nombre") or cta["id"],
                              "cuenta": cta["id"]})
+
+
+@app.post("/api/cuentas/<ident>/recalcular-saldo")
+def api_cuenta_recalcular_saldo(ident):
+    """Rehace desde cero la serie de saldo de una cuenta. Sirve para arreglar las
+    que quedaron con un valor heredado de imports antiguos."""
+    informe = {}
+
+    def fn(cfg):
+        if not almacen.cuenta(cfg, ident):
+            raise almacen.ErrorValidacion([f"La cuenta «{ident}» no existe."])
+        informe["escritas"] = rehacer_saldo_cuenta(cfg, ident)
+        return None
+    respuesta = cambia(fn)
+    if isinstance(respuesta, tuple):
+        return respuesta
+    return jsonify(ok=True, escritas=informe.get("escritas", 0))
 
 
 @app.post("/api/cuentas/<ident>/movimientos/csv/importar")
@@ -1605,6 +1677,10 @@ def api_importar_confirmar():
 
     def fn(cfg):
         informe.update(importar.aplicar(cfg, plan, excluir=excluir, tipos=tipos, vinculos=vinculos))
+        # El importador de PP anota movimientos que mueven cuentas: sus saldos se
+        # rehacen enteros para que no queden valores heredados.
+        for cid in sorted({m.get("cuenta") for m in cfg.get("movimientos", [])} - {None, ""}):
+            rehacer_saldo_cuenta(cfg, cid)
         return None
     respuesta = cambia(fn)
     if isinstance(respuesta, tuple):
