@@ -183,13 +183,25 @@ def _limpia_cabecera(nombres):
     return [_plano(n) for n in nombres]
 
 
-def plantilla():
-    """CSV de ejemplo, para el botón «Descargar plantilla»."""
-    filas = [
-        list(COLUMNAS),
-        ["2025-01-15", "compra", "10", "1000.00", "0", "0", "Aporte inicial"],
-        ["2025-06-30", "dividendo", "", "25.50", "0", "5.10", "Dividendo semestral"],
-    ]
+def plantilla(para="producto"):
+    """CSV de ejemplo, para el botón «Descargar plantilla».
+
+    Con `para="cuenta"` los ejemplos son de cuenta (depósito, interés): en una
+    cuenta una compra o una venta se rechazan.
+    """
+    if para == "cuenta":
+        filas = [
+            list(COLUMNAS),
+            ["2025-01-15", "deposito", "", "1000.00", "0", "0", "Entrada de dinero"],
+            ["2025-02-28", "interes", "", "12.35", "0", "1.85", "Intereses del mes"],
+            ["2025-03-10", "retirada", "", "200.00", "0", "0", "Salida a mi banco"],
+        ]
+    else:
+        filas = [
+            list(COLUMNAS),
+            ["2025-01-15", "compra", "10", "1000.00", "0", "0", "Aporte inicial"],
+            ["2025-06-30", "dividendo", "", "25.50", "0", "5.10", "Dividendo semestral"],
+        ]
     salida = io.StringIO()
     w = csv.writer(salida, lineterminator="\n")
     w.writerows(filas)

@@ -729,3 +729,133 @@ def test_pp_sin_match_avisa_y_dice_que_trae():
 def test_es_pp_distingue_los_dos_formatos():
     assert movcsv.es_pp(PP) is True
     assert movcsv.es_pp(TRES) is False
+
+
+# --------------------------------------------------- importar en una CUENTA
+def _cartera_con_cuenta():
+    cfg = _cartera()
+    almacen.guarda_cuenta(cfg, {"nombre": "Cuenta Banco", "tipo": "banco", "moneda": "EUR"})
+    cta = next(c for c in cfg["cuentas"] if c["nombre"] == "Cuenta Banco")
+    return cfg, cta
+
+
+def test_la_plantilla_de_cuenta_trae_tipos_de_cuenta():
+    texto = movcsv.plantilla("cuenta")
+    lineas = [l for l in texto.strip().split("\n") if l.strip()]
+    assert lineas[0] == ",".join(movcsv.COLUMNAS)
+    filas, errores = movcsv.lee(texto)
+    assert errores == []
+    assert [f["tipo"] for f in filas] == ["deposito", "interes", "retirada"]
+    assert all(f["unidades"] is None for f in filas)   # una cuenta no tiene unidades
+
+
+def test_una_cuenta_suma_y_resta_en_el_saldo():
+    cfg, cta = _cartera_con_cuenta()
+    texto = _csv("2026-10-01,deposito,,1000.00,0,0,Entrada",
+                 "2026-10-02,retirada,,200.00,0,0,Salida",
+                 "2026-10-03,interes,,12.35,0,1.85,Intereses")
+    filas, errores = movcsv.lee(texto)
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert fallos == [] and len(hechos) == 3
+    assert all(m["cuenta"] == cta["id"] for m in hechos)
+    assert all("producto" not in m for m in hechos)     # no son de producto
+    ef = almacen.producto_efectivo_de(cfg, cta["id"])
+    vals = {v["fecha"]: v["valor"] for v in cfg["valoraciones"] if v["producto"] == ef["id"]}
+    assert vals["2026-10-01"] == pytest.approx(1000.00, abs=0.01)
+    assert vals["2026-10-02"] == pytest.approx(800.00, abs=0.01)
+    assert vals["2026-10-03"] == pytest.approx(812.35, abs=0.01)
+
+
+def test_compra_y_venta_se_rechazan_en_una_cuenta():
+    cfg, cta = _cartera_con_cuenta()
+    filas, _ = movcsv.lee(_csv("2026-10-01,compra,10,1000.00,0,0,Compra",
+                               "2026-10-02,venta,5,500.00,0,0,Venta",
+                               "2026-10-03,deposito,,50.00,0,0,Buena"))
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert len(hechos) == 1 and hechos[0]["tipo"] == "deposito"
+    assert [f["linea"] for f in fallos] == [2, 3]
+    assert "movimientos de producto" in fallos[0]["motivo"]
+    assert "ficha del producto" in fallos[0]["motivo"]
+
+
+def test_transferencia_y_cambio_divisa_se_rechazan_con_su_motivo():
+    cfg, cta = _cartera_con_cuenta()
+    filas, _ = movcsv.lee(_csv("2026-10-01,transferencia,,100.00,0,0,x",
+                               "2026-10-02,cambio_divisa,,100.00,0,0,y"))
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert hechos == [] and len(fallos) == 2
+    assert "contrapartida" in fallos[0]["motivo"]
+
+
+def test_unidades_en_una_cuenta_se_rechazan_con_mensaje_claro():
+    cfg, cta = _cartera_con_cuenta()
+    filas, _ = movcsv.lee(_csv("2026-10-01,deposito,10,1000.00,0,0,con unidades"))
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert hechos == []
+    assert "no tiene unidades" in fallos[0]["motivo"]
+
+
+def test_otros_tipos_no_valen_en_una_cuenta():
+    cfg, cta = _cartera_con_cuenta()
+    filas, _ = movcsv.lee(_csv("2026-10-01,dividendo,,10.00,0,0,div"))
+    hechos, fallos = s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert hechos == []
+    assert "no es un movimiento de cuenta" in fallos[0]["motivo"]
+
+
+def test_importar_en_una_cuenta_no_toca_ningun_producto():
+    cfg, cta = _cartera_con_cuenta()
+    p = almacen.guarda_producto(cfg, {"nombre": "Otro", "tipo": "fondo",
+                                      "fuente": "manual", "moneda": "EUR"})[0]
+    antes = list(cfg["movimientos"])
+    filas, _ = movcsv.lee(_csv("2026-10-01,deposito,,100.00,0,0,x"))
+    s._aplica_movs_cuenta(cfg, cta, filas, [], "EUR")
+    assert [m["id"] for m in antes] == [m["id"] for m in cfg["movimientos"][:len(antes)]]
+    assert not [m for m in cfg["movimientos"] if m.get("producto") == p["id"]]
+
+
+# ------------------------------------------------------- las rutas de cuenta
+@pytest.fixture
+def cliente_cuenta(monkeypatch):
+    cfg, cta = _cartera_con_cuenta()
+    ruta = os.path.join(s.DATOS, "cartera.json")
+    previo = open(ruta, encoding="utf-8").read() if os.path.exists(ruta) else None
+    almacen.guarda(ruta, cfg)
+    monkeypatch.setattr(s, "modo", lambda: "propio")
+    monkeypatch.setattr(s, "recalcula", lambda descargar: {"avisos": []})
+    c = s.app.test_client()
+    c.cuenta_id = cta["id"]
+    yield c
+    if previo is None:
+        os.remove(ruta)
+    else:
+        open(ruta, "w", encoding="utf-8").write(previo)
+
+
+def test_la_plantilla_de_cuenta_se_descarga(cliente_cuenta):
+    r = cliente_cuenta.get("/api/movimientos/plantilla.csv?para=cuenta")
+    assert r.status_code == 200
+    assert "deposito" in r.get_data(as_text=True)
+
+
+def test_ruta_importar_en_una_cuenta(cliente_cuenta):
+    cid = cliente_cuenta.cuenta_id
+    r = cliente_cuenta.post(f"/api/cuentas/{cid}/movimientos/csv/importar",
+                            json={"texto": _csv("2026-10-01,deposito,,100.00,0,0,x")})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["informe"]["anadidos"] == 1
+    cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
+    movs = [m for m in cfg["movimientos"] if m.get("cuenta") == cid]
+    assert len(movs) == 1 and "producto" not in movs[0]
+
+
+def test_ruta_previsualizar_en_una_cuenta_no_toca_nada(cliente_cuenta):
+    cid = cliente_cuenta.cuenta_id
+    r = cliente_cuenta.post(f"/api/cuentas/{cid}/movimientos/csv/previsualizar",
+                            json={"texto": _csv("2026-10-01,compra,10,100,0,0,x",
+                                                "2026-10-02,deposito,,50,0,0,y")})
+    j = r.get_json()
+    assert r.status_code == 200 and j["validos"] == 1 and j["errores_totales"] == 1
+    assert "movimientos de producto" in j["errores"][0]["motivo"]
+    cfg = almacen.carga(os.path.join(s.DATOS, "cartera.json"))
+    assert [m for m in cfg["movimientos"] if m.get("cuenta") == cid] == []

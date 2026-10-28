@@ -599,6 +599,8 @@
         <td style="text-align:left">${ult || '<span class="subt">—</span>'}</td>
         <td class="acc"><button data-acc="verCuenta" data-id="${esc(c.id)}">Abrir ficha</button>
           <button data-acc="movsCuenta" data-id="${esc(c.id)}" title="Ver solo sus movimientos">Movimientos</button>
+          <button data-acc="importarCsvCuenta" data-id="${esc(c.id)}"
+            title="Cargar depósitos, retiradas, intereses… desde un CSV">Importar CSV</button>
           <button data-acc="editarCuenta" data-id="${esc(c.id)}">Editar</button></td></tr>`;
     }).join("");
     return `<section class="tarjeta"><header><h2>Cuentas</h2>
@@ -875,7 +877,8 @@
     // Avisos que no son errores (fechas ambiguas): se leen pero hay que decirlo.
     const avisos = (j.avisos && j.avisos.length)
       ? `<ul class="csvAviso">${j.avisos.map(a => `<li>${esc(a)}</li>`).join("")}</ul>` : "";
-    const ahora = `<p class="ayuda">Ahora mismo este producto tiene ${j.existentes} movimiento${uno(j.existentes)}.</p>`;
+    const que = (est && est.esCuenta) ? "esta cuenta" : "este producto";
+    const ahora = `<p class="ayuda">Ahora mismo ${que} tiene ${j.existentes} movimiento${uno(j.existentes)}.</p>`;
     return caja + resumen + tabla + errores + avisos + ahora;
   }
 
@@ -901,13 +904,30 @@
       <div class="csvCuentaCaja" hidden></div></div>`;
   }
 
-  function cuerpoCsv(p) {
+  function cuerpoCsv(p, esCuenta) {
+    const mon = esCuenta ? ((p.moneda || "EUR").toUpperCase()) : monedaDeCsv(p);
+    const cab = esCuenta
+      ? `<p class="subt">Cuenta: <b>${esc(p.nombre)}</b> · Moneda: <b>${esc(mon)}</b></p>`
+      : `<p class="subt">Producto: <b>${esc(nombre(p))}</b> · Cuenta: <b>${esc(nombreCuentaDe(p))}</b></p>`;
+    const modos = esCuenta
+      ? `<div class="csvModo"><p class="ayuda" style="margin:0">
+           En una cuenta <b>solo se añaden</b> movimientos: sus movimientos vienen de
+           varios sitios (extracto, dividendos cobrados, traspasos) y el saldo puede
+           estar anotado aparte, así que no se borra nada.</p></div>`
+      : `<div class="csvModo">
+        <label><input type="radio" name="modo" value="anadir" checked> Añadir a los movimientos existentes</label>
+        <label><input type="radio" name="modo" value="sustituir"> Sustituir los movimientos existentes</label>
+      </div>`;
+    const ayuda = esCuenta
+      ? `Tipos que valen aquí: <b>deposito, retirada, interes, comision, impuesto</b>.
+         Las compras y ventas son de producto, no de cuenta.`
+      : `Los importes se anotan con el cambio del día del movimiento.`;
     return `<div class="csvCab">
-        <p class="subt">Producto: <b>${esc(nombre(p))}</b> · Cuenta: <b>${esc(nombreCuentaDe(p))}</b></p>
+        ${cab}
         <div class="fila">
           <input type="file" class="csvArchivo" accept=".csv,text/csv">
           <label class="csvMon">Moneda de los movimientos
-            <select class="csvMoneda">${opcionesMoneda(monedaDeCsv(p))}</select>
+            <select class="csvMoneda">${opcionesMoneda(mon)}</select>
           </label>
           <label class="csvMon">Formato de fecha
             <select class="csvFormato">${opcionesFormato()}</select>
@@ -917,13 +937,33 @@
         <p class="ayuda">Columnas: <code>fecha,tipo,unidades,importe,comision,impuestos,nota</code>.
           La fecha vale en <b>AAAA-MM-DD</b> (también con hora detrás) o <b>DD/MM/AAAA</b>
           y <b>MM/DD/AAAA</b>; los números con punto o coma; la cabecera es obligatoria.
-          Los importes se anotan con el cambio del día del movimiento.</p>
+          ${ayuda}</p>
       </div>
       <div class="csvPrev"></div>
-      <div class="csvModo">
-        <label><input type="radio" name="modo" value="anadir" checked> Añadir a los movimientos existentes</label>
-        <label><input type="radio" name="modo" value="sustituir"> Sustituir los movimientos existentes</label>
-      </div>`;
+      ${modos}`;
+  }
+
+  /** Carga movimientos en UNA cuenta desde un CSV (depósitos, retiradas, intereses,
+      comisiones, impuestos). Solo añade y solo toca esa cuenta. */
+  function movimientosCsvCuenta(cid) {
+    const c = cuentaDe(cid);
+    if (!c) { alert("Esa cuenta ya no existe: recarga la página."); return; }
+    const est = { texto: "", previa: null, destino: null, cuenta: null, activos: [],
+                  esCuenta: true };
+    const ruta = `api/cuentas/${encodeURIComponent(cid)}`;
+    const f = abreModal("Importar movimientos en la cuenta (CSV)", cuerpoCsv(c, true),
+                        async (form) => {
+      if (!est.texto) throw new Error("Elige primero un archivo CSV.");
+      if (!est.previa || !est.previa.validos) {
+        throw new Error("No hay ningún movimiento válido que importar.");
+      }
+      await api("POST", `${ruta}/movimientos/csv/importar`,
+                { texto: est.texto, modo: "anadir",
+                  moneda: (form.querySelector(".csvMoneda") || {}).value || "EUR",
+                  formato: (form.querySelector(".csvFormato") || {}).value || "auto" });
+      return () => location.reload();
+    }, "Confirmar importación");
+    conectaCsv(f, c, est, ruta);
   }
 
   /** Carga los movimientos de UN producto desde un CSV. Solo toca ese producto: los
@@ -932,6 +972,7 @@
     const p = prod(pid);
     if (!p) { alert("Ese producto ya no existe: recarga la página."); return; }
     const est = { texto: "", previa: null, destino: null, cuenta: null, activos: [] };
+    const ruta = `api/productos/${encodeURIComponent(p.id)}`;
     const f = abreModal("Importar movimientos (CSV)", cuerpoCsv(p), async (form) => {
       if (!est.texto) throw new Error("Elige primero un archivo CSV.");
       if (!est.previa || !est.previa.validos) {
@@ -967,10 +1008,10 @@
     // Un poco más ancha que la de serie: la tabla de la previsualización lleva 6 columnas.
     const dlg = f.closest("dialog");
     if (dlg) dlg.classList.add("ancho");
-    conectaCsv(f, p, est);
+    conectaCsv(f, p, est, ruta);
   }
 
-  function conectaCsv(f, p, est) {
+  function conectaCsv(f, p, est, ruta) {
     const archivo = f.querySelector(".csvArchivo");
     const previa = f.querySelector(".csvPrev");
     const plantilla = f.querySelector(".csvPlantilla");
@@ -982,7 +1023,7 @@
 
     plantilla.onclick = () => {
       const a = document.createElement("a");
-      a.href = "api/movimientos/plantilla.csv";
+      a.href = "api/movimientos/plantilla.csv" + (esCuenta ? "?para=cuenta" : "");
       a.download = "movimientos.csv";
       document.body.appendChild(a);
       a.click();
@@ -993,7 +1034,7 @@
       if (!est.texto) { previa.innerHTML = ""; est.previa = null; return; }
       previa.innerHTML = '<p class="cargando">Leyendo el CSV…</p>';
       try {
-        const j = await api("POST", `api/productos/${encodeURIComponent(p.id)}/movimientos/csv/previsualizar`,
+        const j = await api("POST", `${ruta}/movimientos/csv/previsualizar`,
                             { texto: est.texto, modo: modo(), moneda: moneda(), formato: formato(),
                               productoDestino: est.destino, cuentaDestino: est.cuenta });
         est.previa = j;
@@ -2168,6 +2209,7 @@
                      recuerda.guarda("patrimonio.editor", "movimientos"); pinta(); },
     nuevaCuenta: soloPropio(() => formCuenta(null)),
     editarCuenta: soloPropio(id => formCuenta(cuentaDe(id))),
+    importarCsvCuenta: soloPropio(id => movimientosCsvCuenta(id)),
     cierraAviso,
     cierraTodosAvisos: limpiaAvisos,
     editarMov: soloPropio(id => formMovimiento(E.cfg.movimientos.find(m => m.id === id))),

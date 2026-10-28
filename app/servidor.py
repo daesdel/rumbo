@@ -1230,6 +1230,31 @@ def _moneda_csv(datos_req):
     return mon
 
 
+def _anota_filas(cfg, filas, base, avisos, dias, moneda):
+    """Anota las filas ya validadas y reúne los días de efectivo que hay que rehacer.
+
+    `base` son los campos que comparten todas las filas (el producto o la cuenta).
+    Devuelve `(hechos, fallos)`. Lo usan la importación de un producto y la de una
+    cuenta: el trabajo de anotar y refrescar el efectivo es el mismo.
+    """
+    hechos, fallos = [], []
+    for f in filas:
+        datos = dict(base, fecha=f["fecha"], tipo=f["tipo"], unidades=f["unidades"],
+                     importe=f["importe"], comision=f["comision"],
+                     impuestos=f["impuestos"], nota=f["nota"], moneda=moneda)
+        try:
+            mov = almacen.guarda_movimiento(cfg, _importe_en_eur(datos))
+        except almacen.ErrorValidacion as e:
+            fallos.append({"linea": f["linea"], "motivo": " ".join(e.errores)})
+            continue
+        refresca_efectivo(cfg, mov, avisos)
+        for c in {mov.get("cuenta"), mov.get("contrapartida")} - {None, ""}:
+            if motor.efecto_de(mov, c):
+                dias.add((c, mov.get("fecha")))
+        hechos.append(mov)
+    return hechos, fallos
+
+
 def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR", estricto=True):
     """Anota en `prod` los movimientos del CSV. **Solo toca los de ese producto.**
 
@@ -1269,22 +1294,8 @@ def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR", estricto=True
                     dias.add((c, m.get("fecha")))
         cfg["movimientos"] = [m for m in original if m.get("producto") != pid]
 
-    hechos, fallos = [], []
-    for f in filas:
-        datos = {"producto": pid, "cuenta": cid, "fecha": f["fecha"], "tipo": f["tipo"],
-                 "unidades": f["unidades"], "importe": f["importe"],
-                 "comision": f["comision"], "impuestos": f["impuestos"],
-                 "nota": f["nota"], "moneda": moneda}
-        try:
-            mov = almacen.guarda_movimiento(cfg, _importe_en_eur(datos))
-        except almacen.ErrorValidacion as e:
-            fallos.append({"linea": f["linea"], "motivo": " ".join(e.errores)})
-            continue
-        refresca_efectivo(cfg, mov, avisos)
-        for c in {mov.get("cuenta"), mov.get("contrapartida")} - {None, ""}:
-            if motor.efecto_de(mov, c):
-                dias.add((c, mov.get("fecha")))
-        hechos.append(mov)
+    hechos, fallos = _anota_filas(cfg, filas, {"producto": pid, "cuenta": cid},
+                                  avisos, dias, moneda)
 
     if modo == "sustituir" and not hechos:
         cfg["movimientos"] = original          # se deja la cartera como estaba
@@ -1303,10 +1314,119 @@ def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR", estricto=True
     return hechos, fallos
 
 
+# Tipos que un CSV puede anotar en una CUENTA. Los de producto (compra/venta) se
+# rechazan con un mensaje que manda a la ficha del producto. Transferencia y
+# cambio de divisa necesitan su contrapartida, y el CSV no la trae: se rechazan.
+TIPOS_CSV_CUENTA = ("deposito", "retirada", "interes", "comision", "impuesto")
+TIPOS_CSV_PRODUCTO = ("compra", "venta")
+
+
+def _aplica_movs_cuenta(cfg, cta, filas, avisos, moneda="EUR"):
+    """Anota en la cuenta `cta` los movimientos de un CSV. **Solo añade.**
+
+    En una cuenta no se sustituye nada: sus movimientos vienen de varios sitios
+    (extracto, dividendos cobrados, traspasos…) y el saldo puede vivir en una
+    valoración aparte, así que un borrado en bloque se llevaría por delante cosas
+    que el CSV no trae. Solo se toca ESA cuenta.
+    """
+    cid = cta["id"]
+    if not almacen.cuenta(cfg, cid):
+        raise almacen.ErrorValidacion([f"La cuenta «{cid}» no existe."])
+
+    validas, fallos, dias = [], [], set()
+    for f in filas:
+        tipo = f["tipo"]
+        if tipo in TIPOS_CSV_PRODUCTO:
+            fallos.append({"linea": f["linea"], "motivo":
+                           "Las compras/ventas son movimientos de producto, no de cuenta. "
+                           "Importa este CSV desde la ficha del producto."})
+        elif tipo in ("transferencia", "cambio_divisa"):
+            fallos.append({"linea": f["linea"], "motivo":
+                           f"Un «{tipo}» necesita su cuenta de contrapartida y el CSV no "
+                           "la trae. Anótalo a mano desde la cuenta."})
+        elif tipo not in TIPOS_CSV_CUENTA:
+            fallos.append({"linea": f["linea"], "motivo":
+                           f"«{tipo}» no es un movimiento de cuenta. Aquí valen: "
+                           + ", ".join(TIPOS_CSV_CUENTA) + "."})
+        elif f.get("unidades") not in (None, ""):
+            fallos.append({"linea": f["linea"], "motivo":
+                           "Una cuenta no tiene unidades: deja la columna «unidades» vacía."})
+        else:
+            validas.append(f)
+
+    hechos, mas_fallos = _anota_filas(cfg, validas, {"cuenta": cid}, avisos, dias, moneda)
+    return hechos, sorted(fallos + mas_fallos, key=lambda x: x["linea"])
+
+
 @app.get("/api/movimientos/plantilla.csv")
 def api_plantilla_movimientos():
-    return Response(movcsv.plantilla(), mimetype="text/csv",
+    para = "cuenta" if request.args.get("para") == "cuenta" else "producto"
+    return Response(movcsv.plantilla(para), mimetype="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="movimientos.csv"'})
+
+
+@app.post("/api/cuentas/<ident>/movimientos/csv/previsualizar")
+def api_cuenta_csv_previsualizar(ident):
+    """Qué entraría en la cuenta, sin tocar nada (ensayo sobre una copia)."""
+    datos_req = request.get_json(silent=True) or {}
+    cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
+    try:
+        moneda = _moneda_csv(datos_req)
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores)
+    cta = almacen.cuenta(cfg, ident)
+    if not cta:
+        return jsonify(ok=False, errores=[f"La cuenta «{ident}» no existe."])
+    avisos_csv = []
+    filas, errores = movcsv.lee(datos_req.get("texto"), avisos_csv,
+                                formato=datos_req.get("formato"))
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]])
+    origen = "pp" if movcsv.es_pp(datos_req.get("texto")) else "propio"
+    try:
+        ensayo, ensayo_cta = copy.deepcopy(cfg), None
+        ensayo_cta = almacen.cuenta(ensayo, ident)
+        hechos, fallos = _aplica_movs_cuenta(ensayo, ensayo_cta, filas, [], moneda)
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores)
+    return jsonify(ok=True, moneda=moneda, origen=origen, sinMatch=False,
+                   validos=len(hechos), errores_totales=len(errores) + len(fallos),
+                   filas=hechos, errores=errores + fallos, avisos=avisos_csv,
+                   existentes=len([m for m in cfg.get("movimientos", [])
+                                   if m.get("cuenta") == ident and not m.get("producto")]),
+                   producto={"id": cta["id"], "nombre": cta.get("nombre") or cta["id"],
+                             "cuenta": cta["id"]})
+
+
+@app.post("/api/cuentas/<ident>/movimientos/csv/importar")
+def api_cuenta_csv_importar(ident):
+    """Anota el CSV en la cuenta. Todo o nada: si algo va mal, `cambia()` no guarda."""
+    datos_req = request.get_json(silent=True) or {}
+    try:
+        moneda = _moneda_csv(datos_req)
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores), 400
+    cfg0 = almacen.carga(os.path.join(DATOS, "cartera.json"))
+    if not almacen.cuenta(cfg0, ident):
+        return jsonify(ok=False, errores=[f"La cuenta «{ident}» no existe."]), 400
+    filas, errores = movcsv.lee(datos_req.get("texto"), formato=datos_req.get("formato"))
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]]), 400
+    avisos, informe = [], {}
+
+    def fn(cfg):
+        cta = almacen.cuenta(cfg, ident)
+        if not cta:
+            raise almacen.ErrorValidacion([f"La cuenta «{ident}» ya no existe."])
+        hechos, fallos = _aplica_movs_cuenta(cfg, cta, filas, avisos, moneda)
+        informe.update({"anadidos": len(hechos), "fallos": fallos, "moneda": moneda,
+                        "borrados": 0})
+        return None
+    respuesta = cambia(fn, avisos)
+    if isinstance(respuesta, tuple):
+        return respuesta
+    cuerpo = respuesta.get_json() or {}
+    return jsonify(ok=True, informe=informe, avisos=cuerpo.get("avisos", []))
 
 
 @app.post("/api/productos/<ident>/movimientos/csv/previsualizar")

@@ -15,6 +15,48 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.09 — 28 de octubre de 2026
+
+**Importar movimientos CSV en una cuenta.** Lo mismo que ya se hacía con un producto,
+pero para llenar de golpe una cuenta con depósitos, retiradas, intereses, comisiones e
+impuestos (por ejemplo **REVOLUT GINA EUROS**).
+
+- **Mis datos → Cuentas**: cada fila tiene **«Importar CSV»**, junto a Abrir ficha,
+  Movimientos y Editar. Abre **el mismo modal** de siempre, con la moneda de la cuenta
+  y su plantilla.
+- **Tipos que se aceptan**: `deposito`, `retirada`, `interes`, `comision`, `impuesto`.
+  - `deposito` e `interes` **suman** al saldo; `retirada`, `comision` e `impuesto`
+    **restan**.
+  - **Compra y venta se rechazan** con un mensaje que manda al sitio correcto: «Las
+    compras/ventas son movimientos de producto, no de cuenta. Importa este CSV desde la
+    ficha del producto.»
+  - **Transferencia y cambio de divisa también se rechazan**: necesitan su cuenta de
+    contrapartida y el CSV no la trae, así que se dice en vez de inventarla.
+  - Cualquier otro tipo (`dividendo`, `traspaso`, `entrega`, `saldo`…) se rechaza
+    indicando cuáles valen.
+  - Una fila con **`unidades`** se rechaza: una cuenta no tiene unidades.
+- **Solo modo «Añadir»**, sin «Sustituir». En una cuenta los movimientos vienen de varios
+  sitios (extracto, dividendos cobrados, traspasos) y el saldo puede vivir en una
+  **valoración aparte**, así que un borrado en bloque se llevaría por delante cosas que
+  el CSV no trae y dejaría el saldo mintiendo. El modal lo explica en vez de ofrecerlo.
+- **Plantilla propia de cuenta** («Descargar plantilla CSV»): depósito, interés y retirada
+  de ejemplo, en vez de compra y dividendo.
+- **Solo toca esa cuenta**: el resto de cuentas y todos los productos quedan igual.
+
+### Detalle
+
+- Rutas nuevas: `POST /api/cuentas/<id>/movimientos/csv/previsualizar` y
+  `.../importar`. Las de producto **no se tocan**.
+- El trabajo de anotar y refrescar el efectivo se extrajo a `_anota_filas()`, que ahora
+  comparten productos y cuentas; la variante de cuenta solo añade las reglas de tipos y
+  la ausencia de `producto` en el movimiento.
+- Un movimiento de cuenta se guarda con **`cuenta`** y **sin `producto`** (el producto de
+  efectivo es solo para el saldo, no para los movimientos).
+- La plantilla acepta `?para=cuenta`; sin el parámetro sigue siendo la de producto.
+- `app/importar.py` sigue **sin tocar**.
+
+---
+
 ## V1.08 — 28 de octubre de 2026
 
 **La importación de movimientos por CSV deja de ser un callejón sin salida.** Cinco cosas,
