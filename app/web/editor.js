@@ -278,6 +278,7 @@
         <td>${n}</td>
         <td class="acc">${actualizable(p) ? `<button data-acc="actPrecio" data-id="${esc(p.id)}" title="Baja solo el precio de este producto">Actualizar</button>` : ""}
           <button data-acc="editarProducto" data-id="${esc(p.id)}">Editar</button>
+          ${soloSaldo(p) ? "" : `<button data-acc="importarCsv" data-id="${esc(p.id)}" title="Cargar los movimientos de este producto desde un CSV">Importar CSV</button>`}
           <button data-acc="borrarProducto" data-id="${esc(p.id)}">Borrar</button></td></tr>`;
     }).join("");
     const barra = `<div class="buscaProd">
@@ -428,6 +429,9 @@
         <label class="interruptor ancho"><input type="checkbox" name="largoPlazo"><span class="pista"></span>
           <span><b>Inversión a largo plazo</b><small>El botón «Solo largo plazo» del panel quita lo que no lo es: colchón, cuentas…</small></span></label>
       </div>
+      ${nuevo ? `<label class="interruptor ancho"><input type="checkbox" name="traerCsv"><span class="pista"></span>
+        <span><b>Cargar sus movimientos desde un CSV</b><small>Al guardar se abre la importación con este producto ya elegido:
+        verás qué filas entran antes de confirmar. El producto se crea igualmente.</small></span></label>` : ""}
       <p class="relleno" id="bRelleno" hidden></p>
 
       <details class="avanzado"><summary>Ficha y opciones avanzadas</summary>
@@ -447,6 +451,14 @@
       const eraManual = manual(p);
       const d = campos(f);
       d.largoPlazo = f.elements.largoPlazo.checked;
+      // Al crear, se puede pedir que el siguiente paso sea el CSV en vez del
+      // primer movimiento. La marca no viaja al servidor: es cosa de la ventana.
+      const traerCsv = nuevo && !!(f.elements.traerCsv && f.elements.traerCsv.checked);
+      delete d.traerCsv;
+      if (traerCsv && !d.cuenta) {
+        throw new Error("Para cargar los movimientos desde un CSV, elige antes la cuenta: "
+                        + "el dinero de cada movimiento entra o sale de ella.");
+      }
       if (!nuevo) d.id = p.id;
       const item = await guarda("productos", d);
       // Si el producto era manual y ahora tiene código + fuente no manual,
@@ -468,7 +480,8 @@
         }
       }
       if (!nuevo) return null;
-      // Siguiente paso natural: su primer dato.
+      // Siguiente paso natural: su primer dato (o el CSV, si se ha pedido).
+      if (traerCsv) return () => movimientosCsv(item.id);
       return manual(item) ? () => formValor(null, item.id) : () => formMovimiento(null, item.id);
     }, nuevo ? "Guardar producto" : "Guardar cambios");
 
@@ -812,6 +825,18 @@
       que mueve el dinero), y si no, la del producto. */
   const monedaDeCsv = p => ((cuentaDe(p && p.cuenta) || {}).moneda || p.moneda || "EUR").toUpperCase();
 
+  /** Los formatos de fecha que puede forzar el usuario. «Auto» deja que el
+      propio fichero delate el orden y, si no lo hace, se usa DD/MM con aviso. */
+  const FORMATOS_CSV = [
+    { id: "auto", et: "Auto (detectar)" },
+    { id: "dmy", et: "DD/MM/AAAA" },
+    { id: "mdy", et: "MM/DD/AAAA" },
+    { id: "iso", et: "AAAA-MM-DD (ISO)" },
+  ];
+
+  const opcionesFormato = () => FORMATOS_CSV
+    .map(x => `<option value="${x.id}">${esc(x.et)}</option>`).join("");
+
   const opcionesMoneda = porDef => {
     const lista = MONEDAS_CSV.slice();
     if (porDef && !lista.includes(porDef)) lista.unshift(porDef);
@@ -833,8 +858,10 @@
 
   const errorCsv = e => `<li><b>Línea ${e.linea}:</b> ${esc(e.motivo)}</li>`;
 
-  function htmlPreviaCsv(j) {
+  function htmlPreviaCsv(j, est) {
     const uno = n => n === 1 ? "" : "s";
+    const caja = (j.sinMatch || (est && est.destino)) ? cajaDestino(j, est) : "";
+    if (j.sinMatch) return caja;
     const mon = j.moneda || "EUR";
     const resumen = `<div class="csvRes"><b>${j.validos} movimiento${uno(j.validos)} válido${uno(j.validos)}</b>` +
       (j.errores_totales ? ` · <span class="neg">${j.errores_totales} con error${uno(j.errores_totales)}</span>` : "") +
@@ -845,8 +872,33 @@
           <tbody>${j.filas.map(filaCsv).join("")}</tbody></table></div>`
       : "";
     const errores = j.errores.length ? `<ul class="csvErr">${j.errores.map(errorCsv).join("")}</ul>` : "";
+    // Avisos que no son errores (fechas ambiguas): se leen pero hay que decirlo.
+    const avisos = (j.avisos && j.avisos.length)
+      ? `<ul class="csvAviso">${j.avisos.map(a => `<li>${esc(a)}</li>`).join("")}</ul>` : "";
     const ahora = `<p class="ayuda">Ahora mismo este producto tiene ${j.existentes} movimiento${uno(j.existentes)}.</p>`;
-    return resumen + tabla + errores + ahora;
+    return caja + resumen + tabla + errores + avisos + ahora;
+  }
+
+  /** «¿A qué producto corresponden estas filas?»: se ofrece cuando el CSV de PP no
+      tiene ninguna fila que case con el producto abierto (los nombres pueden no ser
+      idénticos entre PP y la app). */
+  function cajaDestino(j, est) {
+    // TODOS los productos, el de la ficha incluido: el selector existe justo para
+    // cuando el nombre del CSV (PP) y el nuestro no coinciden.
+    const todos = E.cfg.productos
+      .map(x => `<option value="${esc(x.id)}">${esc(nombre(x))}</option>`).join("");
+    const trae = (j.activos || []).join(", ") || "otro activo";
+    const sel = (est && est.destino) || "";
+    return `<div class="csvDestino">
+      <p><b>Este CSV no tiene movimientos de «${esc(j.producto.nombre)}».</b>
+        El CSV trae: <b>${esc(trae)}</b>.</p>
+      <p class="ayuda">¿A qué producto de tu cartera corresponden esos movimientos?
+        Puede ser este mismo. Si no eliges ninguno no se importa nada.</p>
+      <select class="csvDestinoSel" data-sel="${esc(sel)}">
+        <option value="">— No importar —</option>
+        ${todos}
+      </select>
+      <div class="csvCuentaCaja" hidden></div></div>`;
   }
 
   function cuerpoCsv(p) {
@@ -857,10 +909,14 @@
           <label class="csvMon">Moneda de los movimientos
             <select class="csvMoneda">${opcionesMoneda(monedaDeCsv(p))}</select>
           </label>
+          <label class="csvMon">Formato de fecha
+            <select class="csvFormato">${opcionesFormato()}</select>
+          </label>
           <button type="button" class="btn csvPlantilla">Descargar plantilla CSV</button>
         </div>
         <p class="ayuda">Columnas: <code>fecha,tipo,unidades,importe,comision,impuestos,nota</code>.
-          La fecha en AAAA-MM-DD, los números con punto o coma, y la cabecera es obligatoria.
+          La fecha vale en <b>AAAA-MM-DD</b> (también con hora detrás) o <b>DD/MM/AAAA</b>
+          y <b>MM/DD/AAAA</b>; los números con punto o coma; la cabecera es obligatoria.
           Los importes se anotan con el cambio del día del movimiento.</p>
       </div>
       <div class="csvPrev"></div>
@@ -875,11 +931,21 @@
   function movimientosCsv(pid) {
     const p = prod(pid);
     if (!p) { alert("Ese producto ya no existe: recarga la página."); return; }
-    const est = { texto: "", previa: null };
+    const est = { texto: "", previa: null, destino: null, cuenta: null, activos: [] };
     const f = abreModal("Importar movimientos (CSV)", cuerpoCsv(p), async (form) => {
       if (!est.texto) throw new Error("Elige primero un archivo CSV.");
       if (!est.previa || !est.previa.validos) {
         throw new Error("No hay ningún movimiento válido que importar.");
+      }
+      if (est.destino) {
+        const csv = (est.activos || []).join(", ") || "el CSV";
+        const dest = prod(est.destino);
+        if (!dest) throw new Error("Ese producto ya no existe: recarga la página.");
+        if (!confirm(`Vas a importar los movimientos de «${csv}» en «${nombre(dest)}». ` +
+                     "¿Continuar?")) throw new Error("Has cancelado la importación.");
+        if (!dest.cuenta && !est.cuenta) {
+          throw new Error("Elige una cuenta: sin cuenta no se puede importar.");
+        }
       }
       const modo = (form.querySelector('input[name="modo"]:checked') || {}).value || "anadir";
       if (modo === "sustituir") {
@@ -891,7 +957,10 @@
         }
       }
       await api("POST", `api/productos/${encodeURIComponent(p.id)}/movimientos/csv/importar`,
-                { texto: est.texto, modo, moneda: (form.querySelector(".csvMoneda") || {}).value || "EUR" });
+                { texto: est.texto, modo,
+                  moneda: (form.querySelector(".csvMoneda") || {}).value || "EUR",
+                  formato: (form.querySelector(".csvFormato") || {}).value || "auto",
+                  productoDestino: est.destino, cuentaDestino: est.cuenta });
       // La ficha del producto (pestaña Productos) se rehace al recargar.
       return () => location.reload();
     }, "Confirmar importación");
@@ -906,8 +975,10 @@
     const previa = f.querySelector(".csvPrev");
     const plantilla = f.querySelector(".csvPlantilla");
     const selMoneda = f.querySelector(".csvMoneda");
+    const selFormato = f.querySelector(".csvFormato");
     const modo = () => (f.querySelector('input[name="modo"]:checked') || {}).value || "anadir";
     const moneda = () => (selMoneda && selMoneda.value) || "EUR";
+    const formato = () => (selFormato && selFormato.value) || "auto";
 
     plantilla.onclick = () => {
       const a = document.createElement("a");
@@ -923,17 +994,72 @@
       previa.innerHTML = '<p class="cargando">Leyendo el CSV…</p>';
       try {
         const j = await api("POST", `api/productos/${encodeURIComponent(p.id)}/movimientos/csv/previsualizar`,
-                            { texto: est.texto, modo: modo(), moneda: moneda() });
+                            { texto: est.texto, modo: modo(), moneda: moneda(), formato: formato(),
+                              productoDestino: est.destino, cuentaDestino: est.cuenta });
         est.previa = j;
-        previa.innerHTML = htmlPreviaCsv(j);
+        if (j.activos && j.activos.length) est.activos = j.activos;   // para el «¿seguro?»
+        if (selFormato) {
+          const esPp = j.origen === "pp";
+          selFormato.disabled = esPp;
+          selFormato.title = esPp
+            ? "El CSV de Portfolio Performance ya trae las fechas en AAAA-MM-DD: aquí no hace falta"
+            : "";
+        }
+        pintaPrevia(j);
       } catch (x) {
         est.previa = null;
         previa.innerHTML = `<p class="neg">${esc(x.message)}</p>`;
       }
     };
 
+    /** Pinta la previsualización y deja viva la caja del destino: si el producto
+        elegido no tiene cuenta de efectivo, se pide aquí mismo (sin cuenta no se
+        importa, porque los movimientos mueven dinero). */
+    function pintaPrevia(j) {
+      previa.innerHTML = htmlPreviaCsv(j, est);
+      const selDest = previa.querySelector(".csvDestinoSel");
+      if (selDest) {
+        selDest.value = est.destino || "";
+        selDest.onchange = () => {
+          est.destino = selDest.value || null;
+          est.cuenta = null;
+          dejaCuenta();
+          if (!est.destino) { previa.innerHTML = ""; return; }
+          // Si el producto no tiene cuenta se pide aquí y NO se previsualiza: pedirla
+          // daría el error de cuenta y borraría esta misma caja.
+          const dest = prod(est.destino);
+          const tiene = dest && dest.cuenta && cuentaDe(dest.cuenta);
+          if (tiene) pidePrevia();
+        };
+      }
+      dejaCuenta();
+    }
+
+    function dejaCuenta() {
+      const caja = previa.querySelector(".csvCuentaCaja");
+      if (!caja) return;
+      const dest = est.destino ? prod(est.destino) : null;
+      const tiene = dest && dest.cuenta && cuentaDe(dest.cuenta);
+      if (!dest || tiene) { caja.hidden = true; caja.innerHTML = ""; return; }
+      const opciones = (E.cfg.cuentas || [])
+        .map(c => `<option value="${esc(c.id)}">${esc(c.nombre)}</option>`).join("");
+      caja.hidden = false;
+      caja.innerHTML = `<p class="avisoCuenta"><b>«${esc(nombre(dest))}» no tiene cuenta de
+        efectivo.</b> Los movimientos mueven dinero: elige por dónde sale o entra. Sin
+        cuenta no se importa nada.</p>
+        <select class="csvCuentaSel"><option value="">— Elige una cuenta —</option>
+          ${opciones}</select>`;
+      const sel = caja.querySelector(".csvCuentaSel");
+      sel.value = est.cuenta || "";
+      sel.onchange = () => {
+        est.cuenta = sel.value || null;
+        pidePrevia();
+      };
+    }
+
     archivo.onchange = async () => {
       const file = (archivo.files || [])[0];
+      est.destino = null;          // fichero nuevo: el destino elegido ya no vale
       if (!file) { est.texto = ""; est.previa = null; previa.innerHTML = ""; return; }
       try {
         est.texto = await file.text();
@@ -947,6 +1073,13 @@
     f.querySelectorAll('input[name="modo"]').forEach(r => { r.onchange = pidePrevia; });
     // Cambiar la moneda vuelve a calcular la previsualización con el cambio de ese día.
     if (selMoneda) selMoneda.onchange = pidePrevia;
+    // Cambiar el formato de fecha vuelve a leer el CSV con ese orden, salvo con un
+    // export de Portfolio Performance: ahí las fechas son ISO y el selector no pinta
+    // nada, así que no se re-lee (y se desactiva para que no engañe).
+    if (selFormato) selFormato.onchange = () => {
+      if (est.previa && est.previa.origen === "pp") return;
+      pidePrevia();
+    };
   }
 
   /** `trasGuardar`, si viene, sustituye al final de siempre (dejar la vista en
@@ -2022,6 +2155,9 @@
     verPanel() { recuerda.guarda("patrimonio.tab", "patrimonio"); location.reload(); },
     nuevoProducto: soloPropio(() => formProducto(null)),
     editarProducto: soloPropio(id => formProducto(prod(id))),
+    /** Mismo modal de CSV que la ficha del producto (pestaña Productos): aquí solo
+        se abre con el producto de la fila ya elegido. */
+    importarCsv: soloPropio(id => movimientosCsv(id)),
     borrarProducto: soloPropio(borrarProducto),
     nuevoMov: soloPropio(() => formMovimiento(null)),
     nuevoMovCuenta: soloPropio(id => formMovimiento(null, null, false, null, { cuenta: id, vista: "cuentas" })),

@@ -15,6 +15,82 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.08 — 28 de octubre de 2026
+
+**La importación de movimientos por CSV deja de ser un callejón sin salida.** Cinco cosas,
+todas alrededor del mismo botón «Importar movimientos (CSV)».
+
+### a) Se llega desde más sitios
+
+- **Al crear un producto**: interruptor «Cargar sus movimientos desde un CSV». Al guardar,
+  el producto se crea y **se abre la importación ya apuntando a él** (era el paso natural:
+  el alta ya encadenaba al primer movimiento; ahora también al CSV). Si marcas el CSV y no
+  has elegido cuenta, se avisa **antes** de crear nada.
+- **En Mis datos → Productos**, cada fila tiene **«Importar CSV»** junto a Editar. Abre el
+  **mismo modal** (no hay dos): el de la ficha del producto.
+
+### b) El parser de fechas deja de ser rígido
+
+Antes solo valía `AAAA-MM-DD`. Ahora:
+
+- **ISO con hora** (`2026-10-05 00:00:00`, `2026-10-05T00:00:00`), **DD/MM/AAAA**,
+  **MM/DD/AAAA**, **DD-MM-AAAA**, con barras, guiones o puntos, y año primero o al final.
+- **El propio fichero delata el orden** cuando puede: una fila con el día (o el mes) por
+  encima de 12 decide por todas. Solo si no lo delata se resuelve fila a fila.
+- **Si queda ambiguo** (`10/05/2026`) se lee como **DD/MM** y sale un **aviso ámbar** en la
+  previsualización diciendo cuántas filas y en qué líneas, sugiriendo el selector.
+- El error de una fila ahora dice **qué formatos valen**, no solo que está mal.
+- En modo **«Sustituir»** con una fila inválida se enseña **el motivo real de la fila** (antes
+  salía el mensaje genérico del guard).
+
+### c) Selector de formato de fecha, y el CSV de Portfolio Performance tal cual
+
+- Desplegable **«Formato de fecha»**: `Auto (detectar)` · `DD/MM/AAAA` · `MM/DD/AAAA` ·
+  `AAAA-MM-DD (ISO)`. Si eliges uno, **manda sobre la inferencia** del fichero y la
+  previsualización se recalcula. Con «ISO» se rechazan las fechas a la española.
+- **Se acepta el export de Portfolio Performance sin adaptarlo**: separador `;`, trece
+  columnas, `Fecha`/`Tipo`/`Activo`/`Títulos`/`Comisiones`/`Impuestos`/`Valor neto de
+  transacción`/`Nota`. Se **reutiliza el importador global** (`importar.leer_portfolio` y su
+  tabla de **26 tipos**), sin duplicar el mapeo y **sin tocar `app/importar.py`**.
+- **Filtra por producto**: de un export con varios activos entran solo las filas del
+  producto abierto. Si no hay ninguna, lo dice **y enumera qué trae el fichero**.
+
+### d) FIX: las fechas del CSV de PP ya no se adivinan
+
+El flujo de PP **no consultaba** el selector (delegaba en `importar.lee_fecha`, que ante una
+fecha no ISO **suponía día primero**). Así, un `3/12/2026` reescrito por Excel se volvía el
+3 de diciembre y daba un **falso «fecha futura»**, y cambiar el selector no lo arreglaba
+porque no se leía nunca.
+
+- En un CSV de PP las fechas **tienen que ser ISO**: si alguna no lo es, esa fila se reporta
+  con su motivo y **no se adivina el orden**.
+- Con un CSV de PP el selector de formato aparece **deshabilitado** (con explicación) y
+  cambiarlo **no re-lee** el fichero.
+- El aviso de «fecha futura» **solo sale si la fecha es futura de verdad**.
+
+### e) FIX: el selector de destino ya no esconde el producto actual
+
+Al elegir a qué producto corresponden los movimientos de un CSV de PP, la lista **excluía el
+producto abierto** — justo el caso normal, porque PP y la app suelen llamar distinto al
+mismo fondo.
+
+- El selector muestra **todos los productos**, **incluido el actual**.
+- Si el producto elegido **no tiene cuenta de efectivo**, se pide en el mismo modal con un
+  selector de cuentas, y **la asignación se guarda junto con los movimientos** en la misma
+  operación (atómica). Sin cuenta **no se importa nada**.
+- Al forzar un destino se pide **doble confirmación**: «Vas a importar los movimientos de
+  «PLAN 2050 ING» en «Naranja 2040 PP». ¿Continuar?».
+
+### Detalle
+
+- `app/movcsv.py` sigue sin conocer la app: solo lee y valida. La aplicación de los
+  movimientos sigue en `servidor._aplica_movs_csv()`.
+- Rutas: las mismas de V1.04, con `formato`, `productoDestino` y `cuentaDestino` nuevos en el
+  cuerpo de la petición.
+- `app/importar.py` **sin tocar**: se importa y se llama, nunca se modifica.
+
+---
+
 ## V1.06 — 23 de octubre de 2026
 
 **Cuatro recuadros de variación del patrimonio en la vista Patrimonio, con su gráfica

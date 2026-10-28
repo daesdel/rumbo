@@ -1230,7 +1230,7 @@ def _moneda_csv(datos_req):
     return mon
 
 
-def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR"):
+def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR", estricto=True):
     """Anota en `prod` los movimientos del CSV. **Solo toca los de ese producto.**
 
     - `modo="anadir"`: los añade a los que ya hay.
@@ -1288,9 +1288,13 @@ def _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda="EUR"):
 
     if modo == "sustituir" and not hechos:
         cfg["movimientos"] = original          # se deja la cartera como estaba
-        raise almacen.ErrorValidacion([
-            "Ningún movimiento del CSV se puede anotar, así que no se ha sustituido nada: "
-            "los movimientos que tenías siguen como estaban."])
+        # En la previsualización se pide `estricto=False`: no hay nada que deshacer
+        # (esto es un ensayo) y así se ven los fallos de cada fila, que es lo que
+        # hace falta para corregir el CSV.
+        if estricto:
+            raise almacen.ErrorValidacion([
+                "Ningún movimiento del CSV se puede anotar, así que no se ha sustituido "
+                "nada: los movimientos que tenías siguen como estaban."])
 
     # Se rehacen los días afectados: un día que se queda sin movimientos pierde su
     # saldo automático (lo hace _refresca_cuenta al no encontrar ninguno).
@@ -1313,24 +1317,59 @@ def api_movs_csv_previsualizar(ident):
     Los problemas del fichero se contestan con 200 y `ok:false`: esto es un informe,
     no una orden, y así el navegador no lo apunta como error de red."""
     datos_req = request.get_json(silent=True) or {}
-    filas, errores = movcsv.lee(datos_req.get("texto"))
-    if not filas and errores and errores[0]["linea"] == 1:
-        return jsonify(ok=False, errores=[errores[0]["motivo"]])
     cfg = almacen.carga(os.path.join(DATOS, "cartera.json"))
+    # El destino puede ser otro producto: el CSV de PP puede no casar por nombre y
+    # el usuario elige a cuál de los suyos corresponden esas filas.
+    destino = str(datos_req.get("productoDestino") or "").strip() or ident
     try:
         moneda = _moneda_csv(datos_req)
-        prod = _prod_o_error(cfg, ident)
-        modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
-        ensayo = copy.deepcopy(cfg)
-        ensayo_prod = almacen.producto(ensayo, ident)
-        hechos, fallos = _aplica_movs_csv(ensayo, ensayo_prod, filas, modo, [], moneda)
+        prod = _prod_o_error(cfg, destino)
     except almacen.ErrorValidacion as e:
         return jsonify(ok=False, errores=e.errores)
-    return jsonify(ok=True, moneda=moneda, validos=len(hechos),
+    # El producto hace falta para el CSV de Portfolio Performance, que trae varios
+    # activos y hay que quedarse solo con los suyos.
+    # Cuenta con la que se importaría si el producto elegido no tiene ninguna.
+    cuenta_dest = str(datos_req.get("cuentaDestino") or "").strip()
+    if cuenta_dest and not almacen.cuenta(cfg, cuenta_dest):
+        return jsonify(ok=False, errores=[f"La cuenta «{cuenta_dest}» no existe."])
+    origen = "pp" if movcsv.es_pp(datos_req.get("texto")) else "propio"
+    # Si el usuario ha elegido a mano el destino, manda él: ya no se filtra por el
+    # nombre del activo (es justo el caso en que PP y la app no se llaman igual).
+    forzado = bool(str(datos_req.get("productoDestino") or "").strip())
+    avisos_csv = []
+    filas, errores = movcsv.lee(datos_req.get("texto"), avisos_csv,
+                                formato=datos_req.get("formato"),
+                                producto=None if forzado else prod,
+                                moneda=moneda)
+    if errores and errores[0].get("sin_match"):
+        # No es un error del fichero: el usuario tiene que decir a qué producto va.
+        return jsonify(ok=True, sinMatch=True, activos=errores[0]["activos"],
+                       motivo=errores[0]["motivo"], origen=origen, moneda=moneda,
+                       validos=0, errores_totales=0, filas=[], errores=[],
+                       avisos=avisos_csv, destino=prod["id"],
+                       existentes=len([m for m in cfg.get("movimientos", [])
+                                       if m.get("producto") == prod["id"]]),
+                       producto={"id": prod["id"],
+                                 "nombre": prod.get("corto") or prod["nombre"],
+                                 "cuenta": prod.get("cuenta") or ""})
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]])
+    try:
+        modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
+        ensayo = copy.deepcopy(cfg)
+        ensayo_prod = almacen.producto(ensayo, destino)
+        if cuenta_dest:
+            ensayo_prod["cuenta"] = cuenta_dest      # solo en la copia
+        hechos, fallos = _aplica_movs_csv(ensayo, ensayo_prod, filas, modo, [], moneda,
+                                          estricto=False)
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores)
+    return jsonify(ok=True, moneda=moneda, validos=len(hechos), origen=origen,
                    errores_totales=len(errores) + len(fallos),
-                   filas=hechos, errores=errores + fallos,
+                   filas=hechos, errores=errores + fallos, avisos=avisos_csv,
+                   sinMatch=False, destino=prod["id"],
                    existentes=len([m for m in cfg.get("movimientos", [])
-                                   if m.get("producto") == ident]),
+                                   if m.get("producto") == destino]),
                    producto={"id": prod["id"], "nombre": prod.get("corto") or prod["nombre"],
                              "cuenta": prod.get("cuenta") or ""})
 
@@ -1339,19 +1378,32 @@ def api_movs_csv_previsualizar(ident):
 def api_movs_csv_importar(ident):
     """Anota el CSV en el producto. Todo o nada: si algo va mal, `cambia()` no guarda."""
     datos_req = request.get_json(silent=True) or {}
-    filas, errores = movcsv.lee(datos_req.get("texto"))
-    if not filas and errores and errores[0]["linea"] == 1:
-        return jsonify(ok=False, errores=[errores[0]["motivo"]]), 400
+    destino = str(datos_req.get("productoDestino") or "").strip() or ident
     try:
         moneda = _moneda_csv(datos_req)
+        prod_ahora = _prod_o_error(almacen.carga(os.path.join(DATOS, "cartera.json")), destino)
     except almacen.ErrorValidacion as e:
         return jsonify(ok=False, errores=e.errores), 400
+    forzado = bool(str(datos_req.get("productoDestino") or "").strip())
+    cuenta_dest = str(datos_req.get("cuentaDestino") or "").strip()
+    try:
+        if cuenta_dest and not almacen.cuenta(
+                almacen.carga(os.path.join(DATOS, "cartera.json")), cuenta_dest):
+            raise almacen.ErrorValidacion([f"La cuenta «{cuenta_dest}» no existe."])
+    except almacen.ErrorValidacion as e:
+        return jsonify(ok=False, errores=e.errores), 400
+    filas, errores = movcsv.lee(datos_req.get("texto"), formato=datos_req.get("formato"),
+                                producto=None if forzado else prod_ahora, moneda=moneda)
+    if not filas and errores and errores[0]["linea"] == 1:
+        return jsonify(ok=False, errores=[errores[0]["motivo"]]), 400
     modo = "sustituir" if datos_req.get("modo") == "sustituir" else "anadir"
     avisos, informe = [], {}
 
     def fn(cfg):
-        prod = _prod_o_error(cfg, ident)
-        previos = len([m for m in cfg.get("movimientos", []) if m.get("producto") == ident])
+        prod = _prod_o_error(cfg, destino)
+        if cuenta_dest and almacen.cuenta(cfg, cuenta_dest):
+            prod["cuenta"] = cuenta_dest        # se queda asignada, con los movimientos
+        previos = len([m for m in cfg.get("movimientos", []) if m.get("producto") == destino])
         hechos, fallos = _aplica_movs_csv(cfg, prod, filas, modo, avisos, moneda)
         informe.update({"anadidos": len(hechos), "fallos": fallos, "moneda": moneda,
                         "borrados": previos if modo == "sustituir" else 0})

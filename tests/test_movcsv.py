@@ -502,3 +502,230 @@ def test_una_cuenta_en_dolares_no_cambia_el_signo_del_efectivo(cliente):
     ef = almacen.producto_efectivo_de(cfg, cliente.producto["cuenta"])
     vals = {v["fecha"]: v["valor"] for v in cfg["valoraciones"] if v["producto"] == ef["id"]}
     assert vals["2026-10-01"] == pytest.approx(-900.00, abs=0.01)
+
+
+# ------------------------------------------------------------------ fechas
+def _csv_fechas(*fechas, tipo="compra"):
+    return "\n".join(["fecha,tipo,unidades,importe,comision,impuestos,nota"]
+                     + [f"{f},{tipo},1,10,0,0,n" for f in fechas]) + "\n"
+
+
+@pytest.mark.parametrize("crudo,esperado", [
+    ("2026-10-05", "2026-10-05"),                 # ISO
+    ("2026-10-05 00:00:00", "2026-10-05"),        # ISO con hora (formato de PP)
+    ("2026-10-05 14:30", "2026-10-05"),           # ISO con hora corta
+    ("2026-10-05T00:00:00", "2026-10-05"),        # ISO con T
+    ("25/10/2026", "2026-10-25"),                 # DD/MM sin ambigüedad
+    ("25/10/2026 08:15", "2026-10-25"),           # DD/MM con hora
+    ("25-10-2026", "2026-10-25"),                 # DD-MM
+    ("25-10-2026 08:15", "2026-10-25"),
+    ("10/25/2026", "2026-10-25"),                 # MM/DD sin ambigüedad
+    ("10/25/2026 0:00", "2026-10-25"),
+    ("2026/10/05", "2026-10-05"),                 # año primero con barras
+    ("2026.10.05", "2026-10-05"),                 # año primero con puntos
+    ("25.10.2026", "2026-10-25"),                 # día primero con puntos
+])
+def test_formatos_de_fecha_aceptados(crudo, esperado):
+    filas, errores = movcsv.lee(_csv_fechas(crudo))
+    assert errores == [], errores
+    assert filas[0]["fecha"] == esperado
+
+
+@pytest.mark.parametrize("crudo", [
+    "2026-13-45", "31/02/2026", "25/13/2026", "13/13/2026",
+    "hola", "", "2026-10-05 99", "05/10", "2026-10",
+])
+def test_fechas_invalidas_dan_error_con_los_formatos(crudo):
+    filas, errores = movcsv.lee(_csv_fechas(crudo))
+    assert filas == []
+    assert len(errores) == 1
+    motivo = errores[0]["motivo"]
+    assert motivo.startswith("Fecha inválida")
+    assert "Formatos aceptados" in motivo
+    for trozo in ("AAAA-MM-DD", "HH:MM:SS", "DD/MM/AAAA", "MM/DD/AAAA", "DD-MM-AAAA"):
+        assert trozo in motivo
+
+
+def test_una_fecha_ambigua_sola_se_lee_dia_primero_y_avisa():
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("10/05/2026"), avisos)
+    assert errores == []
+    assert filas[0]["fecha"] == "2026-05-10"          # 10 de mayo (DD/MM)
+    assert len(avisos) == 1
+    assert "ambigua" in avisos[0] and "línea 2" in avisos[0]
+    assert "reformatea el CSV a ISO" in avisos[0]
+
+
+def test_sin_avisos_si_no_se_pide_la_lista():
+    """Compatibilidad: quien llame como antes sigue recibiendo dos valores."""
+    filas, errores = movcsv.lee(_csv_fechas("10/05/2026"))
+    assert errores == [] and filas[0]["fecha"] == "2026-05-10"
+
+
+def test_el_fichero_delata_el_orden_dia_primero():
+    """Una fecha con el día > 12 decide por todas: 10/05/2026 -> 10 de mayo."""
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("25/10/2026", "10/05/2026"), avisos)
+    assert errores == []
+    assert [f["fecha"] for f in filas] == ["2026-10-25", "2026-05-10"]
+    assert avisos == []                     # ya no hay nada que adivinar
+
+
+def test_el_fichero_delata_el_orden_mes_primero():
+    """10/25/2026 delata que va mes primero: 10/5/2026 -> 5 de octubre, sin aviso."""
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("10/25/2026 0:00", "10/5/2026 0:00"), avisos)
+    assert errores == []
+    assert [f["fecha"] for f in filas] == ["2026-10-25", "2026-10-05"]
+    assert avisos == []
+
+
+def test_si_el_fichero_se_contradice_no_se_impone_nada():
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("25/10/2026", "10/25/2026", "10/05/2026"), avisos)
+    assert errores == []
+    assert [f["fecha"] for f in filas] == ["2026-10-25", "2026-10-25", "2026-05-10"]
+    assert len(avisos) == 1 and "ambigua" in avisos[0]
+
+
+def test_las_fechas_con_hora_de_excel_se_importan_de_verdad():
+    """El caso real: Excel convierte 2026-10-05 en 10/5/2026 0:00 (MM/DD)."""
+    texto = ("fecha,tipo,unidades,importe,comision,impuestos,nota\n"
+             "10/5/2026 0:00,compra,10,1000.00,0,0,Aporte\n"
+             "10/25/2026 0:00,compra,5,520.50,0,0,Otra\n")
+    avisos = []
+    filas, errores = movcsv.lee(texto, avisos)
+    assert errores == [] and avisos == []
+    assert [f["fecha"] for f in filas] == ["2026-10-05", "2026-10-25"]
+
+
+# ------------------------------------------- el formato de fecha que elige el usuario
+def test_el_formato_mdy_convierte_las_ambiguas_en_mes_primero():
+    """El falso positivo de «3/12/2026»: con MM/DD es 12 de marzo, no 3 de diciembre."""
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("3/12/2026"), avisos, formato="mdy")
+    assert errores == [] and filas[0]["fecha"] == "2026-03-12"
+    assert avisos == []
+
+
+def test_el_formato_dmy_convierte_las_ambiguas_en_dia_primero():
+    filas, errores = movcsv.lee(_csv_fechas("3/12/2026"), formato="dmy")
+    assert errores == [] and filas[0]["fecha"] == "2026-12-03"
+
+
+def test_el_formato_gana_a_lo_que_delate_el_fichero():
+    """Si el usuario dice MM/DD, manda él aunque otra fila sugiera lo contrario."""
+    filas, errores = movcsv.lee(_csv_fechas("10/12/2026", "3/12/2026"), formato="mdy")
+    assert errores == []
+    assert [f["fecha"] for f in filas] == ["2026-10-12", "2026-03-12"]
+
+
+def test_forzar_mes_primero_con_un_mes_imposible_lo_explica():
+    filas, errores = movcsv.lee(_csv_fechas("25/10/2026"), formato="mdy")
+    assert filas == []
+    assert "MM/DD/AAAA" in errores[0]["motivo"] and "mes sería 25" in errores[0]["motivo"]
+    assert "Formato de fecha" in errores[0]["motivo"]
+
+
+def test_con_iso_las_fechas_a_la_espanola_se_rechazan():
+    filas, errores = movcsv.lee(_csv_fechas("10/05/2026"), formato="iso")
+    assert filas == []
+    assert "AAAA-MM-DD (ISO)" in errores[0]["motivo"]
+
+
+def test_iso_funciona_con_cualquier_formato_elegido():
+    for fmt in (None, "auto", "dmy", "mdy", "iso"):
+        filas, errores = movcsv.lee(_csv_fechas("2026-10-05 00:00:00"), formato=fmt)
+        assert errores == [], (fmt, errores)
+        assert filas[0]["fecha"] == "2026-10-05", fmt
+
+
+def test_auto_sigue_avisando_de_la_ambiguedad():
+    avisos = []
+    filas, errores = movcsv.lee(_csv_fechas("3/12/2026"), avisos, formato="auto")
+    assert errores == [] and filas[0]["fecha"] == "2026-12-03"
+    assert len(avisos) == 1 and "Formato de fecha" in avisos[0]
+
+
+# ------------------------------------------- el CSV de Portfolio Performance tal cual
+PP = (
+    "Fecha;Tipo;Activo;Títulos;Precio;Cantidad;Comisiones;Impuestos;"
+    "Valor neto de transacción;Cuenta;Cuenta de contrapartida;Nota;Fuente\n"
+    "2026-10-05 00:00:00;Compra;Tesla Inc.;10;250,00;;2,50;0;2.502,50;Revolut USD;;;Yahoo\n"
+    "2026-03-12 00:00:00;Dividendo;Tesla Inc.;; ;;;3,10;25,00;Revolut USD;;Cupón;Yahoo\n"
+    "2026-04-01 00:00:00;Compra;Bitcoin;1;50000,00;;0;0;50000,00;Revolut;;;CoinGecko\n"
+)
+TESLA = {"id": "tesla_inc", "nombre": "Tesla Inc.", "corto": "Tesla Inc."}
+
+
+def test_el_csv_de_pp_se_lee_tal_cual_y_se_filtra_por_producto():
+    avisos = []
+    filas, errores = movcsv.lee(PP, avisos, producto=TESLA)
+    assert errores == []
+    assert len(filas) == 2                       # solo las de Tesla
+    assert {f["tipo"] for f in filas} == {"compra", "dividendo"}
+    fila_c = next(f for f in filas if f["tipo"] == "compra")
+    assert fila_c["fecha"] == "2026-10-05"
+    assert fila_c["unidades"] == 10.0
+    assert fila_c["importe"] == 2502.50          # «Valor neto de transacción»
+    assert fila_c["comision"] == 2.50
+    fila_d = next(f for f in filas if f["tipo"] == "dividendo")
+    assert fila_d["importe"] == 25.00 and fila_d["impuestos"] == 3.10
+    assert fila_d["nota"] == "Cupón"
+    assert any("Portfolio Performance" in a for a in avisos)
+
+
+def test_si_el_producto_no_esta_en_el_csv_lo_dice_claro():
+    filas, errores = movcsv.lee(PP, producto={"id": "x", "nombre": "Amundi", "corto": "Amundi"})
+    assert filas == []
+    assert "no tiene movimientos" in errores[0]["motivo"]
+    assert "Tesla Inc." in errores[0]["motivo"]      # pista de qué trae el fichero
+
+
+def test_el_csv_de_pp_sin_filtro_trae_todos_los_activos():
+    filas, errores = movcsv.lee(PP)
+    assert errores == [] and len(filas) == 3
+
+
+def test_el_csv_de_pp_con_un_tipo_raro_avisa_de_esa_fila():
+    texto = PP.replace(";Compra;Bitcoin", ";Traspaso raro;Bitcoin")
+    filas, errores = movcsv.lee(texto)
+    assert len(filas) == 2
+    assert len(errores) == 1 and "no reconocido" in errores[0]["motivo"]
+
+
+def test_el_csv_normal_de_siete_columnas_sigue_funcionando():
+    """Regresión: el formato de casa no se ha tocado."""
+    filas, errores = movcsv.lee(TRES)
+    assert errores == [] and len(filas) == 3
+
+
+# ----------------------------------- el CSV de PP con una fecha que no va en ISO
+def test_pp_con_una_fecha_reescrita_no_se_adivina_el_orden():
+    """«3/12/2026» en un CSV de PP: no se lee como diciembre (daría fecha futura)."""
+    texto = PP.replace("2026-03-12 00:00:00", "3/12/2026")
+    filas, errores = movcsv.lee(texto, producto=TESLA)
+    assert [f["fecha"] for f in filas] == ["2026-10-05"]      # la buena sí entra
+    assert len(errores) == 1 and errores[0]["linea"] == 3
+    assert "ISO" in errores[0]["motivo"]
+
+
+def test_pp_respeta_las_fechas_iso_con_cualquier_formato_elegido():
+    for fmt in (None, "auto", "dmy", "mdy", "iso"):
+        filas, errores = movcsv.lee(PP, formato=fmt, producto=TESLA)
+        assert errores == [], (fmt, errores)
+        assert [f["fecha"] for f in filas] == ["2026-03-12", "2026-10-05"], fmt
+
+
+def test_pp_sin_match_avisa_y_dice_que_trae():
+    """`sin_match` es lo que la previsualización usa para ofrecer elegir destino."""
+    filas, errores = movcsv.lee(PP, producto={"id": "x", "nombre": "Naranja 2040 PP"})
+    assert filas == []
+    assert errores[0].get("sin_match") is True
+    assert errores[0]["activos"] == ["Bitcoin", "Tesla Inc."]
+    assert "Naranja 2040 PP" in errores[0]["motivo"]
+
+
+def test_es_pp_distingue_los_dos_formatos():
+    assert movcsv.es_pp(PP) is True
+    assert movcsv.es_pp(TRES) is False

@@ -417,7 +417,7 @@ table.dt td.nota{max-width:220px;overflow:hidden;text-overflow:ellipsis;text-ali
 /* Importar movimientos de UN producto desde CSV (modal de la ficha del producto) */
 .csvCab .fila{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 6px}
 .csvArchivo{font:inherit;font-size:13px;color:var(--tinta2)}
-.csvMon{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--tinta2)}
+.csvMon{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--tinta2);white-space:nowrap}
 .csvMoneda{font:inherit;font-size:13px;background:var(--sup2);color:var(--tinta);
   border:1px solid var(--borde);border-radius:8px;padding:5px 8px;cursor:pointer}
 .csvPrev{margin:14px 0}
@@ -425,6 +425,15 @@ table.dt td.nota{max-width:220px;overflow:hidden;text-overflow:ellipsis;text-ali
 .csvRes{font-size:13.5px;margin-bottom:10px}
 .csvErr{margin:10px 0 0;padding-left:18px;font-size:12.5px;color:var(--mal)}
 .csvErr li{margin:3px 0}
+.csvAviso{margin:10px 0 0;padding:8px 12px 8px 28px;border-radius:9px;font-size:12.5px;
+  color:var(--aviso);background:rgba(250,178,25,.10);border:1px solid rgba(250,178,25,.35)}
+.csvAviso li{margin:3px 0}
+.csvDestino{padding:12px 14px;border-radius:11px;border:1px solid var(--borde);background:var(--sup2);font-size:13.5px}
+.csvDestino p{margin:0 0 8px}
+.csvDestino .ayuda{margin:0 0 10px}
+.avisoCuenta{margin:12px 0 8px!important;font-size:12.5px;color:var(--aviso)}
+.csvCuentaSel{font:inherit;font-size:13px;background:var(--sup);color:var(--tinta);border:1px solid var(--borde);border-radius:8px;padding:6px 9px;min-width:260px}
+.csvDestinoSel{font:inherit;font-size:13px;background:var(--sup);color:var(--tinta);border:1px solid var(--borde);border-radius:8px;padding:6px 9px;min-width:260px}
 .csvModo{display:flex;flex-direction:column;gap:7px;font-size:13.5px;margin-top:6px}
 .csvModo label{display:flex;align-items:center;gap:8px;cursor:pointer}
 .mForm > footer{display:flex;justify-content:flex-end;gap:10px;padding:14px 26px 18px;border-top:1px solid var(--borde)}
