@@ -15,6 +15,38 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.12 — 3 de noviembre de 2026
+
+**Tanda 3b: la TIR anualizada entra en el gráfico de patrimonio.** Con esto queda cerrado
+el bloque de Tanda 3 (gráficas de métricas en Patrimonio).
+
+- Cuarta opción del selector: **Patrimonio / Revalorización / Dinero ganado / TIR
+  anualizada**.
+- **Serie temporal**: un XIRR en cada fecha, con los flujos **acumulados** hasta ese día
+  (no filtrados por la ventana: si se filtraran, el último mes no tendría TIR, solo 4
+  flujos y sin cambio de signo).
+- **`null` donde no hay TIR** (antes de la primera aportación, o sin cambio de signo): el
+  gráfico lo dibuja como **hueco**, no como una línea a 0. Son el 53 % de los puntos, así
+  que la línea arranca donde empieza a haber TIR.
+- **Solo la ventana visible**: 1M calcula 31 puntos y «Todo» 6.909. (En un primer intento se
+  calculaba el histórico entero en cada zoom; corregido.)
+- **Eje en %** con `formatoY`/`formatoValor` propios. Los **negativos se ven**: un periodo de
+  pérdidas se lee con −5 % y +10 % en el mismo eje.
+- **Memo** por `(ventana, propietario, moneda, ids de productos visibles)`, tope de **10
+  entradas** (se vacía al pasarse). Sin persistencia.
+- La **nota** muestra la TIR del **último punto** (la TIR actual), no la del inicio de la
+  ventana: la evolución ya se ve en el gráfico.
+- Los 4 recuadros de la Tanda 2 no se tocan, y «Patrimonio» sigue **idéntico** (sha del
+  gráfico verificado).
+
+### Medición que justificó el diseño
+
+301 flujos de caja (no 1.254: esos son movimientos), una XIRR completa en **0,4 ms**, y el
+histórico entero (6.909 puntos) en **120 ms**. De ahí que se descartara la TIR mensual con
+interpolación: no hacía falta.
+
+---
+
 ## V1.11 — 3 de noviembre de 2026
 
 **Tanda 3a: el gráfico de evolución del patrimonio deja de enseñar solo el patrimonio.**

@@ -766,7 +766,7 @@
       valor, aportado, valorConCoste, plusvalia,
       rentabilidad: aportado ? plusvalia / aportado : null,
       tir, numAportaciones: nAp, ritmo, racha, caida, caidaFecha,
-      serie, serieAportado: serieAp,
+      serie, serieAportado: serieAp, flujos,
     };
   }
 
@@ -1046,7 +1046,40 @@
       - `ganado`: patrimonio menos lo aportado hasta ese día.
 
       Devuelve `{ serie, pct }`, con `pct` la variación en % cuando tiene sentido. */
-  function serieDeMetrica(m, i0) {
+  /* La TIR por punto es lo único caro del gráfico (120 ms en «Todo», 5-90 ms en
+     el resto). Se guarda por (ventana, propietario, moneda, productos visibles):
+     volver a una ventana ya vista cuesta 0. Al pasar de 10 entradas se vacía:
+     sin persistencia y sin invalidación a mano. */
+  const tirMemo = new Map();
+  const TIR_MEMO_MAX = 10;
+
+  /** TIR anualizada en cada fecha, en % (número), con los flujos ACUMULADOS hasta
+      ese día. `null` donde no hay TIR que calcular (antes de la primera
+      aportación, o sin cambio de signo): el gráfico lo dibuja como hueco. */
+  function serieTir(m, lista) {
+    const clave = [estado.rango, estado.prop, enUSD() ? "usd" : "eur",
+                   lista.map(p => p.id).join(",")].join("|");
+    const guardada = tirMemo.get(clave);
+    if (guardada) return guardada;
+    const fl = (m.flujos || []).slice().sort((a, b) => a.t - b.t);
+    const serie = new Array(D.fechas.length).fill(null);
+    let j = 0;
+    // Solo los puntos de la ventana visible: los de antes no se dibujan y
+    // calcularlos sería pagar el histórico entero en cada zoom (120 ms siempre).
+    const i0 = desdeIdx();
+    for (let i = i0; i < D.fechas.length; i++) {
+      const t = Date.parse(D.fechas[i]);
+      while (j < fl.length && fl[j].t <= t) j++;
+      if (!j) continue;                       // todavía no ha entrado dinero
+      const tasa = xirr(fl.slice(0, j).concat([{ t, v: m.serie[i] || 0 }]));
+      serie[i] = tasa == null ? null : tasa * 100;
+    }
+    if (tirMemo.size >= TIR_MEMO_MAX) tirMemo.clear();
+    tirMemo.set(clave, serie);
+    return serie;
+  }
+
+  function serieDeMetrica(m, i0, lista) {
     const n = D.fechas.length;
     if (estado.metrica === "revalorizacion") {
       const base = m.serie[i0];
@@ -1058,6 +1091,9 @@
       if (base) return { serie, pct: (fin / base - 1) * 100, sobre: null };
       const ap = m.serieAportado[n - 1] || 0;
       return { serie, pct: ap ? (fin / ap - 1) * 100 : null, sobre: "sobre lo aportado" };
+    }
+    if (estado.metrica === "tir") {
+      return { serie: serieTir(m, lista), pct: null, sobre: null, pctEje: true };
     }
     if (estado.metrica === "ganado") {
       const serie = m.serie.map((v, i) => (v == null ? 0 : v - (m.serieAportado[i] || 0)));
@@ -1074,7 +1110,7 @@
 
     if (estado.vista === "total") {
       const i0 = desdeIdx();
-      const { serie, pct, sobre } = serieDeMetrica(m, i0);
+      const { serie, pct, sobre, pctEje } = serieDeMetrica(m, i0, prods);
       const esPatri = estado.metrica === "patrimonio";
       G.lineaConEventos(cont, {
         fechas, valores: corta(serie), color: G.css("--s1"), alto: 330,
@@ -1086,11 +1122,18 @@
         // Con revalorización o dinero ganado el cero es una referencia, no el
         // suelo: hay que poder ver los números negativos.
         desdeCero: esPatri && estado.rango === "todo",
+        formatoY: pctEje ? (v => Math.round(v) + " %") : undefined,
+        formatoValor: pctEje ? (v => G.fmtPctSigno(v / 100, 1)) : undefined,
       });
       if (estado.metrica === "revalorizacion") {
         const fin = serie[D.fechas.length - 1];
         nota = `Variación: ${G.fmtEurSigno(fin)}` +
                (pct == null ? "" : ` (${G.fmtPctSigno(pct, 1)}${sobre ? " " + sobre : ""})`);
+      } else if (estado.metrica === "tir") {
+        const con = serie.filter(v => v != null);
+        nota = con.length
+          ? `TIR anualizada: ${G.fmtPctSigno(con[con.length - 1] / 100, 1)}`
+          : "Sin TIR en el periodo: hacen falta una aportación y un valor.";
       } else if (estado.metrica === "ganado") {
         nota = `Dinero ganado: ${G.fmtEurSigno(serie[D.fechas.length - 1])}`;
       }
@@ -1369,6 +1412,7 @@
           { id: "patrimonio", et: "Patrimonio" },
           { id: "revalorizacion", et: "Revalorización" },
           { id: "ganado", et: "Dinero ganado" },
+          { id: "tir", et: "TIR anualizada" },
         ], estado.metrica, id => { estado.metrica = id; pintaPatrimonio(); });
       }
     }
