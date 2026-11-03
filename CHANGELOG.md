@@ -15,6 +15,42 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.11 — 3 de noviembre de 2026
+
+**Tanda 3a: el gráfico de evolución del patrimonio deja de enseñar solo el patrimonio.**
+En **Patrimonio → Total** hay un selector nuevo con tres métricas; las ventanas del zoom
+(1M/3M/6M/YTD/1A/Todo), el propietario y la moneda valen para las tres.
+
+- **Patrimonio**: lo de siempre, **idéntico**. Mismo `desdeCero` (con zoom, el eje se ajusta
+  a lo que se ve), mismo overlay «Aportado».
+- **Revalorización**: cuánto ha cambiado el patrimonio **desde el inicio del periodo que
+  estás viendo**: `serie[i] − serie[i₀]`, con `i₀` el primer día de la ventana del zoom.
+  Empieza en **0** y termina en **+X €** (o −X). La nota dice «Variación: +X € (+Y %)».
+  - El **%** va contra el valor con el que arranca la ventana. Mirando **«Todo»** ese valor
+    es 0 (la cartera empezó de nada) y un % sobre 0 no significa nada, así que ahí se mide
+    **sobre lo aportado** y se dice: «(+1398,4 % sobre lo aportado)».
+  - Los valores **negativos se ven**: el eje baja de 0 (una caída del −20 % en 1M se lee tal
+    cual), porque con estas métricas el cero es una referencia, no el suelo.
+- **Dinero ganado**: `serie − serieAportado`, patrimonio menos lo aportado hasta ese día.
+  Empieza en 0 el día de la primera aportación y sube o baja con el mercado. Nota: «Dinero
+  ganado: +X €».
+
+Detalles:
+
+- El selector **solo aparece en la vista «Total»**: en «Por producto», «Tu dinero vs
+  mercado» y «Reparto %» no es patrimonio y no pinta nada. Con «Patrimonio» elegida, el
+  gráfico es el de antes (el sha de la captura coincide).
+- **No se recuerda entre sesiones**: al recargar vuelve a «Patrimonio», como los demás
+  filtros.
+- **Los 4 recuadros de variación de la Tanda 2 no se tocan**: siguen mostrando patrimonio
+  siempre, elija la métrica que elija.
+- Sin backend ni cálculos nuevos: las tres series salen de `m.serie` y `m.serieAportado`,
+  que `metricas()` ya devuelve. No hay coste de rendimiento.
+- **La TIR anualizada por punto queda para V1.12 (3b)**: necesita un XIRR en cada fecha
+  (~6.890 puntos), su propia caché y su validación numérica.
+
+---
+
 ## V1.10 — 28 de octubre de 2026
 
 **Arreglado el saldo de las cuentas.** Con dos importaciones que se solapaban, el saldo

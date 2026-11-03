@@ -63,6 +63,7 @@
     rangoCompara: "todo",
     rangoComp: "todo",
     vista: "apilado",
+    metrica: "patrimonio",          // qué se dibuja en la vista «Total»
     dist: "clase",
     fondo: null,
     buscaFondos: "",
@@ -1035,6 +1036,36 @@
       ? `Métricas de los ${visibles().length} componentes activos, no del patrimonio completo.` : "";
   }
 
+  /** Las métricas del gráfico de «Total». Todas salen de series que ya están
+      calculadas: no hay ningún cálculo pesado aquí.
+
+      - `patrimonio`: el valor de la cartera cada día (lo de siempre).
+      - `revalorizacion`: cuánto ha cambiado el patrimonio **desde el inicio del
+        periodo que se está viendo**, así que empieza en 0 y termina en +X € (o -X).
+        Es la que hace útil el zoom: con 1M se ve lo ganado este mes.
+      - `ganado`: patrimonio menos lo aportado hasta ese día.
+
+      Devuelve `{ serie, pct }`, con `pct` la variación en % cuando tiene sentido. */
+  function serieDeMetrica(m, i0) {
+    const n = D.fechas.length;
+    if (estado.metrica === "revalorizacion") {
+      const base = m.serie[i0];
+      const serie = m.serie.map((v, i) => (v == null ? 0 : v - (base || 0)));
+      // El % va contra el valor con el que arranca la ventana. Mirando «Todo» ese
+      // valor es 0 (la cartera empezó de nada) y un % sobre 0 no significa nada:
+      // ahí se mide sobre lo aportado, que es lo que sí se puede comparar.
+      const fin = m.serie[n - 1] || 0;
+      if (base) return { serie, pct: (fin / base - 1) * 100, sobre: null };
+      const ap = m.serieAportado[n - 1] || 0;
+      return { serie, pct: ap ? (fin / ap - 1) * 100 : null, sobre: "sobre lo aportado" };
+    }
+    if (estado.metrica === "ganado") {
+      const serie = m.serie.map((v, i) => (v == null ? 0 : v - (m.serieAportado[i] || 0)));
+      return { serie, pct: null };
+    }
+    return { serie: m.serie, pct: null, sobre: null };
+  }
+
   function pintaPrincipal(m) {
     const fechas = corta(D.fechas);
     const prods = visibles().filter(p => (p.serie || []).some(v => v));
@@ -1042,13 +1073,27 @@
     let nota = "";
 
     if (estado.vista === "total") {
+      const i0 = desdeIdx();
+      const { serie, pct, sobre } = serieDeMetrica(m, i0);
+      const esPatri = estado.metrica === "patrimonio";
       G.lineaConEventos(cont, {
-        fechas, valores: corta(m.serie), color: G.css("--s1"), alto: 330,
-        overlay: { nombre: "Aportado", valores: corta(m.serieAportado) },
+        fechas, valores: corta(serie), color: G.css("--s1"), alto: 330,
+        overlay: esPatri
+          ? { nombre: "Aportado", valores: corta(m.serieAportado) }
+          : undefined,
         // Con el zoom puesto el eje se ajusta a lo que se ve: desde cero, un mes
         // o un año salen como una raya plana arriba y no se distingue nada.
-        desdeCero: estado.rango === "todo",
+        // Con revalorización o dinero ganado el cero es una referencia, no el
+        // suelo: hay que poder ver los números negativos.
+        desdeCero: esPatri && estado.rango === "todo",
       });
+      if (estado.metrica === "revalorizacion") {
+        const fin = serie[D.fechas.length - 1];
+        nota = `Variación: ${G.fmtEurSigno(fin)}` +
+               (pct == null ? "" : ` (${G.fmtPctSigno(pct, 1)}${sobre ? " " + sobre : ""})`);
+      } else if (estado.metrica === "ganado") {
+        nota = `Dinero ganado: ${G.fmtEurSigno(serie[D.fechas.length - 1])}`;
+      }
     } else if (estado.vista === "dinero") {
       // Lo que pusiste tú contra lo que ha puesto el mercado.
       const tuyo = m.serie.map((v, i) => Math.min(m.serieAportado[i], v));
@@ -1314,6 +1359,19 @@
     pintaProyeccion();
     pintaTabla();
     pintaSegm($("#segRango"), RANGOS, estado.rango, id => { estado.rango = id; pintaPatrimonio(); });
+    const segMet = $("#segMetrica");
+    if (segMet) {
+      // Las métricas solo tienen sentido sobre el patrimonio: en «Por producto»,
+      // «Tu dinero vs mercado» y «Reparto %» el selector no pinta nada.
+      segMet.hidden = estado.vista !== "total";
+      if (!segMet.hidden) {
+        pintaSegm(segMet, [
+          { id: "patrimonio", et: "Patrimonio" },
+          { id: "revalorizacion", et: "Revalorización" },
+          { id: "ganado", et: "Dinero ganado" },
+        ], estado.metrica, id => { estado.metrica = id; pintaPatrimonio(); });
+      }
+    }
     pintaSegm($("#segVista"), [
       { id: "apilado", et: "Por producto" }, { id: "total", et: "Total" },
       { id: "dinero", et: "Tu dinero vs mercado" }, { id: "reparto", et: "Reparto %" }
