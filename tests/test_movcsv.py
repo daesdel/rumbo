@@ -912,3 +912,108 @@ def test_rehacer_saldo_no_toca_los_saldos_anotados_a_mano():
             if x["producto"] == ef["id"]}
     assert "2026-10-01" not in vals                    # anterior al saldo a mano: no se pinta
     assert vals["2026-10-03"] == 1224.56               # después: sube y baja desde él
+
+
+from app import motor  # noqa: E402
+
+# ------------------------------------------------------- cambio de divisa (V1.14)
+def _dos_cuentas():
+    cfg = _cartera()
+    almacen.guarda_cuenta(cfg, {"nombre": "Euro", "tipo": "banco", "moneda": "EUR"})
+    almacen.guarda_cuenta(cfg, {"nombre": "Dolar", "tipo": "banco", "moneda": "USD"})
+    eur = next(c for c in cfg["cuentas"] if c["nombre"] == "Euro")
+    usd = next(c for c in cfg["cuentas"] if c["nombre"] == "Dolar")
+    return cfg, eur, usd
+
+
+def _cambio(cfg, eur, usd, salida=100.0, entrada=90.49, tc=0.9234, com=None, com_mon=None):
+    d = {"tipo": "cambio_divisa", "fecha": "2026-10-05", "cuenta": usd["id"],
+         "contrapartida": eur["id"], "moneda": "USD", "importe": salida,
+         "importeSalida": salida, "monedaSalida": "USD",
+         "importeEntrada": entrada, "monedaEntrada": "EUR", "tipoCambio": tc}
+    if com is not None:
+        d["comision"] = com
+        d["comisionMoneda"] = com_mon or "origen"
+    return almacen.guarda_movimiento(cfg, s._importe_en_eur(d))
+
+
+def test_el_cambio_mueve_las_dos_cuentas_en_su_moneda():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd)
+    assert motor.efecto_de(mov, usd["id"]) == -1
+    assert motor.efecto_de(mov, eur["id"]) == 1
+    assert motor.importe_en_cuenta(mov, "USD") == 100.0     # lo que sale
+    assert motor.importe_en_cuenta(mov, "EUR") == 90.49     # lo que entra
+
+
+def test_el_rate_del_usuario_no_se_pisa_con_el_oficial():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd, tc=0.9234)
+    assert float(mov["tipoCambio"]) == pytest.approx(0.9234)
+
+
+def test_el_importe_en_eur_usa_el_cambio_del_dia():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd, salida=100.0)
+    assert mov["importe"] == pytest.approx(90.0, abs=0.5)   # 100 USD al cambio del día
+
+
+def test_la_comision_en_origen_se_pasa_a_euros():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd, com=2.0, com_mon="origen")
+    assert mov["comision"] == pytest.approx(2.0 * 0.90, abs=0.02)
+
+
+def test_la_comision_en_destino_euros_no_se_convierte():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd, com=1.0, com_mon="destino")
+    assert mov["comision"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_un_cambio_entre_cuentas_de_la_misma_moneda_se_rechaza():
+    cfg, eur, _ = _dos_cuentas()
+    almacen.guarda_cuenta(cfg, {"nombre": "Otra", "tipo": "banco", "moneda": "EUR"})
+    otra = next(c for c in cfg["cuentas"] if c["nombre"] == "Otra")
+    with pytest.raises(almacen.ErrorValidacion) as e:
+        _cambio(cfg, eur, otra, salida=100.0, entrada=100.0, tc=1.0)
+    assert "Transferencia" in " ".join(e.value.errores)
+
+
+def test_el_importe_entrante_editado_se_acepta_tal_cual():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd, salida=100.0, entrada=95.0, tc=0.9234)
+    assert motor.importe_en_cuenta(mov, "EUR") == 95.0      # no 90,49
+
+
+def test_el_cambio_no_suma_al_aportado():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd)
+    assert "producto" not in mov          # sin producto no entra en ningún aportado
+
+
+def test_rehacer_saldo_deja_las_dos_cuentas_derechas_y_borrar_las_revierte():
+    cfg, eur, usd = _dos_cuentas()
+    mov = _cambio(cfg, eur, usd)
+    s.rehacer_saldo_cuenta(cfg, usd["id"])
+    s.rehacer_saldo_cuenta(cfg, eur["id"])
+    ef_u, ef_e = (almacen.producto_efectivo_de(cfg, c["id"]) for c in (usd, eur))
+    vals = {v["producto"]: round(float(v["valor"]), 2) for v in cfg["valoraciones"]}
+    assert vals[ef_u["id"]] == -100.0
+    assert vals[ef_e["id"]] == 90.49
+    # borrar: las dos vuelven a 0
+    almacen.borra_movimiento(cfg, mov["id"])
+    s.rehacer_saldo_cuenta(cfg, usd["id"])
+    s.rehacer_saldo_cuenta(cfg, eur["id"])
+    vals = {v["producto"]: round(float(v["valor"]), 2) for v in cfg["valoraciones"]
+            if v["producto"] in (ef_u["id"], ef_e["id"])}
+    assert vals.get(ef_u["id"], 0.0) == 0.0
+    assert vals.get(ef_e["id"], 0.0) == 0.0
+
+
+def test_regresion_la_transferencia_sigue_igual():
+    cfg, eur, usd = _dos_cuentas()
+    mov = almacen.guarda_movimiento(cfg, {"tipo": "transferencia", "fecha": "2026-10-05",
+                                          "cuenta": eur["id"], "contrapartida": usd["id"],
+                                          "importe": 50.0})
+    assert motor.efecto_de(mov, eur["id"]) == -1
+    assert motor.efecto_de(mov, usd["id"]) == 1

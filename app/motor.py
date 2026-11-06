@@ -885,7 +885,9 @@ EFECTO_EFECTIVO = {"dividendo": (1, 0), "interes": (1, 0), "deposito": (1, -1),
                    # Comisiones sueltas e impuestos pagados: dinero que SALE de la
                    # cuenta. (Compra y venta no van aquí: su dinero lo mueve una
                    # sola cuenta, ver EFECTO_COMPRA_VENTA.)
-                   "comision": (-1, 0), "impuesto": (-1, 0)}
+                   "comision": (-1, 0), "impuesto": (-1, 0),
+                   # Cambio de divisa: sale de una cuenta y entra en otra distinta.
+                   "cambio_divisa": (-1, 1)}
 # Compra y venta: el dinero entra o sale de UNA sola cuenta. Si hay contrapartida
 # es esa la que paga o cobra (así lo importa Portfolio Performance: en una compra
 # la contrapartida es la cuenta corriente que desembolsa y «cuenta» es donde
@@ -913,7 +915,23 @@ def efecto_de(mov, cid):
 def importe_en_cuenta(mov, mon, tc=None):
     """El importe de un movimiento expresado en la moneda `mon` de su cuenta (ahí
     vive el saldo). `tc` es una función fecha → euros por unidad de `mon`; si hace
-    falta un cambio y no lo hay, devuelve None: no se inventa ninguna cifra."""
+    falta un cambio y no lo hay, devuelve None: no se inventa ninguna cifra.
+
+    CONTRATO: la rama de `cambio_divisa` va PRIMERO y devuelve siempre. Lleva dos
+    importes y se elige por la moneda de la cuenta. Si alguien la moviera debajo del
+    atajo de `monedaOriginal`, la cuenta destino recibiría el importe de la de
+    origen (dólares en una cuenta de euros) y el saldo saldría mal sin avisar.
+    """
+    # Un cambio de divisa lleva DOS importes, cada uno en su moneda: el que sale y
+    # el que entra. No se convierten con el cambio del día, los pone el usuario (son
+    # el extracto). Se elige por la moneda de la cuenta, que es lo que llega aquí.
+    if mov.get("tipo") == "cambio_divisa":
+        m = (mon or "").upper()
+        if m and m == (mov.get("monedaSalida") or "").upper() and mov.get("importeSalida") is not None:
+            return float(mov["importeSalida"])
+        if m and m == (mov.get("monedaEntrada") or "").upper() and mov.get("importeEntrada") is not None:
+            return float(mov["importeEntrada"])
+        return None
     eur = mov.get("importe")
     if eur is None:
         return None

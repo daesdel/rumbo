@@ -966,6 +966,10 @@ def _importe_en_eur(datos):
     original en su moneda. Así lo anotado siempre es el dinero real de la operación y
     las conversiones (para verlo en euros o en dólares) se aplican después."""
     mon = str(datos.get("moneda") or "").strip().upper() or "EUR"
+    # En un cambio de divisa el rate lo pone el bróker: se guarda tal cual y no se
+    # pisa con el oficial (que es el que se usa solo para pasar a euros).
+    tc_usuario = datos.get("tipoCambio")
+    com_usuario = datos.get("comision")   # en su moneda, ANTES de convertir nada
     if mon == "EUR":
         # En euros no hace falta nada: y si el movimiento traía otra moneda, se limpia.
         datos["monedaOriginal"], datos["importeOriginal"], datos["tipoCambio"] = "", "", ""
@@ -992,6 +996,18 @@ def _importe_en_eur(datos):
     datos["tipoCambio"] = round(tc, 8)
     if com:
         datos["comision"] = round(com * tc, 2)
+    if datos.get("tipo") == "cambio_divisa":
+        datos["tipoCambio"] = tc_usuario      # el de la operación, no el oficial
+        # La comisión se pasa a euros con el cambio de SU moneda, no la de salida.
+        com2 = com_usuario                     # el original: el genérico ya lo tocó
+        if com2 not in (None, "", 0):
+            mc = str(datos.get("comisionMoneda") or "").strip().upper()
+            mon_com = mon
+            if mc == "DESTINO":
+                mon_com = str(datos.get("monedaEntrada") or "").strip().upper() or mon
+            tcc = 1.0 if mon_com == "EUR" else _tc_eur(mon_com, f)
+            if tcc:
+                datos["comision"] = round(float(com2) * tcc, 2)
     return datos
 
 
@@ -1177,6 +1193,18 @@ def rehacer_saldo_cuenta(cfg, cid, avisos=None):
     return escritas
 
 
+def _rehace_cuentas(cfg, mov, avisos=None):
+    """Rehace la serie entera de las cuentas que toca un movimiento.
+
+    Tras editar o borrar hace falta: refrescar solo el día deja pegado cualquier
+    valor que ya estuviera mal (fue el bug de V1.10). Al importar NO se usa: allí
+    se llama una vez al final, no por fila.
+    """
+    for cid in sorted({(mov or {}).get("cuenta"), (mov or {}).get("contrapartida")} - {None, ""}):
+        if motor.efecto_de(mov, cid):
+            rehacer_saldo_cuenta(cfg, cid, avisos)
+
+
 def refresca_efectivo(cfg, mov, avisos=None):
     """Recalcula el saldo del día en TODAS las cuentas que mueve este movimiento
     (su `cuenta` y su `contrapartida`). Devuelve True si ha tocado algún saldo."""
@@ -1216,6 +1244,9 @@ def api_guardar(coleccion):
             if previo and (previo.get("cuenta"), previo.get("fecha")) != (mov.get("cuenta"), mov.get("fecha")):
                 refresca_efectivo(cfg, previo, avisos)
             refresca_efectivo(cfg, mov, avisos)
+            _rehace_cuentas(cfg, mov, avisos)
+            if previo:
+                _rehace_cuentas(cfg, previo, avisos)
             return mov
         if coleccion != "productos":
             return GUARDAR[coleccion](cfg, datos)
@@ -1242,6 +1273,7 @@ def api_borrar(coleccion, ident):
         item = BORRAR[coleccion](cfg, ident)
         # Borrado un dividendo o un interés, el dinero deja de estar en la cuenta.
         refresca_efectivo(cfg, mov, avisos)
+        _rehace_cuentas(cfg, mov, avisos)
         return item
     return cambia(fn, avisos)
 

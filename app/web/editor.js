@@ -486,6 +486,43 @@
     }, nuevo ? "Guardar producto" : "Guardar cambios");
 
     rellena(f, { ...p, ter: p.ter != null ? decimal(+(p.ter * 100).toFixed(4)) : "" });
+    /** El cálculo del cambio, a la vista mientras se escribe. */
+    // Marcar que el usuario ha escrito el importe entrante: a partir de ahí manda
+    // él y el resumen no lo pisa (si lo vacía, vuelve a calcular solo).
+    if (f.elements.impEntrada) {
+      f.elements.impEntrada.addEventListener("input", e => {
+        if (e.target.value.trim()) e.target.dataset.toco = "1";
+        else delete e.target.dataset.toco;
+      });
+    }
+    const pintaCambio = () => {
+      const caja = f.querySelector("#mResumenCambio");
+      if (!caja) return;
+      const n = x => (isFinite(+x) ? +x : 0);
+      const sal = n(f.elements.importe.value.replace(",", "."));
+      const tc = n(f.elements.tcCambio.value.replace(",", "."));
+      const com = n(f.elements.comision.value.replace(",", "."));
+      const enOrigen = (f.elements.comMoneda.value || "origen") === "origen";
+      const mo = (cuentaDe(f.elements.cuenta.value) || {}).moneda || "EUR";
+      const md = (cuentaDe(f.elements.contrapartida.value) || {}).moneda || "EUR";
+      const calc = tc ? (enOrigen ? (sal - com) * tc : sal * tc - com) : 0;
+      const real = f.elements.impEntrada.value.trim()
+        ? n(f.elements.impEntrada.value.replace(",", ".")) : calc;
+      if (!f.elements.impEntrada.dataset.toco) f.elements.impEntrada.value = calc ? calc.toFixed(2) : "";
+      f.querySelectorAll(".siCambio .sufEnt").forEach(s => { s.textContent = sufDe(md); });
+      const partes = [];
+      if (sal) partes.push(`${num(sal, 2)} ${mo}`);
+      if (com && enOrigen) partes.push(`− ${num(com, 2)} ${mo}`);
+      if (tc) partes.push(`× ${tc}`);
+      const igual = calc ? ` = ${num(calc, 2)} ${md}` : "";
+      const linea = (partes.length ? partes.join(" ") : "Escribe el importe y el tipo de cambio") + igual;
+      const dif = real && calc && Math.abs(real - calc) > 0.005
+        ? `<br><b>Calculado:</b> ${num(calc, 2)} ${md} · <b>Real:</b> ${num(real, 2)} ${md}`
+        : "";
+      caja.innerHTML = linea + dif;
+    };
+    const sufDe = m => ({ EUR: "€", USD: "$", GBP: "£" })[m] || m;
+
     const ajusta = () => {
       const saldo = SOLO_SALDO.includes(f.elements.tipo.value);
       const online = !saldo && f.elements.fuente.value !== "manual";
@@ -1179,6 +1216,14 @@
           `<option value="${esc(p.id)}">${esc(nombre(p))}</option>`).join("")}</select>`,
           "escisión: de qué activo se resta el coste", "ancho siEntrega")}
         ${campo("Comisión", '<div class="conSufijo"><input name="comision" inputmode="decimal" placeholder="0,00"><span>€</span></div>', "ya incluida en el importe", "siCom")}
+        <div class="siCambio ancho" hidden>
+          <div class="fila">
+            ${campo("Tipo de cambio", '<input name="tcCambio" inputmode="decimal" placeholder="0,9234">', "lo que vale 1 unidad de la moneda que sale")}
+            ${campo("Importe que entra", '<div class="conSufijo"><input name="impEntrada" inputmode="decimal" placeholder="0,00"><span class="sufEnt">€</span></div>', "en la moneda de la cuenta destino")}
+            ${campo("Comisión en", '<select name="comMoneda"><option value="origen">moneda que sale</option><option value="destino">moneda que entra</option></select>', "de dónde se resta")}
+          </div>
+          <p class="resumenCambio" id="mResumenCambio"></p>
+        </div>
         ${campo("Nota", '<input name="nota" maxlength="200" placeholder="Por ejemplo: aportación mensual">', "opcional", "ancho")}
       </div>
       <label class="interruptor siVincula" hidden><input type="checkbox" name="vincular"><span class="pista"></span>
@@ -1188,6 +1233,17 @@
     async f => {
       const d = campos(f);
       if (!nuevo) d.id = m.id;
+      if (d.tipo === "cambio_divisa") {
+        const cO = cuentaDe(d.cuenta) || {}, cD = cuentaDe(d.contrapartida) || {};
+        d.monedaSalida = (cO.moneda || d.moneda || "EUR").toUpperCase();
+        d.monedaEntrada = (cD.moneda || "EUR").toUpperCase();
+        d.importeSalida = Number(d.importe);   // el que sale, en su moneda (aparte del EUR)
+        d.tipoCambio = d.tcCambio;
+        d.importeEntrada = d.impEntrada;
+        d.comisionMoneda = d.comMoneda || "origen";
+        d.moneda = d.monedaSalida;      // el importe que se manda es el que SALE
+        delete d.tcCambio; delete d.impEntrada; delete d.comMoneda;
+      }
       const hayVinculo = !f.querySelector(".siVincula").hidden && f.elements.vincular.checked;
       d.vincular = hayVinculo ? "1" : "";
       // Una entrega entrante no toca dinero: ni cuenta, ni comisión. La contrapartida
@@ -1221,6 +1277,43 @@
     let monToque = !nuevo || !!copia;
     f.elements.moneda.addEventListener("change", () => { monToque = true; });
     let vinMostrado = false;
+    /** El cálculo del cambio, a la vista mientras se escribe. */
+    // Marcar que el usuario ha escrito el importe entrante: a partir de ahí manda
+    // él y el resumen no lo pisa (si lo vacía, vuelve a calcular solo).
+    if (f.elements.impEntrada) {
+      f.elements.impEntrada.addEventListener("input", e => {
+        if (e.target.value.trim()) e.target.dataset.toco = "1";
+        else delete e.target.dataset.toco;
+      });
+    }
+    const pintaCambio = () => {
+      const caja = f.querySelector("#mResumenCambio");
+      if (!caja) return;
+      const n = x => (isFinite(+x) ? +x : 0);
+      const sal = n(f.elements.importe.value.replace(",", "."));
+      const tc = n(f.elements.tcCambio.value.replace(",", "."));
+      const com = n(f.elements.comision.value.replace(",", "."));
+      const enOrigen = (f.elements.comMoneda.value || "origen") === "origen";
+      const mo = (cuentaDe(f.elements.cuenta.value) || {}).moneda || "EUR";
+      const md = (cuentaDe(f.elements.contrapartida.value) || {}).moneda || "EUR";
+      const calc = tc ? (enOrigen ? (sal - com) * tc : sal * tc - com) : 0;
+      const real = f.elements.impEntrada.value.trim()
+        ? n(f.elements.impEntrada.value.replace(",", ".")) : calc;
+      if (!f.elements.impEntrada.dataset.toco) f.elements.impEntrada.value = calc ? calc.toFixed(2) : "";
+      f.querySelectorAll(".siCambio .sufEnt").forEach(s => { s.textContent = sufDe(md); });
+      const partes = [];
+      if (sal) partes.push(`${num(sal, 2)} ${mo}`);
+      if (com && enOrigen) partes.push(`− ${num(com, 2)} ${mo}`);
+      if (tc) partes.push(`× ${tc}`);
+      const igual = calc ? ` = ${num(calc, 2)} ${md}` : "";
+      const linea = (partes.length ? partes.join(" ") : "Escribe el importe y el tipo de cambio") + igual;
+      const dif = real && calc && Math.abs(real - calc) > 0.005
+        ? `<br><b>Calculado:</b> ${num(calc, 2)} ${md} · <b>Real:</b> ${num(real, 2)} ${md}`
+        : "";
+      caja.innerHTML = linea + dif;
+    };
+    const sufDe = m => ({ EUR: "€", USD: "$", GBP: "£" })[m] || m;
+
     const ajusta = () => {
       const t = f.elements.tipo.value;
       const p = prod(f.elements.producto.value);
@@ -1239,7 +1332,15 @@
       // dividendos e intereses (en un dividendo o un interés, si los hay).
       const esRenta = t === "dividendo" || t === "interes";
       f.querySelector(".siImp").hidden = !esRenta;
-      f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta" || esRenta);
+      // La comisión también hace falta en un cambio de divisa: se resta de un lado.
+      f.querySelector(".siCom").hidden = !(t === "compra" || t === "venta" || esRenta
+                                           || t === "cambio_divisa");
+      // Cambio de divisa: sus tres campos propios y el resumen en vivo. El producto
+      // no pinta nada: es dinero que pasa de una cuenta a otra.
+      const esCambio = t === "cambio_divisa";
+      const cajaCam = f.querySelector(".siCambio");
+      if (cajaCam) cajaCam.hidden = !esCambio;
+      if (esCambio) pintaCambio();
       // Una entrega entrante (escisión) no mueve dinero de ninguna cuenta.
       f.querySelector(".cuentaCampo").hidden = t === "entrega";
       f.querySelector(".siEntrega").hidden = t !== "entrega";

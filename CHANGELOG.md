@@ -15,6 +15,55 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.14 — 6 de noviembre de 2026
+
+**Cambio de divisa entre dos cuentas.** Un solo movimiento que saca dinero de una cuenta en
+su moneda y lo mete en otra en la suya, con el tipo de cambio del bróker.
+
+- **Cuarta opción real del formulario de movimientos**: `cambio_divisa` ya no es un zombi.
+  Estaba en `TIPOS_MOV` pero **no** en `EFECTO_EFECTIVO`, así que no movía nada.
+- **Dos importes, uno por lado**: `importeSalida`/`monedaSalida` y
+  `importeEntrada`/`monedaEntrada`, más `tipoCambio`, `comision` y `comisionMoneda`
+  (`origen`/`destino`). El `importe` de siempre sigue en **EUR**, con el cambio **oficial**
+  del día, porque es lo que alimenta patrimonio, plusvalía y XIRR.
+- **El rate del bróker manda**: `tipoCambio` es el de la operación (con su spread), no se
+  pisa con el oficial. `_importe_en_eur()` lo respeta.
+- **Importe entrante editable**, precargado por fórmula
+  (`(salida − comisión en origen) × tipo`), porque el bróker redondea. El formulario enseña
+  «Calculado / Real» cuando no coinciden.
+- **La comisión se pasa a euros con el cambio de SU moneda** (`comisionMoneda`), no la de
+  salida: `comisionEur = comisión × tc_eur(monedaComision, fecha)`.
+- **Las dos cuentas se rehacen enteras** al guardar y al borrar (`_rehace_cuentas`), no solo
+  el día: es la lección de V1.10.
+- **Validaciones**: importes y tipo > 0, cuenta destino obligatoria, y **rechazo si las dos
+  cuentas están en la misma moneda** («usa una Transferencia»).
+- No suma al aportado: mover dinero entre cuentas propias no es aportar.
+
+### El bug que costó tres sesiones
+
+La comisión en moneda destino salía mal (0,89 € en vez de 1,00 €). No había error de
+compilación, ni de test, ni de consola: el código «parecía bien». Era un **nombre mal
+escrito**: se leía `datos.get("monedaComision")` cuando la clave es **`comisionMoneda`** — las
+mismas dos palabras en otro orden. `mc` quedaba vacío, no entraba en la rama «destino» y la
+comisión se convertía con el cambio de la moneda de salida.
+
+Lo cazó un `print(datos.keys())`: la clave **llegaba bien** (`'comisionMoneda': 'destino'`) y
+aun así `mc` salía vacío. **Con dos campos que son las mismas palabras en distinto orden, el
+nombre se escribe mal y no falla nada.**
+
+### Verificación
+
+- **306 tests** (10 nuevos): dos cuentas en su moneda, rate del bróker respetado, importe en
+  EUR al cambio del día, comisión en cada lado, EUR→EUR rechazado, importe entrante editado,
+  aportado intacto, borrado reversible y regresión de transferencia.
+- **Navegador**: campos visibles, resumen en vivo («100 USD − 2 USD × 0.9234 = 90,49 EUR»),
+  «Calculado 90,49 / Real 95», guardado con `tipoCambio` 0,9234 e `importeEntrada` 95,
+  saldos **USD 7,90 → −92,10** y **EUR 0 → +95,00**, y **tras borrar vuelven exactamente**.
+  Regresiones V1.13: producto → `tesla_inc`/`revolut_usd`/`compra`; cuenta →
+  vacío/`revolut_gina_euros`/`deposito`. **0 errores de consola.**
+
+---
+
 ## V1.13 — 6 de noviembre de 2026
 
 **Arreglado: una retirada anotada desde la ficha de una cuenta se guardaba en otra cuenta

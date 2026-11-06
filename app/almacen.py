@@ -412,6 +412,24 @@ def guarda_movimiento(cfg, datos):
         if unidades > tenias + 1e-6:
             errores.append(f"El {fmt_fecha(f)} solo tenías {fmt_num(tenias)} unidades de "
                            f"«{p.get('corto') or p['nombre']}» y estás vendiendo {fmt_num(unidades)}.")
+    # Cambio de divisa: dos importes (el que sale y el que entra), cada uno en la
+    # moneda de su cuenta, y las cuentas tienen que estar en monedas distintas.
+    if tipo == "cambio_divisa":
+        sal = numero(datos.get("importeSalida"), "el importe que sale", errores,
+                     obligatorio=True, mayor_que=0)
+        ent = numero(datos.get("importeEntrada"), "el importe que entra", errores,
+                     obligatorio=True, mayor_que=0)
+        numero(datos.get("tipoCambio"), "el tipo de cambio", errores,
+               obligatorio=True, mayor_que=0)
+        if not cp:
+            errores.append("Un cambio de divisa necesita su cuenta de destino "
+                           "(la cuenta de contrapartida).")
+        elif cid:
+            m1 = (cuenta(cfg, cid) or {}).get("moneda", "EUR").upper()
+            m2 = (cuenta(cfg, cp) or {}).get("moneda", "EUR").upper()
+            if m1 == m2:
+                errores.append("Las dos cuentas están en " + m1 + ": para mover dinero "
+                               "entre cuentas de la misma moneda usa una Transferencia.")
     if errores:
         raise ErrorValidacion(errores)
 
@@ -469,6 +487,8 @@ def guarda_movimiento(cfg, datos):
 
 
 CAMPOS_MOV_EXTRA = ("cuenta", "contrapartida", "propietario", "importeOriginal",
+                    "importeSalida", "monedaSalida", "importeEntrada", "monedaEntrada",
+                    "comisionMoneda",
                     "monedaOriginal", "tipoCambio", "impuestos", "origen", "fuente", "urlFuente",
                     "productoOrigen")
 
