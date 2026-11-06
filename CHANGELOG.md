@@ -15,6 +15,43 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.13 — 6 de noviembre de 2026
+
+**Arreglado: una retirada anotada desde la ficha de una cuenta se guardaba en otra cuenta
+(y con un producto encima).**
+
+### Qué pasaba
+
+Al abrir **«+ Movimiento»** desde la ficha de una cuenta, el formulario `formMovimiento`
+rellenaba **siempre** el campo `producto`:
+
+```js
+producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id)
+```
+
+Y la cuenta por defecto era `m.cuenta || prod(m.producto).cuenta`: si `m.cuenta` llegaba
+vacío, **la cuenta salía del producto**, no de la ficha desde la que habías entrado. De ahí
+el síntoma: una retirada en **FREEDOM DOLAR** se grababa con el producto
+`REVOLUT FONDO MONETARIO` y la cuenta `REVOLUT EURO` — las del primer producto cotizable (o
+el que tuvieras filtrado).
+
+No era un selector que no se reiniciaba: era que **nunca se dejaba de rellenar el producto**
+en un formulario que, en ese caso, es dinero de la cuenta y no de un producto.
+
+### Qué hace ahora
+
+- Abierto desde una cuenta: **`producto` va vacío** y la cuenta es la de la ficha.
+- El tipo por defecto pasa a **`deposito`** (una `compra` sin producto no se puede guardar).
+
+### Auditoría de los datos de producción (copia del 28-oct)
+
+15 movimientos con `producto` **y** tipo de cuenta, y **todos son `comision` o `impuesto`**:
+comisiones de compra e impuestos de venta que crea el importador de Portfolio Performance,
+que **pertenecen a su producto** y son correctos. **No hay ninguna `retirada` ni ningún
+`deposito` con producto: no hay corrupción que reparar.**
+
+---
+
 ## V1.12 — 3 de noviembre de 2026
 
 **Tanda 3b: la TIR anualizada entra en el gráfico de patrimonio.** Con esto queda cerrado

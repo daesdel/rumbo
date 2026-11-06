@@ -1135,10 +1135,13 @@
     const nuevo = !m || !!copia;
     // Con la copia se trabaja sobre una copia del original: rellenar no lo toca.
     m = m ? (copia ? Object.assign({}, m) : m)
-          : { fecha: hoy(), tipo: "compra",
-              producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id),
-              // Cuenta ya elegida al abrirlo desde la ficha de una cuenta.
-              ...(opcs && opcs.cuenta ? { cuenta: opcs.cuenta } : {}) };
+          // Abierto desde una cuenta: un depósito/retirada es dinero DE LA CUENTA,
+          // así que no se preselecciona ningún producto (antes se colaba el primero
+          // de la lista o el filtro, y la cuenta salía del producto, no de la ficha).
+          : { fecha: hoy(), tipo: opcs && opcs.cuenta ? "deposito" : "compra",
+              ...(opcs && opcs.cuenta
+                  ? { producto: "", cuenta: opcs.cuenta }
+                  : { producto: productoId || (E.filtro !== "todos" ? E.filtro : cotizables[0].id) }) };
     const props = E.cfg.propietarios || [];
     // Cuenta y propietario por defecto: los del producto, y si no, los de la cuenta.
     const cuentaPorDef = m.cuenta || (prod(m.producto) || {}).cuenta || "";
