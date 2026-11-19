@@ -15,6 +15,21 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.17 — 19 de noviembre de 2026
+
+**Se enciende el control de accesos en producción.** Hasta ahora el código estaba desplegado
+pero dormido: sin `PATRIMONIO_ROL_OBLIGATORIO`, una petición sin cabecera caía a admin.
+
+- **`PATRIMONIO_ROL_OBLIGATORIO: "1"`** en `docker-compose.yaml`, junto a
+  `PATRIMONIO_ORIGENES`. Va en el repo y no en un `.env` suelto del servidor: así el
+  despliegue es reproducible y la variable queda documentada.
+- A partir de ahora, si `Remote-Role` **no llega**, la app entra en **solo lectura** (y las
+  escrituras devuelven **403**). Si Pangolin cambiara o alguien montara otro proxy, el control
+  **no se apaga en silencio**: se cierra.
+- **En local no se pone**: sin Pangolin no hay cabecera y no se podría escribir nada.
+
+---
+
 ## V1.16 — 19 de noviembre de 2026
 
 **Fallo de seguridad: un usuario de solo lectura veía botones de escritura.** El backend los

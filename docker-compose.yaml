@@ -13,6 +13,11 @@ services:
       # Dominio público desde el que se entra (cámbialo si usas otro subdominio).
       # Debe coincidir con el sitio que crees en Pangolin.
       PATRIMONIO_ORIGENES: "https://rumbo.daesdel.es"
+      # Pangolin inyecta la cabecera `Remote-Role` con el rol del usuario. Con esto
+      # puesto, si la cabecera NO llega (un cambio en Pangolin, otro proxy) la app
+      # entra en SOLO LECTURA en vez de caer a admin: falla cerrado. No ponerlo en
+      # local: sin Pangolin no habría cabecera y no se podría escribir nada.
+      PATRIMONIO_ROL_OBLIGATORIO: "1"
     volumes:
       - rumbo_datos:/app/mis_datos
 
