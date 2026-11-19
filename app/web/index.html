@@ -708,7 +708,13 @@ body.video .tarjeta{padding:22px 24px}
 @media(max-width:720px){.marca .marcaSep,.marca #marcaTexto{display:none}}
 /* Solo lectura (rol Member): se esconde lo que ESCRIBE. Leer sigue a la vista:
    abrir fichas, ver movimientos, anotaciones, exportar o descargar una copia. */
-html.solo-lectura .acc button:not([data-acc="verCuenta"]):not([data-acc="movsCuenta"]):not([data-acc="verAnotaciones"]):not([data-acc="fuenteDet"]):not([data-acc="todosValores"]):not([data-acc="descargarCopia"]):not([data-acc="exportarWeb"]),
+html.solo-lectura .acc button:not([data-acc="verCuenta"]):not([data-acc="movsCuenta"]):not([data-acc="verAnotaciones"]):not([data-acc="todosValores"]):not([data-acc="descargarCopia"]):not([data-acc="exportarWeb"]),
+/* Los que NO viven en una celda .acc: destructivos y de escritura. */
+html.solo-lectura [data-acc="reiniciar"],
+html.solo-lectura [data-acc="repartirColores"],
+html.solo-lectura [data-acc="cargarPlantilla"],
+html.solo-lectura [data-acc="fuenteDet"],
+html.solo-lectura [data-acc="imOrigen"],
 html.solo-lectura .btn.prim,
 html.solo-lectura #btnMovCsv { display:none !important; }
 </style>

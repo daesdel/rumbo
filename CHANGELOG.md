@@ -15,6 +15,52 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.16 — 19 de noviembre de 2026
+
+**Fallo de seguridad: un usuario de solo lectura veía botones de escritura.** El backend los
+bloqueaba con 403, pero verlos es una invitación al desastre — sobre todo «Empezar de
+nuevo…», que borra la cartera entera.
+
+### Qué pasaba
+
+El CSS de V1.15 ocultaba las celdas `.acc` (las acciones de cada fila) y unos pocos botones
+suelto. Pero **cinco acciones de escritura no viven en una celda `.acc`** y se colaban:
+
+| Acción | Dónde | Qué hace |
+|---|---|---|
+| `reiniciar` | cabecera de **todas** las secciones de Mis datos | **«Empezar de nuevo…»: borra la cartera entera** |
+| `repartirColores` | Productos | reparte colores entre productos (escribe) |
+| `cargarPlantilla` | Saldos y valores | importa una plantilla de saldos (escribe) |
+| `fuenteDet` | Saldos y valores | abre los ajustes de una fuente (puede cambiarla) |
+| `imOrigen` | Importar | abre el asistente de importación |
+
+### Arreglo
+
+Se ocultan por `data-acc`, **estén donde estén**, además de la lista blanca de lectura que ya
+había. El viewer conserva: abrir ficha, ver movimientos, ver anotaciones, exportar y descargar
+una copia.
+
+**El CSS sigue siendo cosmético**: el candado es el 403 del servidor. Ocultar es para no
+tentar; bloquear es lo que protege.
+
+### Auditoría (con `Remote-Role: Member`)
+
+Recorridas las seis secciones de Mis datos contando botones visibles con acción de escritura:
+
+- **Member: 0** botones de escritura visibles.
+- **Editor: 4.185** (todo como antes).
+
+Única lectura que un viewer no ve en «Cuentas»: ninguna — «Abrir ficha» y «Movimientos»
+siguen ahí y la ficha abre.
+
+### Activación en producción
+
+Con la cabecera ya confirmada (`daesdel` → `Admin`, `daesdelopenclaw` → `Member`), se define
+**`PATRIMONIO_ROL_OBLIGATORIO=1`** en el compose: a partir de ahí, si la cabecera no llega, la
+app entra en **solo lectura** en vez de caer a admin. **Fallo cerrado.**
+
+---
+
 ## V1.15 — 19 de noviembre de 2026
 
 **Control de accesos por rol con Pangolin.** La app deja de ser de todos: quien entra por
