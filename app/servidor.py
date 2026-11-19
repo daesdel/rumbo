@@ -26,6 +26,7 @@ from werkzeug.serving import make_server
 
 import math
 import copy
+import functools
 from collections import defaultdict
 
 from . import almacen, buscar, exportar, importar, motor, movcsv, plantilla, seguro
@@ -2052,6 +2053,84 @@ def version_etiqueta():
     """La versión como se enseña: V1.00. El número vive solo en app/VERSION y el
     navegador no lo formatea nunca (así no hay que cambiarlo en dos sitios)."""
     return "V" + version_actual()
+
+
+# --------------------------------------------------------------- control de accesos
+# Pangolin (SSO de plataforma) inyecta `Remote-Role` con el rol del usuario. Nosotros
+# lo traducimos a tres niveles y, a partir de ahí, lo único que decide es el nivel.
+ROLE_HEADER = "Remote-Role"
+ROLE_MAP = {"admin": "admin", "editor": "editor", "member": "viewer"}
+NIVEL_ROL = {"viewer": 1, "editor": 2, "admin": 3}
+# Rutas POST que NO escriben nada: se pueden usar con rol viewer.
+RUTAS_SOLO_LECTURA = (
+    "/api/cuentas/<ident>/movimientos/csv/previsualizar",
+    "/api/productos/<ident>/movimientos/csv/previsualizar",
+    "/api/importar/previsualizar",
+)
+
+
+def rol_de_la_peticion():
+    """(rol, valor crudo de la cabecera). `rol` es admin/editor/viewer o None.
+
+    Sin cabecera hay dos comportamientos, y es a propósito:
+    - **Local** (por defecto): `admin`. La app se usa desde el portátil y los 306
+      tests no tienen por qué mandar cabeceras.
+    - **Producción** (`PATRIMONIO_ROL_OBLIGATORIO=1`): `None` → se rechaza. Si la
+      cabecera dejara de llegar por un cambio en Pangolin, el control **no se apaga
+      en silencio**: falla cerrado. Es la diferencia entre un candado y un adorno.
+    Un rol desconocido se trata como `viewer`: lo peor que puede pasar es que a
+    alguien no le salga un botón, no que escriba sin permiso.
+    """
+    crudo = (request.headers.get(ROLE_HEADER) or "").strip()
+    if not crudo:
+        if os.environ.get("PATRIMONIO_ROL_OBLIGATORIO"):
+            return None, ""
+        return "admin", ""
+    return ROLE_MAP.get(crudo.lower(), "viewer"), crudo
+
+
+def requiere_rol(minimo):
+    """Exige un nivel mínimo (viewer < editor < admin) para entrar en la vista."""
+    def envoltura(fn):
+        @functools.wraps(fn)
+        def dentro(*args, **kwargs):
+            rol, crudo = rol_de_la_peticion()
+            if rol is None:
+                return jsonify(ok=False, errores=[
+                    "Esta instalación necesita saber quién eres y no ha llegado la "
+                    f"cabecera «{ROLE_HEADER}»: revisa el SSO de Pangolin."]), 403
+            if NIVEL_ROL.get(rol, 0) < NIVEL_ROL[minimo]:
+                return jsonify(ok=False, errores=[
+                    f"Tu rol («{crudo or rol}») es de solo lectura: no puedes cambiar datos."]), 403
+            return fn(*args, **kwargs)
+        dentro._rol_envuelto = True
+        return dentro
+    return envoltura
+
+
+@app.get("/api/me")
+def api_me():
+    """Quién soy y qué puedo hacer. La usa el frontend para esconder lo que no toca."""
+    rol, crudo = rol_de_la_peticion()
+    return jsonify(ok=True, rol=rol or "sin-rol", cabecera=crudo,
+                   usuario=request.headers.get("Remote-User", ""),
+                   email=request.headers.get("Remote-Email", ""),
+                   nombre=request.headers.get("Remote-Name", ""),
+                   puedeEscribir=bool(rol) and NIVEL_ROL.get(rol, 0) >= 2,
+                   local=not crudo)
+
+
+# Se envuelven TODAS las vistas que mutan datos de una vez, buscando por el mapa de
+# rutas: es un sitio único que revisar y no hay forma de olvidarse una ruta nueva.
+# Las tres previsualizaciones son POST pero no escriben, así que se saltan.
+for _regla in list(app.url_map.iter_rules()):
+    if not str(_regla).startswith("/api/") or str(_regla) in RUTAS_SOLO_LECTURA:
+        continue
+    if not (_regla.methods & {"POST", "PUT", "DELETE", "PATCH"}):
+        continue
+    _fn = app.view_functions.get(_regla.endpoint)
+    if _fn is not None and not getattr(_fn, "_rol_envuelto", False):
+        app.view_functions[_regla.endpoint] = requiere_rol("editor")(_fn)
 
 
 @app.get("/api/version")

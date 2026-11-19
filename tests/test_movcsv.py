@@ -1017,3 +1017,61 @@ def test_regresion_la_transferencia_sigue_igual():
                                           "importe": 50.0})
     assert motor.efecto_de(mov, eur["id"]) == -1
     assert motor.efecto_de(mov, usd["id"]) == 1
+
+
+# --------------------------------------------------------- control de accesos
+def test_sin_cabecera_en_local_se_es_admin(cliente_cuenta):
+    j = cliente_cuenta.get("/api/me").get_json()
+    assert j["rol"] == "admin" and j["puedeEscribir"] is True and j["local"] is True
+
+
+def test_member_es_viewer_y_no_puede_escribir(cliente_cuenta):
+    h = {"Remote-Role": "Member"}
+    j = cliente_cuenta.get("/api/me", headers=h).get_json()
+    assert j["rol"] == "viewer" and j["puedeEscribir"] is False
+    cid = cliente_cuenta.cuenta_id
+    r = cliente_cuenta.post(f"/api/cuentas/{cid}/recalcular-saldo", headers=h)
+    assert r.status_code == 403
+    assert "solo lectura" in " ".join(r.get_json()["errores"])
+
+
+def test_editor_puede_escribir(cliente_cuenta):
+    h = {"Remote-Role": "Editor"}
+    assert cliente_cuenta.get("/api/me", headers=h).get_json()["rol"] == "editor"
+    r = cliente_cuenta.post(f"/api/cuentas/{cliente_cuenta.cuenta_id}/recalcular-saldo", headers=h)
+    assert r.status_code == 200
+
+
+def test_admin_puede_escribir(cliente_cuenta):
+    h = {"Remote-Role": "Admin"}
+    assert cliente_cuenta.get("/api/me", headers=h).get_json()["rol"] == "admin"
+    r = cliente_cuenta.post(f"/api/cuentas/{cliente_cuenta.cuenta_id}/recalcular-saldo", headers=h)
+    assert r.status_code == 200
+
+
+def test_la_cabecera_se_lee_sin_importar_mayusculas(cliente_cuenta):
+    for v in ("editor", "EDITOR", "Editor"):
+        assert cliente_cuenta.get("/api/me", headers={"Remote-Role": v}).get_json()["rol"] == "editor"
+
+
+def test_un_rol_desconocido_se_queda_en_solo_lectura(cliente_cuenta):
+    j = cliente_cuenta.get("/api/me", headers={"Remote-Role": "Supervisor"}).get_json()
+    assert j["rol"] == "viewer" and j["puedeEscribir"] is False
+
+
+def test_en_produccion_sin_cabecera_se_rechaza(cliente_cuenta, monkeypatch):
+    monkeypatch.setenv("PATRIMONIO_ROL_OBLIGATORIO", "1")
+    j = cliente_cuenta.get("/api/me").get_json()
+    assert j["rol"] == "sin-rol" and j["puedeEscribir"] is False
+    r = cliente_cuenta.post(f"/api/cuentas/{cliente_cuenta.cuenta_id}/recalcular-saldo")
+    assert r.status_code == 403
+    assert "Remote-Role" in " ".join(r.get_json()["errores"])
+
+
+def test_las_previsualizaciones_no_escriben_y_valen_para_viewer(cliente_cuenta):
+    """Un POST de solo lectura no debe bloquearse a quien solo lee."""
+    h = {"Remote-Role": "Member"}
+    r = cliente_cuenta.post(f"/api/cuentas/{cliente_cuenta.cuenta_id}/movimientos/csv/previsualizar",
+                            json={"texto": "fecha,tipo,unidades,importe,comision,impuestos,nota\n"
+                                           "2026-10-01,deposito,,10.00,0,0,x\n"}, headers=h)
+    assert r.status_code == 200

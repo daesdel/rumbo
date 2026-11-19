@@ -2777,3 +2777,17 @@
     } catch (e) { /* sin servidor detrás (archivo suelto): no pasa nada */ }
   }, 120000);
 })();
+
+/* ---------------------------------------------------------- control de accesos
+   Pangolin pone el rol en la cabecera `Remote-Role`, y el servidor lo traduce a
+   admin / editor / viewer. Si es de solo lectura, se esconde lo que escribe; el
+   servidor lo vuelve a comprobar de todas formas (el CSS no es un candado). */
+(async () => {
+  try {
+    const r = await fetch("api/me", { headers: { Accept: "application/json" } });
+    if (!r.ok) return;
+    const j = await r.json();
+    window.ROL = j.rol;
+    if (j.rol && !j.puedeEscribir) document.documentElement.classList.add("solo-lectura");
+  } catch (e) { /* sin /api/me, la app se comporta como siempre */ }
+})();

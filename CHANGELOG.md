@@ -15,6 +15,53 @@ Todas las versiones de Rumbo, con su fecha y un resumen de lo que cambia.
 
 ---
 
+## V1.15 — 19 de noviembre de 2026
+
+**Control de accesos por rol con Pangolin.** La app deja de ser de todos: quien entra por
+`rumbo.daesdel.es` tiene un rol, y el rol decide qué puede tocar.
+
+- **Pangolin (SSO de plataforma) inyecta `Remote-Role`**; la app lo traduce a tres niveles:
+  **Admin → admin**, **Editor → editor**, **Member → viewer**. Se compara **sin distinguir
+  mayúsculas**.
+- **Jerarquía `viewer < editor < admin`** con el decorador `requiere_rol(minimo)`.
+- **Se protegen las 21 rutas que mutan datos de una vez**, recorriendo el `url_map`: es un
+  único sitio que revisar y **ninguna ruta nueva se queda fuera**. Se saltan las **tres
+  previsualizaciones**, que son POST pero no escriben.
+- **`GET /api/me`** devuelve rol, usuario, email, nombre y si puede escribir. La usa el
+  frontend para esconder lo que no toca.
+- **Fallo cerrado en producción**: sin cabecera, `PATRIMONIO_ROL_OBLIGATORIO=1` hace que la
+  petición se rechace con 403. Si Pangolin dejara de mandar la cabecera, el control **no se
+  apaga en silencio** — un candado, no un adorno.
+- **En local, sin cabecera, se es admin**: así los tests y el trabajo desde el portátil no
+  necesitan simular nada.
+- **Un rol desconocido cae en `viewer`**: si Pangolin cambia un nombre, lo peor que pasa es
+  que a alguien no le salga un botón, no que escriba sin permiso.
+- **El viewer conserva lo de leer**: abrir la ficha de una cuenta, ver sus movimientos,
+  anotaciones, exportar y descargar una copia. Se le esconden editar, borrar, importar CSV,
+  cambio de divisa y recalcular saldo.
+- **El CSS es cosmético**: el candado está en el servidor. Un viewer que llame a una ruta de
+  escritura recibe **403**.
+
+### Verificación
+
+- **314 tests** (8 nuevos): `/api/me` sin cabecera y con cada rol, Member → 403 al escribir,
+  Editor y Admin → 200, cabecera en mayúsculas o minúsculas, rol desconocido → viewer,
+  producción sin cabecera → 403, y las previsualizaciones siguen valiendo para un viewer.
+- **Navegador**: con `Member` la fila de una cuenta muestra **solo «Abrir ficha» y
+  «Movimientos»**, y la ficha abre; con `Editor`, los cuatro botones (`Abrir ficha`,
+  `Movimientos`, `Importar CSV`, `Editar`). 0 errores de consola.
+
+### Pendiente de confirmar
+
+La cabecera se asume `Remote-Role` con valores `Admin`/`Editor`/`Member` según la
+[documentación de Pangolin](https://docs.pangolin.net/manage/access-control/forwarded-headers).
+El código tolera mayúsculas y cae en `viewer` si el valor no se reconoce, pero **hay que
+verlo con el SSO real** una vez Pangolin quede solo con SSO de Plataforma (hoy el 401 de
+`rumbo.daesdel.es` es de Pangolin: tiene Autenticación Básica y PIN activos, que no inyectan
+`Remote-*`).
+
+---
+
 ## V1.14 — 6 de noviembre de 2026
 
 **Cambio de divisa entre dos cuentas.** Un solo movimiento que saca dinero de una cuenta en
